@@ -53,6 +53,7 @@ export function useSync(ctx: AddonContext) {
       let totalImported = 0;
       let totalSkipped = 0;
       let totalDuplicates = 0;
+      let hasStaleMapping = false;
 
       for (const [monzoAccountId, wealthfolioAccountId] of Object.entries(mapping)) {
         const { transactions } = await client.getTransactions(
@@ -71,7 +72,19 @@ export function useSync(ctx: AddonContext) {
         );
 
         const checked = await ctx.api.activities.checkImport(activities);
-        const toImport = checked.filter((a) => !a.duplicateOfId);
+        
+        // Separate valid and invalid activities
+        const validActivities = checked.filter((a) => a.isValid !== false);
+        const invalidActivities = checked.filter((a) => a.isValid === false);
+        
+        // If all activities are invalid due to "Record not found", mapping is stale
+        if (invalidActivities.length > 0 && validActivities.length === 0) {
+          hasStaleMapping = true;
+          continue;
+        }
+
+        // Import only valid, non-duplicate activities
+        const toImport = validActivities.filter((a) => !a.duplicateOfId);
 
         if (toImport.length > 0) {
           const result = await ctx.api.activities.import(toImport);
@@ -79,8 +92,18 @@ export function useSync(ctx: AddonContext) {
           totalSkipped += result.summary.skipped;
           totalDuplicates += result.summary.duplicates;
         } else {
-          totalDuplicates += checked.length;
+          totalDuplicates += validActivities.length;
         }
+        
+        // Count invalid activities as well
+        totalDuplicates += invalidActivities.length;
+      }
+
+      if (hasStaleMapping) {
+        throw new Error(
+          "Account mapping is out of date (mapped accounts were deleted). " +
+          "Open Settings to reconnect and re-create accounts."
+        );
       }
 
       const now = new Date().toISOString();

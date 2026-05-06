@@ -9,7 +9,6 @@ import {
   CardHeader,
   CardTitle,
 } from "@wealthfolio/ui";
-import React from "react";
 import { useSync } from "../hooks/use-sync";
 import { getTokens } from "../hooks/use-tokens";
 

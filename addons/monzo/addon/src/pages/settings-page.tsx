@@ -110,11 +110,11 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
         try {
           const newAcc = await ctx.api.accounts.create({
             name,
-            account_type: "CASH",
+            accountType: "CASH",
             currency,
-            is_default: false,
-            is_active: true,
-            tracking_mode: "TRANSACTIONS",
+            isDefault: false,
+            isActive: true,
+            trackingMode: "TRANSACTIONS",
           });
           newMapping[acc.id] = newAcc.id;
           created.push(name);

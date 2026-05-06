@@ -8,20 +8,15 @@ Automatically sync Monzo Bank cash transactions into Wealthfolio. Supports incre
 
 ## ⚠️ Before Deploying Code Changes
 
-**Always run tests first** to catch bugs like duplicate account creation and sync errors:
+**Always run tests first** to catch bugs before they reach production:
 
 ```bash
 cd addon
-npm install              # Includes test framework
-npm run test            # Run unit tests
-npm run type-check      # Check TypeScript
-npm run bundle          # Build addon
+npm install
+npm run test
+npm run type-check
+npm run bundle
 ```
-
-Tests verify:
-- ✅ Transaction mapping (all required fields, timestamps, currencies)
-- ✅ Sync logic (filters invalid/stale activities, detects errors)
-- ✅ Auto-create (no duplicates, handles existing accounts, cleans up stale mappings)
 
 ---
 
@@ -32,26 +27,26 @@ Tests verify:
 1. Go to [https://developers.monzo.com](https://developers.monzo.com) and sign in
 2. Click **"New OAuth Client"**
 3. Fill in:
-   - **Name**: Wealthfolio
-   - **Redirect URLs**: `http://YOUR_SERVER_IP:8001/callback` — must be your NAS/server IP, **not** `localhost` or `172.x.x.x`
+   - **Name**: Wealthfolio (or any name you prefer)
+   - **Redirect URLs**: `http://YOUR_SERVER_IP:8001/callback` — use your server's IP or hostname, **not** `localhost` or a Docker internal IP (`172.x.x.x`)
    - **Confidentiality**: Confidential
-4. Click **Submit** — copy your **Client ID** and **Client Secret**
+4. Click **Submit** — copy the **Client ID** and **Client Secret**
 
-> **Important**: The Redirect URL must exactly match the `REDIRECT_URI` you set in the proxy container. Even a trailing slash difference will cause "Woops! We couldn't identify..." errors.
+> **Important**: The redirect URL must exactly match the `REDIRECT_URI` set in the proxy container. Even a trailing slash difference will cause OAuth errors.
 
 ### 2. Deploy the Proxy
 
-Clone the repo to your server first:
+Clone the repo to your server:
 
 ```bash
-cd /mnt/user/appdata
+cd /path/to/your/appdata
 git clone https://github.com/dpremoli/MonzoAddOn.git monzo-proxy
 ```
 
 > If you get a credentials error, use a GitHub Personal Access Token:
 > `git clone https://YOUR_PAT@github.com/dpremoli/MonzoAddOn.git monzo-proxy`
 
-Then start the proxy container:
+Start the proxy container:
 
 ```bash
 docker run -d \
@@ -61,15 +56,15 @@ docker run -d \
   -e MONZO_CLIENT_ID="oauth2client_xxxx" \
   -e MONZO_CLIENT_SECRET="mnzconf.xxxx" \
   -e REDIRECT_URI="http://YOUR_SERVER_IP:8001/callback" \
-  -v /mnt/user/appdata/monzo-proxy:/app \
+  -v /path/to/your/appdata/monzo-proxy:/app \
   -w /app \
   python:3.11-slim \
   bash -c "pip install -r requirements.txt && uvicorn main:app --host 0.0.0.0 --port 8000"
 ```
 
-> We use port `8001` on the host (mapped to `8000` inside the container) to avoid conflicts. Adjust as needed.
+> Port `8001` on the host maps to `8000` inside the container. Adjust if needed.
 
-Test it:
+Verify it's running:
 ```bash
 curl http://YOUR_SERVER_IP:8001/health
 # Expected: {"status":"ok"}
@@ -77,25 +72,25 @@ curl http://YOUR_SERVER_IP:8001/health
 
 ### 3. Install the Addon in Wealthfolio
 
-Build the addon ZIP:
+Build the addon:
 
 ```bash
-cd /mnt/user/appdata/monzo-proxy/addon
+cd /path/to/your/appdata/monzo-proxy/addon
 npm install
-npm run test            # ← RUN TESTS FIRST
+npm run test            # Always run tests before deploying
 npm run bundle
-# Creates: dist/monzo-addon-1.0.0.zip
+# Creates: dist/monzo-addon-1.0.10.zip
 ```
 
 In Wealthfolio: **Settings → Add-ons → Install from ZIP** → select the ZIP file.
 
 ### 4. Connect & Sync
 
-1. Open **Monzo Sync** in the sidebar
+1. Open **Monzo Sync** in the Wealthfolio sidebar
 2. Click **Settings**
-3. Enter proxy URL: `http://YOUR_SERVER_IP:8001`
+3. Enter your proxy URL: `http://YOUR_SERVER_IP:8001`
 4. Click **Save**, then **Connect Monzo**
-5. Approve the connection in your **Monzo mobile app** (see note below)
+5. Approve the connection in your **Monzo mobile app** (required — see below)
 6. Wealthfolio accounts are created automatically for each Monzo account
 7. Return to the dashboard and click **Sync Now**
 
@@ -105,67 +100,88 @@ In Wealthfolio: **Settings → Add-ons → Install from ZIP** → select the ZIP
 
 ### "Woops! We couldn't identify who you'd like to connect..."
 
-This error comes from Monzo during OAuth. Causes:
+OAuth redirect URL mismatch. The URL in your Monzo developer app must exactly match `REDIRECT_URI` in your proxy container.
 
-- **Redirect URL mismatch**: The URL in your Monzo app settings must exactly match `REDIRECT_URI` in the proxy container. Check both with:
-  ```bash
-  docker exec monzo-proxy env | grep REDIRECT
-  ```
-- **Wrong IP**: Use your NAS/server IP (e.g. `192.168.1.x` or `nas.local`), never `172.x.x.x` (Docker internal) or `localhost`
+Check what the proxy is using:
+```bash
+docker exec monzo-proxy env | grep REDIRECT
+```
+
+Use your server's real IP or hostname — not `localhost` or a `172.x.x.x` Docker address.
+
+---
 
 ### Must approve in Monzo mobile app
 
-After clicking "Connect Monzo" and completing the browser OAuth flow, you **must open the Monzo app on your phone** and approve the connection. Until you do, the OAuth client stays in "NEW" status and all `/accounts` requests return 403.
+After completing the browser OAuth flow, you **must open the Monzo app on your phone** and approve the connection. Without this, the app stays in "NEW" status and all API calls return 403.
 
 Steps:
-1. Complete the OAuth flow in the browser
+1. Complete the OAuth flow in your browser
 2. Open the **Monzo app** on your phone
-3. You'll see a notification or prompt to approve the connection
-4. Tap **Approve**
-5. Go back to Wealthfolio — accounts should now load
+3. Approve the access request (you'll see a notification or prompt)
+4. Return to Wealthfolio — accounts will load automatically
+
+---
 
 ### Only 90 days of transactions sync
 
-This is a **Monzo API limitation**, not a bug. Monzo only returns transaction history from the last 90 days by default. There is no way to fetch older transactions via the API. Future syncs will be incremental from the last sync point.
+This is a **Monzo API limitation** — the API only returns the last 90 days of transactions. There is no way to retrieve older history via the API. Future syncs are incremental from the last sync point.
+
+---
 
 ### Proxy container crashes immediately (`requirements.txt not found`)
 
-The volume mount is empty — the repo wasn't cloned to the right location. Fix:
+The Docker volume is empty — the repo wasn't cloned before starting the container.
 
+Fix:
 ```bash
-# Stop and remove the broken container
 docker stop monzo-proxy && docker rm monzo-proxy
-
-# Clone the repo to the correct path
-rm -rf /mnt/user/appdata/monzo-proxy
-git clone https://github.com/dpremoli/MonzoAddOn.git /mnt/user/appdata/monzo-proxy
-
-# Then restart the container (use the run command from Step 2 above)
+rm -rf /path/to/your/appdata/monzo-proxy
+git clone https://github.com/dpremoli/MonzoAddOn.git /path/to/your/appdata/monzo-proxy
+# Then re-run the docker run command from Step 2
 ```
 
-### Settings page not opening from addon cards
+---
 
-Wealthfolio's Add-ons Manager cards are not clickable links to the addon UI. To access the Monzo addon settings, click **"Monzo Sync"** in the left sidebar, then click the **Settings** button in the top right of the page.
+### Settings page not accessible from addon cards
 
-### Sync shows wrong account balance
+The Wealthfolio Add-ons Manager card doesn't link to the addon UI. Instead:
+1. Click **Monzo Sync** in the left sidebar
+2. Click the **Settings** button in the top right
 
-Monzo only syncs the last 90 days of transactions. If your Wealthfolio account has no prior transactions, the balance will only reflect 90 days of activity. To set the correct opening balance, manually add a balance adjustment activity in Wealthfolio.
+---
 
-### Proxy 403 on /accounts after connecting
+### Sync shows incorrect account balance
 
-The token was not received after OAuth. Try:
+Monzo only syncs the last 90 days. If your account has older transactions, the balance will only reflect the synced period. To correct this, manually add an opening balance activity in Wealthfolio.
+
+---
+
+### 403 Forbidden after connecting
+
+Your tokens don't have the required permissions — usually because Monzo mobile approval is still pending.
+
+Fix:
 1. Go to Settings → **Disconnect**
 2. Click **Connect Monzo** again
-3. Complete the OAuth flow fully
-4. Approve in the Monzo mobile app
+3. Complete the OAuth flow and approve in the Monzo mobile app
 
-### Hundreds of duplicate accounts created
+---
 
-This was a bug in v1.0.9 where the auto-create effect ran multiple times concurrently. **Fixed in v1.0.10+**.
+### Duplicate empty accounts created
 
-If you're on an older version:
-1. **Manual cleanup**: Delete duplicate empty accounts in Wealthfolio (keep only the one with data)
-2. **Upgrade**: Pull latest code and run tests: `cd addon && npm test` before deploying
+This was a bug in versions before v1.0.10. If you have many empty accounts:
+
+1. In Wealthfolio → Accounts, delete all empty `Monzo (...)` accounts — keep only the one with transaction data
+2. Use SQLite to bulk-delete empty duplicates:
+   ```bash
+   sqlite3 /path/to/wealthfolio.db "
+   DELETE FROM accounts
+   WHERE name LIKE 'Monzo (%'
+   AND id NOT IN (SELECT DISTINCT account_id FROM activities);
+   "
+   ```
+3. Upgrade to v1.0.10+
 
 ---
 
@@ -182,13 +198,13 @@ If you're on an older version:
 5. **Environment Variables**:
    - `MONZO_CLIENT_ID` = your client ID
    - `MONZO_CLIENT_SECRET` = your client secret
-   - `REDIRECT_URI` = `http://nas.local:8001/callback` (or your NAS IP)
+   - `REDIRECT_URI` = `http://YOUR_NAS_IP:8001/callback`
 6. **Post Arguments**:
    ```
    bash -c "pip install -r requirements.txt && uvicorn main:app --host 0.0.0.0 --port 8000"
    ```
 
-> Make sure to clone the repo to `/mnt/user/appdata/monzo-proxy` before starting the container.
+> Clone the repo to `/mnt/user/appdata/monzo-proxy` before starting the container.
 
 ---
 
@@ -207,11 +223,11 @@ User approves in browser + approves in Monzo mobile app
   ↓
 Monzo → Proxy GET /callback?code=X&state=Y
   ↓
-Proxy exchanges code for tokens (using Client Secret)
+Proxy exchanges code for tokens (Client Secret stays server-side)
   ↓
 Addon polls Proxy GET /token-status?state=Y every 2s
   ↓
-Tokens returned → stored in Wealthfolio OS keyring
+Tokens stored in Wealthfolio OS keyring
 ```
 
 ### Sync Flow
@@ -219,14 +235,14 @@ Tokens returned → stored in Wealthfolio OS keyring
 ```
 User clicks "Sync Now"
   ↓
-Addon reads tokens from OS keyring
+Read tokens from OS keyring
   ↓
-If token expires in < 5 min → Proxy POST /refresh
+If token expired → Proxy POST /refresh
   ↓
 For each mapped account:
   - GET /transactions?account_id=X&since=last_sync
   - Filter: skip pending, skip pot transfers
-  - checkImport → detect duplicates & validate
+  - checkImport → detect duplicates & validate account IDs
   - import valid, non-duplicate activities
   ↓
 Update last_sync timestamp
@@ -246,43 +262,40 @@ Update last_sync timestamp
 
 ---
 
-## Development & Contributions
+## Development
 
-### Local Testing
+### Running Tests
 
 ```bash
 cd addon
 npm install
-npm run test            # Run all tests
-npm run test:ui         # Open test UI
-npm run type-check      # TypeScript checking
-npm run bundle          # Build addon ZIP
+npm run test            # Run all unit tests
+npm run test:watch      # Watch mode during development
+npm run type-check      # TypeScript validation
 ```
 
-### Critical Code (requires tests)
+Tests cover:
+- Transaction mapping (required fields, timestamps, currencies)
+- Sync logic (invalid activity filtering, stale mapping detection)
+- Auto-create duplicate prevention
 
-These files must have test coverage before changes:
-- `src/lib/mapper.ts` — Transaction mapping
-- `src/hooks/use-sync.ts` — Sync logic and validation
-- `src/pages/settings-page.tsx` — Account auto-creation
+### Critical Files (test before changing)
 
-### Update Addon on Server
+- `src/lib/mapper.ts` — transaction mapping logic
+- `src/hooks/use-sync.ts` — sync orchestration
+- `src/pages/settings-page.tsx` — auto-create account logic
+
+### Updating Addon on Server
 
 ```bash
-cd /mnt/user/appdata/monzo-proxy
+cd /path/to/appdata/monzo-proxy
 git pull origin main
 cd addon
-npm run test            # ← Always run tests first
+npm run test            # Always test first
 npm run bundle
-cp dist/addon.js /mnt/user/appdata/wealthfolio/addons/monzo-addon/addon.js
-cp manifest.json /mnt/user/appdata/wealthfolio/addons/monzo-addon/manifest.json
+cp dist/addon.js /path/to/wealthfolio/addons/monzo-addon/addon.js
+cp manifest.json /path/to/wealthfolio/addons/monzo-addon/manifest.json
 docker restart wealthfolio
-```
-
-### Proxy Logs
-
-```bash
-docker logs monzo-proxy --tail 50
 ```
 
 ### Project Structure
@@ -296,21 +309,21 @@ docker logs monzo-proxy --tail 50
 └── addon/
     ├── manifest.json
     ├── package.json
-    ├── vitest.config.ts        # Test runner config
+    ├── vitest.config.ts
     └── src/
         ├── addon.tsx           # Entry point + QueryClient setup
         ├── types.ts            # Monzo API types
         ├── lib/
         │   ├── proxy-client.ts # HTTP calls to proxy
-        │   ├── mapper.ts       # Monzo tx → Wealthfolio ActivityImport (+ tests)
+        │   ├── mapper.ts       # Monzo tx → ActivityImport (+ tests)
         │   └── mapper.test.ts
         ├── hooks/
         │   ├── use-tokens.ts   # Token storage (OS keyring)
         │   ├── use-sync.ts     # Sync orchestration (+ tests)
         │   └── use-sync.test.ts
         └── pages/
-            ├── dashboard-page.tsx     # Sync UI
-            ├── settings-page.tsx      # Config + account mapping (+ tests)
+            ├── dashboard-page.tsx
+            ├── settings-page.tsx      # Auto-create logic (+ tests)
             └── settings-page.test.ts
 ```
 
@@ -319,9 +332,9 @@ docker logs monzo-proxy --tail 50
 ## Security
 
 - **Client Secret** never leaves the proxy
-- **Tokens** stored in Wealthfolio OS keyring (encrypted), never on disk
-- **Proxy** is stateless — tokens held in memory only during the brief OAuth callback window
-- Never commit `.env` files or expose credentials
+- **Tokens** stored in Wealthfolio OS keyring (encrypted at rest)
+- **Proxy** is stateless — tokens held in memory only briefly during OAuth
+- Never commit `.env` — use `.env.example` as a template
 
 ---
 

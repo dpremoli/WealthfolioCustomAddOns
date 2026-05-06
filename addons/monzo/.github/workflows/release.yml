@@ -50,21 +50,6 @@ jobs:
           tag_name: ${{ github.event.inputs.version || github.ref_name }}
           name: Monzo Addon ${{ github.event.inputs.version || github.ref_name }}
           files: addon/monzo-addon.zip
-          body: |
-            ## Monzo Bank Sync Addon for Wealthfolio
-
-            ### Installation
-            1. Download `monzo-addon.zip` below
-            2. In Wealthfolio → Settings → Add-ons → Install from ZIP
-            3. Set up the proxy and configure the addon (see [README](https://github.com/dpremoli/MonzoAddOn#readme))
-
-            ### What's included
-            - `manifest.json` — addon metadata and permissions
-            - `dist/addon.js` — compiled addon bundle
-
-            ### Requirements
-            - Wealthfolio 3.3.0+
-            - Monzo Proxy running (see README for setup)
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

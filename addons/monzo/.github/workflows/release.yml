@@ -22,7 +22,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
 
       - name: Install dependencies
         working-directory: addon
@@ -64,7 +64,7 @@ jobs:
 
             ### Requirements
             - Wealthfolio 3.3.0+
-            - Monzo Proxy running (see README for Unraid setup)
+            - Monzo Proxy running (see README for setup)
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

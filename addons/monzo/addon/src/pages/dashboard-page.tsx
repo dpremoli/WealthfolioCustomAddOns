@@ -14,7 +14,6 @@ import { useSync } from "../hooks/use-sync";
 import { getTokens } from "../hooks/use-tokens";
 
 const LAST_SYNC_KEY = "monzo_last_sync";
-const MAPPING_KEY = "monzo_account_mapping";
 
 export default function DashboardPage({ ctx }: { ctx: AddonContext }) {
   const { isSyncing, lastResult, error, sync } = useSync(ctx);
@@ -32,23 +31,13 @@ export default function DashboardPage({ ctx }: { ctx: AddonContext }) {
     },
   });
 
-  const { data: hasMapping } = useQuery({
-    queryKey: ["monzo_mapping_exists"],
-    queryFn: async () => {
-      const raw = await ctx.api.secrets.get(MAPPING_KEY);
-      if (!raw) return false;
-      const mapping = JSON.parse(raw);
-      return Object.keys(mapping).length > 0;
-    },
-  });
-
   const lastSyncDisplay = lastSyncIso ? new Date(lastSyncIso).toLocaleString() : "Never";
 
   function openSettings() {
     ctx.api.navigation.navigate("/addons/monzo/settings");
   }
 
-  const canSync = !!tokens && !!hasMapping && !isSyncing;
+  const canSync = !!tokens && !isSyncing;
 
   return (
     <div className="space-y-6 p-6 max-w-2xl">
@@ -81,20 +70,6 @@ export default function DashboardPage({ ctx }: { ctx: AddonContext }) {
         </Card>
       )}
 
-      {tokens && !hasMapping && (
-        <Card className="border-amber-200 bg-amber-50">
-          <CardContent className="pt-6">
-            <p className="text-sm text-amber-800">
-              ⚠️ No account mapping configured.{" "}
-              <button className="underline font-medium" onClick={openSettings}>
-                Open Settings
-              </button>{" "}
-              to map your Monzo accounts.
-            </p>
-          </CardContent>
-        </Card>
-      )}
-
       <Card>
         <CardHeader>
           <CardTitle>Status</CardTitle>
@@ -114,7 +89,7 @@ export default function DashboardPage({ ctx }: { ctx: AddonContext }) {
               )}
             </div>
           )}
-          {!error && !isSyncing && !lastResult && tokens && hasMapping && (
+          {!error && !isSyncing && !lastResult && tokens && (
             <p className="text-sm text-muted-foreground">
               Ready to sync. Monzo syncs the last 90 days of transactions.
             </p>

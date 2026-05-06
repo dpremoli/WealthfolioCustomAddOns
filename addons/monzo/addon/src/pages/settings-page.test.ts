@@ -3,9 +3,9 @@ import { describe, it, expect } from 'vitest';
 describe('Auto-create account logic', () => {
   describe('duplicate prevention', () => {
     it('should not create duplicate accounts with same name', () => {
-      const wfAccounts = [{ id: 'acc-1', name: 'Monzo (43360705)' }];
+      const wfAccounts = [{ id: 'acc-1', name: 'Monzo (12345678)' }];
       const monzoAccounts = [
-        { id: 'monzo-1', account_number: '43360705', description: 'Current Account' },
+        { id: 'monzo-1', account_number: '12345678', description: 'Current Account' },
       ];
 
       const wfAccountNames = new Set(wfAccounts.map((a) => a.name));
@@ -33,18 +33,15 @@ describe('Auto-create account logic', () => {
 
       const executeAutoCreate = () => {
         if (autoCreatingRef.current) return;
-
         autoCreatingRef.current = true;
         executionCount++;
-        // In real code this is async; here we just verify the guard works synchronously
         autoCreatingRef.current = false;
       };
 
       executeAutoCreate();
-      // Simulate rapid re-renders: second and third calls happen while first is "running"
-      autoCreatingRef.current = true; // Simulate first still running
-      executeAutoCreate(); // Should be blocked
-      executeAutoCreate(); // Should be blocked
+      autoCreatingRef.current = true; // Simulate still running
+      executeAutoCreate(); // Blocked
+      executeAutoCreate(); // Blocked
       autoCreatingRef.current = false;
 
       expect(executionCount).toBe(1);
@@ -52,9 +49,9 @@ describe('Auto-create account logic', () => {
 
     it('should map unmapped Monzo accounts to existing Wealthfolio accounts', () => {
       const savedMapping: Record<string, string> = {};
-      const wfAccounts = [{ id: 'wf-1', name: 'Monzo (43360705)' }];
+      const wfAccounts = [{ id: 'wf-1', name: 'Monzo (12345678)' }];
       const monzoAccounts = [
-        { id: 'monzo-1', account_number: '43360705', description: 'Current' },
+        { id: 'monzo-1', account_number: '12345678', description: 'Current' },
       ];
 
       const newMapping: Record<string, string> = { ...savedMapping };
@@ -78,9 +75,9 @@ describe('Auto-create account logic', () => {
 
     it('should detect stale mappings pointing to deleted accounts', () => {
       const savedMapping: Record<string, string> = { 'monzo-1': 'wf-deleted-id' };
-      const wfAccounts = [{ id: 'wf-1', name: 'Monzo (43360705)' }];
+      const wfAccounts = [{ id: 'wf-1', name: 'Monzo (12345678)' }];
       const wfAccountIds = new Set(wfAccounts.map((a) => a.id));
-      const monzoAccounts = [{ id: 'monzo-1', account_number: '43360705' }];
+      const monzoAccounts = [{ id: 'monzo-1', account_number: '12345678' }];
 
       const unmapped = monzoAccounts.filter((acc) => {
         const mappedId = savedMapping[acc.id];

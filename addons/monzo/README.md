@@ -6,6 +6,25 @@ Automatically sync Monzo Bank cash transactions into Wealthfolio. Supports incre
 
 ---
 
+## ⚠️ Before Deploying Code Changes
+
+**Always run tests first** to catch bugs like duplicate account creation and sync errors:
+
+```bash
+cd addon
+npm install              # Includes test framework
+npm run test            # Run unit tests
+npm run type-check      # Check TypeScript
+npm run bundle          # Build addon
+```
+
+Tests verify:
+- ✅ Transaction mapping (all required fields, timestamps, currencies)
+- ✅ Sync logic (filters invalid/stale activities, detects errors)
+- ✅ Auto-create (no duplicates, handles existing accounts, cleans up stale mappings)
+
+---
+
 ## Quick Start
 
 ### 1. Create a Monzo OAuth App
@@ -63,6 +82,7 @@ Build the addon ZIP:
 ```bash
 cd /mnt/user/appdata/monzo-proxy/addon
 npm install
+npm run test            # ← RUN TESTS FIRST
 npm run bundle
 # Creates: dist/monzo-addon-1.0.0.zip
 ```
@@ -139,6 +159,14 @@ The token was not received after OAuth. Try:
 3. Complete the OAuth flow fully
 4. Approve in the Monzo mobile app
 
+### Hundreds of duplicate accounts created
+
+This was a bug in v1.0.9 where the auto-create effect ran multiple times concurrently. **Fixed in v1.0.10+**.
+
+If you're on an older version:
+1. **Manual cleanup**: Delete duplicate empty accounts in Wealthfolio (keep only the one with data)
+2. **Upgrade**: Pull latest code and run tests: `cd addon && npm test` before deploying
+
 ---
 
 ## Deployment (Unraid)
@@ -198,8 +226,8 @@ If token expires in < 5 min → Proxy POST /refresh
 For each mapped account:
   - GET /transactions?account_id=X&since=last_sync
   - Filter: skip pending, skip pot transfers
-  - checkImport → detect duplicates
-  - import non-duplicates
+  - checkImport → detect duplicates & validate
+  - import valid, non-duplicate activities
   ↓
 Update last_sync timestamp
 ```
@@ -218,16 +246,25 @@ Update last_sync timestamp
 
 ---
 
-## Development
+## Development & Contributions
 
-### Build the Addon
+### Local Testing
 
 ```bash
 cd addon
 npm install
-npm run build        # Creates dist/addon.js
-npm run bundle       # Creates dist/monzo-addon-1.0.0.zip
+npm run test            # Run all tests
+npm run test:ui         # Open test UI
+npm run type-check      # TypeScript checking
+npm run bundle          # Build addon ZIP
 ```
+
+### Critical Code (requires tests)
+
+These files must have test coverage before changes:
+- `src/lib/mapper.ts` — Transaction mapping
+- `src/hooks/use-sync.ts` — Sync logic and validation
+- `src/pages/settings-page.tsx` — Account auto-creation
 
 ### Update Addon on Server
 
@@ -235,6 +272,7 @@ npm run bundle       # Creates dist/monzo-addon-1.0.0.zip
 cd /mnt/user/appdata/monzo-proxy
 git pull origin main
 cd addon
+npm run test            # ← Always run tests first
 npm run bundle
 cp dist/addon.js /mnt/user/appdata/wealthfolio/addons/monzo-addon/addon.js
 cp manifest.json /mnt/user/appdata/wealthfolio/addons/monzo-addon/manifest.json
@@ -258,18 +296,22 @@ docker logs monzo-proxy --tail 50
 └── addon/
     ├── manifest.json
     ├── package.json
+    ├── vitest.config.ts        # Test runner config
     └── src/
         ├── addon.tsx           # Entry point + QueryClient setup
         ├── types.ts            # Monzo API types
         ├── lib/
         │   ├── proxy-client.ts # HTTP calls to proxy
-        │   └── mapper.ts       # Monzo tx → Wealthfolio ActivityImport
+        │   ├── mapper.ts       # Monzo tx → Wealthfolio ActivityImport (+ tests)
+        │   └── mapper.test.ts
         ├── hooks/
         │   ├── use-tokens.ts   # Token storage (OS keyring)
-        │   └── use-sync.ts     # Sync orchestration
+        │   ├── use-sync.ts     # Sync orchestration (+ tests)
+        │   └── use-sync.test.ts
         └── pages/
-            ├── dashboard-page.tsx  # Sync UI
-            └── settings-page.tsx   # Config + account mapping
+            ├── dashboard-page.tsx     # Sync UI
+            ├── settings-page.tsx      # Config + account mapping (+ tests)
+            └── settings-page.test.ts
 ```
 
 ---

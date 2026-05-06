@@ -1,5 +1,4 @@
 import {
-  useMutation,
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
@@ -13,7 +12,6 @@ import {
   CardHeader,
   CardTitle,
   Input,
-  Separator,
 } from "@wealthfolio/ui";
 import React, { useEffect, useRef, useState } from "react";
 import { clearTokens, getTokens, setTokens } from "../hooks/use-tokens";
@@ -38,6 +36,8 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
   const [autoCreateStatus, setAutoCreateStatus] = useState<string | null>(null);
   const [resetStatus, setResetStatus] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Prevents the auto-create effect from running concurrently
+  const autoCreatingRef = useRef(false);
 
   const { data: savedProxyUrl } = useQuery({
     queryKey: ["monzo_proxy_url"],
@@ -78,13 +78,16 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
     },
   });
 
-  // Auto-create Wealthfolio accounts for Monzo accounts (runs on every login/account change)
+  // Auto-create Wealthfolio accounts for unmapped/stale Monzo accounts
   useEffect(() => {
-    if (!monzoAccountsData?.accounts?.length || !wfAccounts || !savedMapping) return;
+    // Guard: don't run concurrently (prevents duplicate creation on rapid re-renders)
+    if (autoCreatingRef.current) return;
+    if (!monzoAccountsData?.accounts?.length || !wfAccounts || savedMapping === undefined) return;
 
     const wfAccountIds = new Set(wfAccounts.map((a) => a.id));
+    // Track names already in Wealthfolio to avoid duplicates within a single run
+    const wfAccountNames = new Set(wfAccounts.map((a) => a.name));
 
-    // Find Monzo accounts that are either unmapped or have mappings pointing to deleted accounts
     const unmapped = monzoAccountsData.accounts.filter((acc) => {
       const mappedId = savedMapping[acc.id];
       return !mappedId || !wfAccountIds.has(mappedId);
@@ -92,44 +95,54 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
 
     if (unmapped.length === 0) return;
 
+    autoCreatingRef.current = true;
+
     (async () => {
-      const newMapping: AccountMapping = { ...savedMapping };
-      const created: string[] = [];
+      try {
+        const newMapping: AccountMapping = { ...savedMapping };
+        const created: string[] = [];
 
-      for (const acc of unmapped) {
-        const name = monzoAccountName(acc);
-        const currency = acc.currency || "GBP";
+        for (const acc of unmapped) {
+          const name = monzoAccountName(acc);
+          const currency = acc.currency || "GBP";
 
-        // Reuse existing account if name already matches
-        const existing = wfAccounts.find((a) => a.name === name);
-        if (existing) {
-          newMapping[acc.id] = existing.id;
-          continue;
+          // Reuse existing account if name already matches
+          const existing = wfAccounts.find((a) => a.name === name);
+          if (existing) {
+            newMapping[acc.id] = existing.id;
+            continue;
+          }
+
+          // Skip if this name was already created in this run
+          if (wfAccountNames.has(name)) continue;
+
+          try {
+            const newAcc = await ctx.api.accounts.create({
+              name,
+              accountType: "CASH",
+              currency,
+              isDefault: false,
+              isActive: true,
+              trackingMode: "TRANSACTIONS",
+            });
+            newMapping[acc.id] = newAcc.id;
+            wfAccountNames.add(name);
+            created.push(name);
+          } catch (err) {
+            ctx.api.logger.error(`Failed to create account ${name}: ${(err as Error).message}`);
+          }
         }
 
-        try {
-          const newAcc = await ctx.api.accounts.create({
-            name,
-            accountType: "CASH",
-            currency,
-            isDefault: false,
-            isActive: true,
-            trackingMode: "TRANSACTIONS",
-          });
-          newMapping[acc.id] = newAcc.id;
-          created.push(name);
-        } catch (err) {
-          ctx.api.logger.error(`Failed to create account ${name}: ${(err as Error).message}`);
+        if (created.length > 0 || JSON.stringify(newMapping) !== JSON.stringify(savedMapping)) {
+          await ctx.api.secrets.set(MAPPING_KEY, JSON.stringify(newMapping));
+          // Only invalidate mapping — NOT wf_accounts (that would re-trigger this effect)
+          queryClient.invalidateQueries({ queryKey: ["monzo_mapping"] });
+          if (created.length > 0) {
+            setAutoCreateStatus(`Created: ${created.join(", ")}`);
+          }
         }
-      }
-
-      // Save if we created new accounts or cleaned up stale mappings
-      if (created.length > 0 || JSON.stringify(newMapping) !== JSON.stringify(savedMapping)) {
-        await ctx.api.secrets.set(MAPPING_KEY, JSON.stringify(newMapping));
-        queryClient.invalidateQueries({ queryKey: ["monzo_mapping"] });
-        if (created.length > 0) {
-          setAutoCreateStatus(`Created: ${created.join(", ")}`);
-        }
+      } finally {
+        autoCreatingRef.current = false;
       }
     })();
   }, [monzoAccountsData, wfAccounts, savedMapping]);

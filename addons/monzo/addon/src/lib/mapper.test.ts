@@ -8,7 +8,7 @@ describe('mapTransactionToActivity', () => {
       id: 'tx_001',
       created: '2026-05-01T14:30:00.000Z',
       settled: '2026-05-01T14:30:00.000Z',
-      amount: -2500, // GBP cents
+      amount: -2500,
       currency: 'GBP',
       description: 'Coffee Shop',
       notes: '',
@@ -22,12 +22,12 @@ describe('mapTransactionToActivity', () => {
     expect(activity.id).toBe('tx_001');
     expect(activity.accountId).toBe('acc-123');
     expect(activity.activityType).toBe('WITHDRAWAL');
-    expect(activity.amount).toBe(25.0); // Converted to GBP
+    expect(activity.amount).toBe(25.0);
     expect(activity.currency).toBe('GBP');
     expect(activity.symbol).toBe('GBP');
     expect(activity.isValid).toBe(true);
     expect(activity.isDraft).toBe(false);
-    // Date should be ISO timestamp, not just date
+    // Must be full ISO timestamp, not just a date (fixes 1am display bug)
     expect(activity.date).toBe('2026-05-01T14:30:00.000Z');
   });
 
@@ -36,7 +36,7 @@ describe('mapTransactionToActivity', () => {
       id: 'tx_002',
       created: '2026-05-02T09:15:00.000Z',
       settled: '2026-05-02T09:15:00.000Z',
-      amount: 100000, // GBP cents (£1000)
+      amount: 100000,
       currency: 'GBP',
       description: 'Salary',
       notes: '',
@@ -51,7 +51,7 @@ describe('mapTransactionToActivity', () => {
     expect(activity.amount).toBe(1000.0);
   });
 
-  it('should include merchant details in comment', () => {
+  it('should include merchant name and category in comment', () => {
     const tx: MonzoTransaction = {
       id: 'tx_003',
       created: '2026-05-03T12:00:00.000Z',
@@ -60,7 +60,7 @@ describe('mapTransactionToActivity', () => {
       currency: 'GBP',
       description: 'Restaurant',
       notes: '',
-      category: 'eating_out',
+      category: 'eating_out', // Formatted as "Eating Out" in the comment
       is_load: false,
       metadata: {},
       merchant: {
@@ -76,8 +76,8 @@ describe('mapTransactionToActivity', () => {
     const activity = mapTransactionToActivity(tx, 'acc-123');
 
     expect(activity.comment).toContain("Mario's Pizza");
+    expect(activity.comment).toContain('Eating Out'); // tx.category formatted, not merchant.category
     expect(activity.comment).toContain('London');
-    expect(activity.comment).toContain('Restaurant'); // Category formatted
   });
 
   it('should include foreign currency info in comment', () => {
@@ -101,13 +101,13 @@ describe('mapTransactionToActivity', () => {
     expect(activity.comment).toContain('EUR 45.00');
   });
 
-  it('should handle missing currency gracefully', () => {
+  it('should default to GBP when currency is missing', () => {
     const tx: MonzoTransaction = {
       id: 'tx_005',
       created: '2026-05-05T10:00:00.000Z',
       settled: '2026-05-05T10:00:00.000Z',
       amount: -1000,
-      currency: '', // Empty currency
+      currency: '',
       description: 'Unknown currency',
       notes: '',
       category: 'general',
@@ -117,7 +117,7 @@ describe('mapTransactionToActivity', () => {
 
     const activity = mapTransactionToActivity(tx, 'acc-123');
 
-    expect(activity.currency).toBe('GBP'); // Defaults to GBP
+    expect(activity.currency).toBe('GBP');
     expect(activity.symbol).toBe('GBP');
   });
 });

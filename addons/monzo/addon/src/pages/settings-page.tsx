@@ -13,7 +13,7 @@ import {
   CardTitle,
   Input,
 } from "@wealthfolio/ui";
-import React, { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { clearTokens, getTokens, setTokens } from "../hooks/use-tokens";
 import { MonzoProxyClient } from "../lib/proxy-client";
 import type { AccountMapping, MonzoAccount } from "../types";
@@ -234,7 +234,7 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
             <Input
               value={proxyUrl}
               onChange={(e) => setProxyUrl(e.target.value)}
-              placeholder="http://localhost:8000"
+              placeholder="http://YOUR_SERVER_IP:8001"
               className="flex-1"
             />
             <Button onClick={saveProxyUrl} disabled={isSavingProxy || !proxyUrl.trim()}>

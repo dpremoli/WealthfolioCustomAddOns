@@ -1,0 +1,44 @@
+{
+  "name": "monzo-addon",
+  "version": "1.0.0",
+  "description": "Sync Monzo Bank transactions into Wealthfolio cash accounts",
+  "type": "module",
+  "main": "dist/addon.js",
+  "author": "dpremoli",
+  "license": "MIT",
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite build --watch",
+    "dev:server": "wealthfolio dev",
+    "clean": "rm -rf dist",
+    "package": "mkdir -p dist && zip -r dist/$npm_package_name-$npm_package_version.zip manifest.json dist/ README.md",
+    "bundle": "npm run clean && npm run build && npm run package",
+    "type-check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@tanstack/react-query": "^5.90.20",
+    "@wealthfolio/addon-sdk": "^3.3.0",
+    "@wealthfolio/ui": "^3.3.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.1.18",
+    "@types/node": "^20.19.33",
+    "@types/react": "^19.2.13",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.1.4",
+    "rollup-plugin-external-globals": "^0.13.0",
+    "tailwind-merge": "^3.4.0",
+    "tailwindcss": "^4.1.18",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.1"
+  },
+  "peerDependencies": {
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4"
+  },
+  "files": [
+    "dist/",
+    "manifest.json",
+    "README.md"
+  ]
+}

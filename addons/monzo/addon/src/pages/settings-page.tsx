@@ -13,12 +13,6 @@ import {
   CardHeader,
   CardTitle,
   Input,
-  Label,
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
   Separator,
 } from "@wealthfolio/ui";
 import React, { useEffect, useRef, useState } from "react";
@@ -84,13 +78,7 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
     },
   });
 
-  const [mapping, setMapping] = useState<AccountMapping>({});
-
-  useEffect(() => {
-    if (savedMapping) setMapping(savedMapping);
-  }, [savedMapping]);
-
-  // Auto-create Wealthfolio accounts for Monzo accounts that have no mapping or stale mappings
+  // Auto-create Wealthfolio accounts for Monzo accounts (runs on every login/account change)
   useEffect(() => {
     if (!monzoAccountsData?.accounts?.length || !wfAccounts || !savedMapping) return;
 
@@ -138,21 +126,13 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
       // Save if we created new accounts or cleaned up stale mappings
       if (created.length > 0 || JSON.stringify(newMapping) !== JSON.stringify(savedMapping)) {
         await ctx.api.secrets.set(MAPPING_KEY, JSON.stringify(newMapping));
-        setMapping(newMapping);
         queryClient.invalidateQueries({ queryKey: ["monzo_mapping"] });
         if (created.length > 0) {
-          setAutoCreateStatus(`Auto-created: ${created.join(", ")}`);
+          setAutoCreateStatus(`Created: ${created.join(", ")}`);
         }
       }
     })();
   }, [monzoAccountsData, wfAccounts, savedMapping]);
-
-  const saveMappingMutation = useMutation({
-    mutationFn: (m: AccountMapping) =>
-      ctx.api.secrets.set(MAPPING_KEY, JSON.stringify(m)),
-    onSuccess: () =>
-      queryClient.invalidateQueries({ queryKey: ["monzo_mapping"] }),
-  });
 
   async function saveProxyUrl() {
     setIsSavingProxy(true);
@@ -222,8 +202,6 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
     };
   }, []);
 
-  const monzoAccounts = monzoAccountsData?.accounts ?? [];
-
   return (
     <div className="space-y-6 p-6 max-w-2xl">
       <div>
@@ -256,20 +234,27 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
       <Card>
         <CardHeader>
           <CardTitle>Monzo Connection</CardTitle>
-          <CardDescription>Connect your Monzo account via OAuth.</CardDescription>
+          <CardDescription>
+            Connect your Monzo account. Accounts will be created automatically.
+          </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
           {tokens ? (
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Badge variant="outline" className="text-green-600 border-green-600">
-                  Connected
-                </Badge>
-                <span className="text-sm text-muted-foreground">Monzo account linked</span>
+            <div>
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2">
+                  <Badge variant="outline" className="text-green-600 border-green-600">
+                    Connected
+                  </Badge>
+                  <span className="text-sm text-muted-foreground">Monzo account linked</span>
+                </div>
+                <Button variant="outline" size="sm" onClick={disconnect}>
+                  Disconnect
+                </Button>
               </div>
-              <Button variant="outline" size="sm" onClick={disconnect}>
-                Disconnect
-              </Button>
+              {autoCreateStatus && (
+                <p className="text-sm text-green-600">{autoCreateStatus}</p>
+              )}
             </div>
           ) : (
             <div className="space-y-2">
@@ -286,54 +271,6 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
           )}
         </CardContent>
       </Card>
-
-      {monzoAccounts.length > 0 && (
-        <Card>
-          <CardHeader>
-            <CardTitle>Account Mapping</CardTitle>
-            <CardDescription>
-              Link each Monzo account to a Wealthfolio cash account.
-              New accounts are created automatically.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            {autoCreateStatus && (
-              <p className="text-sm text-green-600">{autoCreateStatus}</p>
-            )}
-            {monzoAccounts.map((monzoAcc) => (
-              <div key={monzoAcc.id} className="flex items-center gap-3">
-                <Label className="w-44 shrink-0 text-sm truncate">
-                  {monzoAccountName(monzoAcc)}
-                </Label>
-                <Select
-                  value={mapping[monzoAcc.id] ?? ""}
-                  onValueChange={(val) =>
-                    setMapping((prev) => ({ ...prev, [monzoAcc.id]: val }))
-                  }
-                >
-                  <SelectTrigger className="flex-1">
-                    <SelectValue placeholder="Select Wealthfolio account" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {wfAccounts.map((wfAcc) => (
-                      <SelectItem key={wfAcc.id} value={wfAcc.id}>
-                        {wfAcc.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-            ))}
-            <Separator />
-            <Button
-              onClick={() => saveMappingMutation.mutate(mapping)}
-              disabled={saveMappingMutation.isPending}
-            >
-              {saveMappingMutation.isPending ? "Saving…" : "Save Mapping"}
-            </Button>
-          </CardContent>
-        </Card>
-      )}
 
       <Card>
         <CardHeader>

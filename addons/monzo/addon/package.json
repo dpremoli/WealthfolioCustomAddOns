@@ -5,7 +5,7 @@
   "type": "module",
   "main": "dist/addon.js",
   "author": "dpremoli",
-  "license": "MIT",
+  "license": "SEE LICENSE IN LICENSE",
   "scripts": {
     "build": "vite build",
     "dev": "vite build --watch",

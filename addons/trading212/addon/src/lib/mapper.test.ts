@@ -1,0 +1,116 @@
+import { describe, it, expect } from "vitest";
+import {
+  mapDividendToActivity,
+  mapOrderToActivity,
+  mapTransactionToActivity,
+} from "./mapper";
+import type { DividendItem, HistoricalOrder, TransactionItem } from "../types";
+
+describe("mapOrderToActivity", () => {
+  const baseOrder: HistoricalOrder = {
+    order: {
+      id: 555,
+      side: "BUY",
+      currency: "USD",
+      instrument: { ticker: "AAPL_US_EQ", isin: "US0378331005", name: "Apple Inc" },
+    },
+    fill: {
+      type: "TRADE",
+      filledAt: "2026-04-01T10:00:00.000Z",
+      price: 170.5,
+      quantity: 3,
+      walletImpact: { currency: "USD", fxRate: 1.27, taxes: [{ quantity: 0.5 }] },
+    },
+  };
+
+  it("maps a buy order to a BUY activity", () => {
+    const a = mapOrderToActivity(baseOrder, "acc-1", "AAPL")!;
+    expect(a.activityType).toBe("BUY");
+    expect(a.id).toBe("t212-order-555");
+    expect(a.quantity).toBe(3);
+    expect(a.unitPrice).toBe(170.5);
+    expect(a.symbol).toBe("AAPL");
+    expect(a.currency).toBe("USD");
+    expect(a.fee).toBe(0.5);
+    expect(a.fxRate).toBe(1.27);
+    expect(a.date).toBe("2026-04-01T10:00:00.000Z");
+  });
+
+  it("maps a sell order to a SELL activity", () => {
+    const sell: HistoricalOrder = { ...baseOrder, order: { ...baseOrder.order!, side: "SELL" } };
+    expect(mapOrderToActivity(sell, "acc-1", "AAPL")!.activityType).toBe("SELL");
+  });
+
+  it("skips non-trade fills (e.g. stock splits)", () => {
+    const split: HistoricalOrder = { ...baseOrder, fill: { ...baseOrder.fill!, type: "STOCK_SPLIT" } };
+    expect(mapOrderToActivity(split, "acc-1", "AAPL")).toBeNull();
+  });
+
+  it("skips orders without a price or quantity", () => {
+    const bad: HistoricalOrder = { ...baseOrder, fill: { ...baseOrder.fill!, price: undefined } };
+    expect(mapOrderToActivity(bad, "acc-1", "AAPL")).toBeNull();
+  });
+});
+
+describe("mapDividendToActivity", () => {
+  const div: DividendItem = {
+    ticker: "AAPL_US_EQ",
+    reference: "DIV123",
+    type: "ORDINARY",
+    amount: 12.34,
+    currency: "GBP",
+    paidOn: "2026-03-15T00:00:00.000Z",
+  };
+
+  it("maps an ordinary dividend to a DIVIDEND activity", () => {
+    const a = mapDividendToActivity(div, "acc-1", "AAPL");
+    expect(a.activityType).toBe("DIVIDEND");
+    expect(a.id).toBe("t212-div-DIV123");
+    expect(a.amount).toBe(12.34);
+    expect(a.symbol).toBe("AAPL");
+    expect(a.currency).toBe("GBP");
+    expect(a.comment).toBe("Ordinary");
+  });
+
+  it("maps interest to an INTEREST activity with no symbol", () => {
+    const a = mapDividendToActivity({ ...div, type: "INTEREST", reference: "INT1" }, "acc-1", null);
+    expect(a.activityType).toBe("INTEREST");
+    expect(a.symbol).toBeUndefined();
+  });
+});
+
+describe("mapTransactionToActivity", () => {
+  const base: TransactionItem = {
+    type: "DEPOSIT",
+    amount: 1000,
+    currency: "GBP",
+    dateTime: "2026-01-02T08:00:00.000Z",
+    reference: "TXN1",
+  };
+
+  it("maps a deposit", () => {
+    const a = mapTransactionToActivity(base, "acc-1");
+    expect(a.activityType).toBe("DEPOSIT");
+    expect(a.amount).toBe(1000);
+    expect(a.id).toBe("t212-txn-TXN1");
+  });
+
+  it("maps a withdrawal (WITHDRAW) with a positive amount", () => {
+    const a = mapTransactionToActivity({ ...base, type: "WITHDRAW", amount: -500 }, "acc-1");
+    expect(a.activityType).toBe("WITHDRAWAL");
+    expect(a.amount).toBe(500);
+  });
+
+  it("maps a fee", () => {
+    expect(mapTransactionToActivity({ ...base, type: "FEE" }, "acc-1").activityType).toBe("FEE");
+  });
+
+  it("maps transfers by sign", () => {
+    expect(
+      mapTransactionToActivity({ ...base, type: "TRANSFER", amount: 50 }, "acc-1").activityType,
+    ).toBe("TRANSFER_IN");
+    expect(
+      mapTransactionToActivity({ ...base, type: "TRANSFER", amount: -50 }, "acc-1").activityType,
+    ).toBe("TRANSFER_OUT");
+  });
+});

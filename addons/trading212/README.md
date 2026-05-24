@@ -7,7 +7,8 @@ Wealthfolio activity type, with tickers matched to Wealthfolio symbols automatic
 
 **Architecture**: a tiny **stateless** proxy (solves the browser CORS restriction)
 + a TypeScript/React addon that runs inside Wealthfolio and holds your API key in
-the OS keyring.
+the OS keyring. For a developer deep-dive (data flow, modules, design decisions),
+see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ---
 

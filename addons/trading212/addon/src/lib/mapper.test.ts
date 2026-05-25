@@ -72,10 +72,10 @@ describe("mapDividendToActivity", () => {
     expect(a.comment).toBe("Ordinary");
   });
 
-  it("maps interest to an INTEREST activity with no symbol", () => {
+  it("maps interest to an INTEREST activity with a $CASH symbol", () => {
     const a = mapDividendToActivity({ ...div, type: "INTEREST", reference: "INT1" }, "acc-1", null);
     expect(a.activityType).toBe("INTEREST");
-    expect(a.symbol).toBeUndefined();
+    expect(a.symbol).toBe("$CASH-GBP");
   });
 });
 
@@ -93,6 +93,7 @@ describe("mapTransactionToActivity", () => {
     expect(a.activityType).toBe("DEPOSIT");
     expect(a.amount).toBe(1000);
     expect(a.id).toBe("t212-txn-TXN1");
+    expect(a.symbol).toBe("$CASH-GBP");
   });
 
   it("maps a withdrawal (WITHDRAW) with a positive amount", () => {

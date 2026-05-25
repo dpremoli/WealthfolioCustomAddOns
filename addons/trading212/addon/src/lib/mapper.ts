@@ -78,7 +78,7 @@ export function mapDividendToActivity(
     accountId,
     activityType: isInterest ? INTEREST : DIVIDEND,
     date: div.paidOn,
-    symbol: isInterest ? undefined : symbol || undefined,
+    symbol: isInterest ? `$CASH-${currency}` : symbol || undefined,
     amount: round2(Math.abs(div.amount)),
     currency,
     isValid: true,
@@ -109,13 +109,15 @@ export function mapTransactionToActivity(
       break;
   }
 
+  const currency = txn.currency || "GBP";
   return {
     id: `t212-txn-${txn.reference}`,
     accountId,
     activityType,
     date: txn.dateTime,
+    symbol: `$CASH-${currency}`,
     amount: round2(Math.abs(txn.amount)),
-    currency: txn.currency || "GBP",
+    currency,
     isValid: true,
     isDraft: false,
   };

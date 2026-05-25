@@ -252,12 +252,12 @@ describe("mapCsvRow", () => {
   });
 
   describe("INTEREST", () => {
-    it("maps interest on cash (no symbol)", async () => {
+    it("maps interest on cash with a $CASH symbol", async () => {
       const act = await mapCsvRow(cashRow("Interest on cash", { Total: "5.00", ID: "INT1" }), ACC, makeResolver());
       expect(act!.activityType).toBe("INTEREST");
       expect(act!.id).toBe("t212-txn-INT1");
       expect(act!.amount).toBe(5);
-      expect(act!.symbol).toBeUndefined();
+      expect(act!.symbol).toBe("$CASH-GBP");
     });
 
     it("maps lending interest", async () => {
@@ -273,6 +273,7 @@ describe("mapCsvRow", () => {
       expect(act!.amount).toBe(1000);
       expect(act!.id).toBe("t212-txn-DEP1");
       expect(act!.currency).toBe("GBP");
+      expect(act!.symbol).toBe("$CASH-GBP");
     });
   });
 
@@ -281,6 +282,7 @@ describe("mapCsvRow", () => {
       const act = await mapCsvRow(cashRow("Withdrawal", { Total: "500", ID: "WD1" }), ACC, makeResolver());
       expect(act!.activityType).toBe("WITHDRAWAL");
       expect(act!.amount).toBe(500);
+      expect(act!.symbol).toBe("$CASH-GBP");
     });
   });
 

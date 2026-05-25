@@ -120,6 +120,12 @@ describe("useSync — JSON incremental path", () => {
     const state = JSON.parse(secrets.get("t212_sync_c1")!);
     expect(state.lastSync).toBeTruthy();
     expect(state.importedRefs).toContain("t212-order-1");
+
+    // Verbose log is captured for the UI.
+    const lg = result.current.results!.perAccount[0].log.join("\n");
+    expect(lg).toContain("Incremental sync");
+    expect(lg).toContain("Mapped 1 activities");
+    expect(lg).toContain("1 imported");
   });
 
   it("adaptively halves batches the backend rejects, importing everything", async () => {

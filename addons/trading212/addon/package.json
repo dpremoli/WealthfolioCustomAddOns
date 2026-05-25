@@ -1,6 +1,6 @@
 {
   "name": "trading212-addon",
-  "version": "1.5.5",
+  "version": "1.5.6",
   "description": "Sync Trading 212 investment activity into Wealthfolio",
   "type": "module",
   "main": "dist/addon.js",

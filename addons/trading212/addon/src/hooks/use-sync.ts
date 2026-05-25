@@ -159,7 +159,8 @@ async function syncOne(
   conn: T212Connection,
   resolver: SymbolResolver,
 ): Promise<SyncResult> {
-  const base = { connectionId: conn.id, accountId: conn.accountId, accountName: conn.name };
+  const log: string[] = [];
+  const base = { connectionId: conn.id, accountId: conn.accountId, accountName: conn.name, log };
   try {
     const client = new Trading212ProxyClient(connectionConfig(settings, conn));
     const { lastSync: since } = await getSyncState(ctx, conn.id);
@@ -169,6 +170,7 @@ async function syncOne(
     let unresolved: number;
 
     if (since === null) {
+      log.push("Full backfill (no previous sync) via CSV export.");
       // ── CSV backfill (full history) ──────────────────────────────────────
       // Trading 212 caps each export at ~1 year, so request (or reuse) one-year
       // windows back from now and stop after two consecutive empty windows.
@@ -192,18 +194,24 @@ async function syncOne(
           ),
         );
 
+        const windowLabel = `${windowStart.toISOString().slice(0, 10)}→${windowEnd
+          .toISOString()
+          .slice(0, 10)}`;
+
         let csv: string;
         try {
           csv = await client.runExport({
             timeFrom: windowStart.toISOString(),
             timeTo: windowEnd.toISOString(),
           });
-        } catch {
+        } catch (e) {
+          log.push(`Window ${windowLabel}: export failed (${errDetail(e)})`);
           if (w === 0) exportFailed = true; // couldn't retrieve any history
           break;
         }
 
         const rows = parseCsv(csv);
+        log.push(`Window ${windowLabel}: ${rows.length} rows`);
         if (rows.length === 0) {
           if (++emptyStreak >= 2) break; // assume no older history
           windowEnd = windowStart;
@@ -235,6 +243,7 @@ async function syncOne(
 
       if (exportFailed) {
         // CSV unavailable — use JSON paging for the initial full sync.
+        log.push("CSV export unavailable → falling back to JSON paging.");
         ({ activities, unresolved } = await collectJsonActivities(
           client,
           null,
@@ -248,6 +257,7 @@ async function syncOne(
       }
     } else {
       // ── JSON incremental (since last watermark) ──────────────────────────
+      log.push(`Incremental sync since ${since}.`);
       ({ activities, unresolved } = await collectJsonActivities(
         client,
         since,
@@ -256,6 +266,19 @@ async function syncOne(
         resolver,
       ));
     }
+
+    // Activity-type breakdown of what we're about to import.
+    const tally: Record<string, number> = {};
+    for (const a of activities) {
+      const k = String(a.activityType);
+      tally[k] = (tally[k] ?? 0) + 1;
+    }
+    const breakdown =
+      Object.entries(tally)
+        .map(([k, v]) => `${v} ${k}`)
+        .join(", ") || "none";
+    log.push(`Mapped ${activities.length} activities: ${breakdown}.`);
+    if (unresolved > 0) log.push(`${unresolved} rows skipped (symbol not matched).`);
 
     // ── Common import tail ───────────────────────────────────────────────
     // Wealthfolio's checkImport/import rejects oversized batches with a 422. The
@@ -323,6 +346,10 @@ async function syncOne(
 
     await setLastSync(ctx, conn.id, new Date().toISOString());
 
+    log.push(
+      `Import: ${imported} imported, ${duplicates} duplicates, ${invalidCount} invalid.`,
+    );
+
     // Nothing imported but some rows were flagged invalid — surface why.
     if (imported === 0 && invalidCount > 0) {
       return {
@@ -340,6 +367,7 @@ async function syncOne(
       (err as Error).message === "UNAUTHORIZED"
         ? "Trading 212 rejected this API key. Check it in Settings."
         : (err as Error).message;
+    log.push(`Error: ${message}`);
     return { ...base, imported: 0, duplicates: 0, unresolved: 0, error: message };
   }
 }

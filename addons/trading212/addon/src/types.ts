@@ -173,6 +173,7 @@ export interface SyncResult {
   duplicates: number;
   unresolved: number; // activities skipped because no symbol match was found
   error?: string; // set if this connection failed; others still sync
+  log: string[]; // verbose diagnostic lines, surfaced in the UI
 }
 
 export interface MultiSyncResult {

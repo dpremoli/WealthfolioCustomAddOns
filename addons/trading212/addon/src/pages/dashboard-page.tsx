@@ -121,6 +121,14 @@ export default function DashboardPage({ ctx }: { ctx: AddonContext }) {
               {!r && !isSyncing && (
                 <p className="text-sm text-muted-foreground">Ready to sync.</p>
               )}
+              {r && r.log && r.log.length > 0 && (
+                <details className="text-xs text-muted-foreground">
+                  <summary className="cursor-pointer select-none">Details</summary>
+                  <pre className="mt-2 whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed">
+                    {r.log.join("\n")}
+                  </pre>
+                </details>
+              )}
             </CardContent>
           </Card>
         );

@@ -307,32 +307,26 @@ const FINISHED_REPORT = {
 };
 
 describe("useSync — CSV export / hybrid path", () => {
-  it("uses CSV export for initial full backfill (lastSync == null)", async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: false });
-
-    let listExportsCount = 0;
+  it("walks back in one-year windows, stopping after empty windows", async () => {
+    // A finished report covers every requested window, so each runExport reuses it
+    // immediately (no poll). The relay returns data for the first window and an empty
+    // (header-only) CSV after, so the backfill stops once two windows come back empty.
+    let downloadCount = 0;
     vi.stubGlobal(
       "fetch",
-      vi.fn(async (url: string, opts?: RequestInit) => {
+      vi.fn(async (url: string) => {
         const u = String(url);
-        const method = ((opts?.method as string | undefined) ?? "GET").toUpperCase();
-
         if (u.includes("/export-download")) {
+          downloadCount++;
           return {
             ok: true,
             status: 200,
-            text: async () => SAMPLE_CSV,
+            text: async () => (downloadCount === 1 ? SAMPLE_CSV : CSV_HDR),
             headers: { get: () => null },
           } as unknown as Response;
         }
-        if (u.includes("/exports") && method === "POST") {
-          return jsonResponse({ reportId: 1 });
-        }
         if (u.includes("/exports")) {
-          listExportsCount++;
-          // First call (upfront reuse check): no existing reports.
-          // Subsequent polls: report is finished.
-          return jsonResponse(listExportsCount === 1 ? [] : [FINISHED_REPORT]);
+          return jsonResponse([FINISHED_REPORT]); // covers all windows → reused
         }
         return routeFetch(u);
       }),
@@ -345,17 +339,14 @@ describe("useSync — CSV export / hybrid path", () => {
     const { result } = renderHook(() => useSync(ctx as any));
 
     await act(async () => {
-      const syncPromise = result.current.syncAll();
-      // Advance past the 65 s poll interval inside runExport while sync is in flight.
-      await vi.advanceTimersByTimeAsync(70_000);
-      await syncPromise;
+      await result.current.syncAll();
     });
-
-    vi.useRealTimers();
 
     expect(result.current.error).toBeNull();
     expect(importFn).toHaveBeenCalledTimes(1);
     expect(result.current.results?.totals.imported).toBe(1);
+    // First window had data; the next two were empty → walk stopped (3 downloads).
+    expect(downloadCount).toBe(3);
 
     const state = JSON.parse(secrets.get("t212_sync_c1")!);
     expect(state.lastSync).toBeTruthy();

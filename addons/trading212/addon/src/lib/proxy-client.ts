@@ -225,3 +225,21 @@ export function cursorFromNextPage(nextPagePath: string | null | undefined): str
   if (q === -1) return null;
   return new URLSearchParams(nextPagePath.slice(q + 1)).get("cursor");
 }
+
+/**
+ * Extracts both `cursor` and `time` from a transactions `nextPagePath`. Trading 212's
+ * transactions endpoint requires either both of these together or neither, so they must
+ * be carried as a pair when paging.
+ */
+export function transactionPageParams(
+  nextPagePath: string | null | undefined,
+): { cursor?: string; time?: string } {
+  if (!nextPagePath) return {};
+  const q = nextPagePath.indexOf("?");
+  if (q === -1) return {};
+  const sp = new URLSearchParams(nextPagePath.slice(q + 1));
+  return {
+    cursor: sp.get("cursor") ?? undefined,
+    time: sp.get("time") ?? undefined,
+  };
+}

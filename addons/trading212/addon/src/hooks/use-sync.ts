@@ -10,7 +10,7 @@ import type {
   T212Settings,
   TransactionItem,
 } from "../types";
-import { Trading212ProxyClient, cursorFromNextPage } from "../lib/proxy-client";
+import { Trading212ProxyClient, cursorFromNextPage, transactionPageParams } from "../lib/proxy-client";
 import {
   mapDividendToActivity,
   mapOrderToActivity,
@@ -42,6 +42,10 @@ const PAGE_GUARD = 500; // hard cap on pages per endpoint
 // oversized batches with a 422; oversized chunks are adaptively halved at runtime.
 const IMPORT_CHUNK_SIZE = 20;
 
+// Trading 212 caps each CSV export at ~1 year, so a full backfill walks back in
+// one-year windows. Caps the walk so a sparse history can't loop forever.
+const MAX_EXPORT_WINDOWS = 15;
+
 /** Pages a cursor endpoint newest-first, stopping once records predate `since`. */
 async function collectSince<T>(
   pageFn: (cursor?: string) => Promise<Paginated<T>>,
@@ -64,22 +68,27 @@ async function collectSince<T>(
   return out;
 }
 
-/** Transactions support a server-side `time` filter, so we page from `since` forward. */
+/**
+ * Pages transactions newest-first, stopping once records predate `since`.
+ * Trading 212's transactions endpoint requires `cursor` and `time` together (or
+ * neither), so the first page sends neither and later pages carry both from the
+ * returned `nextPagePath` — sending one without the other is a 400.
+ */
 async function collectTransactions(
   client: Trading212ProxyClient,
   since: string | null,
 ): Promise<TransactionItem[]> {
   const out: TransactionItem[] = [];
-  let cursor: string | undefined;
+  let params: { cursor?: string; time?: string } = {};
   for (let i = 0; i < PAGE_GUARD; i++) {
-    const page = await client.pageTransactions({
-      cursor,
-      time: cursor ? undefined : since || undefined,
-    });
-    out.push(...(page.items ?? []));
-    const next = cursorFromNextPage(page.nextPagePath);
-    if (!next) break;
-    cursor = next;
+    const page = await client.pageTransactions(params);
+    for (const t of page.items ?? []) {
+      if (since && t.dateTime && t.dateTime <= since) return out;
+      out.push(t);
+    }
+    const next = transactionPageParams(page.nextPagePath);
+    if (!next.cursor) break;
+    params = next;
   }
   return out;
 }
@@ -161,22 +170,55 @@ async function syncOne(
 
     if (since === null) {
       // ── CSV backfill (full history) ──────────────────────────────────────
-      // Falls back to JSON paging if the export fails or times out.
-      let csvText: string | null = null;
-      try {
-        csvText = await client.runExport();
-      } catch {
-        // intentional: fall through to JSON paging
-      }
+      // Trading 212 caps each export at ~1 year, so request (or reuse) one-year
+      // windows back from now and stop after two consecutive empty windows.
+      // Falls back to JSON paging if even the first window's export fails.
+      const mapped: ActivityImport[] = [];
+      const seen = new Set<string>();
+      let csvUnresolved = 0;
+      let exportFailed = false;
 
-      if (csvText !== null) {
-        const rows = parseCsv(csvText);
-        const mapped: ActivityImport[] = [];
-        let csvUnresolved = 0;
+      let windowEnd = new Date();
+      let emptyStreak = 0;
+      for (let w = 0; w < MAX_EXPORT_WINDOWS; w++) {
+        const windowStart = new Date(
+          Date.UTC(
+            windowEnd.getUTCFullYear() - 1,
+            windowEnd.getUTCMonth(),
+            windowEnd.getUTCDate(),
+            windowEnd.getUTCHours(),
+            windowEnd.getUTCMinutes(),
+            windowEnd.getUTCSeconds(),
+          ),
+        );
+
+        let csv: string;
+        try {
+          csv = await client.runExport({
+            timeFrom: windowStart.toISOString(),
+            timeTo: windowEnd.toISOString(),
+          });
+        } catch {
+          if (w === 0) exportFailed = true; // couldn't retrieve any history
+          break;
+        }
+
+        const rows = parseCsv(csv);
+        if (rows.length === 0) {
+          if (++emptyStreak >= 2) break; // assume no older history
+          windowEnd = windowStart;
+          continue;
+        }
+        emptyStreak = 0;
+
         for (const row of rows) {
           const act = await mapCsvRow(row, conn.accountId, resolver);
           if (act) {
-            if (!importedRefs.has(act.id ?? "")) mapped.push(act);
+            const id = act.id ?? "";
+            if (id && !seen.has(id) && !importedRefs.has(id)) {
+              seen.add(id);
+              mapped.push(act);
+            }
           } else {
             // Count failed symbol lookups as unresolved (not unknown actions or splits).
             const a = (row["Action"] ?? "").toLowerCase();
@@ -188,9 +230,10 @@ async function syncOne(
             }
           }
         }
-        activities = mapped;
-        unresolved = csvUnresolved;
-      } else {
+        windowEnd = windowStart;
+      }
+
+      if (exportFailed) {
         // CSV unavailable — use JSON paging for the initial full sync.
         ({ activities, unresolved } = await collectJsonActivities(
           client,
@@ -199,6 +242,9 @@ async function syncOne(
           conn.accountId,
           resolver,
         ));
+      } else {
+        activities = mapped;
+        unresolved = csvUnresolved;
       }
     } else {
       // ── JSON incremental (since last watermark) ──────────────────────────

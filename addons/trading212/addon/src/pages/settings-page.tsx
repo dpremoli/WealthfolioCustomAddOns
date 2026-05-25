@@ -19,6 +19,7 @@ import {
   getConnections,
   getSettings,
   migrateLegacyConfig,
+  randomId,
   removeConnection,
   resetSyncState,
   setSettings,
@@ -215,7 +216,7 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
       const accountId = await ensureAccount(ctx, name.trim(), summary);
 
       await addConnection(ctx, {
-        id: crypto.randomUUID(),
+        id: randomId(),
         name: name.trim(),
         apiKey: apiKey.trim(),
         apiSecret: apiSecret.trim() || undefined,

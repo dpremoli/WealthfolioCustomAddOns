@@ -19,6 +19,21 @@ export const KEYS = {
 
 const syncKey = (id: string) => `t212_sync_${id}`;
 
+/** Generates a unique id. Wealthfolio's webview lacks crypto.randomUUID (it
+ *  requires a secure context), so fall back to getRandomValues, then Math.random. */
+export function randomId(): string {
+  const c = (globalThis as { crypto?: Crypto }).crypto;
+  if (c?.randomUUID) return c.randomUUID();
+  if (c?.getRandomValues) {
+    const b = c.getRandomValues(new Uint8Array(16));
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    const h = [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
+    return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+  }
+  return `t212-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 function parse<T>(raw: string | null, fallback: T): T {
   if (!raw) return fallback;
   try {
@@ -151,7 +166,7 @@ export async function migrateLegacyConfig(ctx: AddonContext): Promise<void> {
 
   await setSettings(ctx, { proxyUrl: legacy.proxyUrl, env: legacy.env });
 
-  const id = crypto.randomUUID();
+  const id = randomId();
   await addConnection(ctx, {
     id,
     name: "Trading 212 (Invest)",

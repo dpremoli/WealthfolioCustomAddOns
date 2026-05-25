@@ -38,18 +38,33 @@ interface Conn {
   accountId: string;
 }
 
+type SyncStateMap = Record<string, { lastSync: string | null; importedRefs: string[] }>;
+
 function makeCtx(opts: {
   connections?: Conn[];
   checkImport?: (a: ActivityImport[]) => Promise<ActivityImport[]>;
   searchTicker?: () => Promise<unknown[]>;
+  syncStates?: SyncStateMap;
 }) {
   const connections = opts.connections ?? [
     { id: "c1", name: "Trading 212 (Invest)", apiKey: "k", apiSecret: "s", accountId: "acc-1" },
   ];
+
   const secrets = new Map<string, string>([
     ["t212_settings", JSON.stringify({ proxyUrl: "http://proxy", env: "demo" })],
     ["t212_connections", JSON.stringify(connections)],
   ]);
+
+  // Pre-populate per-connection sync states. Defaults to a past lastSync so existing
+  // tests drive the JSON incremental path without needing to mock the export endpoints.
+  // Pass syncStates: { c1: { lastSync: null, importedRefs: [] } } to trigger CSV path.
+  for (const conn of connections) {
+    const state = opts.syncStates?.[conn.id] ?? {
+      lastSync: "2026-01-01T00:00:00.000Z",
+      importedRefs: [],
+    };
+    secrets.set(`t212_sync_${conn.id}`, JSON.stringify(state));
+  }
 
   const importFn = vi.fn(async (acts: ActivityImport[]) => ({
     summary: { imported: acts.length, skipped: 0, duplicates: 0 },
@@ -79,7 +94,7 @@ function makeCtx(opts: {
 
 // --- tests ---------------------------------------------------------------
 
-describe("useSync", () => {
+describe("useSync — JSON incremental path", () => {
   beforeEach(() => {
     vi.stubGlobal("fetch", vi.fn(async (url: string) => routeFetch(String(url))));
   });
@@ -182,5 +197,123 @@ describe("useSync", () => {
     expect(first.error).toBeTruthy();
     expect(second.error).toBeUndefined();
     expect(second.imported).toBe(1);
+  });
+});
+
+// --- CSV export / hybrid path -------------------------------------------
+
+const CSV_HDR =
+  "Action,Time,ISIN,Ticker,Name,No. of shares,Price / share,Currency (Price / share)," +
+  "Exchange rate,Total,Currency (Total),Withholding tax,Currency (Withholding tax)," +
+  "Charge amount,Currency (Charge amount),Notes,ID," +
+  "Currency conversion fee,Currency (Currency conversion fee)";
+
+const CSV_DEPOSIT_ROW =
+  "Deposit,2025-01-01T08:00:00.000Z,,,,,,,,1000,GBP,0,GBP,0,GBP,,DEP1,0,GBP";
+
+const SAMPLE_CSV = `${CSV_HDR}\n${CSV_DEPOSIT_ROW}`;
+
+const FINISHED_REPORT = {
+  reportId: 1,
+  status: "Finished",
+  downloadLink: "https://test.amazonaws.com/export.csv",
+  timeFrom: "2020-01-01T00:00:00Z",
+  timeTo: "2026-12-31T00:00:00Z",
+  dataIncluded: {
+    includeDividends: true,
+    includeInterest: true,
+    includeOrders: true,
+    includeTransactions: true,
+  },
+};
+
+describe("useSync — CSV export / hybrid path", () => {
+  it("uses CSV export for initial full backfill (lastSync == null)", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: false });
+
+    let listExportsCount = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, opts?: RequestInit) => {
+        const u = String(url);
+        const method = ((opts?.method as string | undefined) ?? "GET").toUpperCase();
+
+        if (u.includes("/export-download")) {
+          return {
+            ok: true,
+            status: 200,
+            text: async () => SAMPLE_CSV,
+            headers: { get: () => null },
+          } as unknown as Response;
+        }
+        if (u.includes("/exports") && method === "POST") {
+          return jsonResponse({ reportId: 1 });
+        }
+        if (u.includes("/exports")) {
+          listExportsCount++;
+          // First call (upfront reuse check): no existing reports.
+          // Subsequent polls: report is finished.
+          return jsonResponse(listExportsCount === 1 ? [] : [FINISHED_REPORT]);
+        }
+        return routeFetch(u);
+      }),
+    );
+
+    const { ctx, importFn, secrets } = makeCtx({
+      syncStates: { c1: { lastSync: null, importedRefs: [] } },
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { result } = renderHook(() => useSync(ctx as any));
+
+    await act(async () => {
+      const syncPromise = result.current.syncAll();
+      // Advance past the 65 s poll interval inside runExport while sync is in flight.
+      await vi.advanceTimersByTimeAsync(70_000);
+      await syncPromise;
+    });
+
+    vi.useRealTimers();
+
+    expect(result.current.error).toBeNull();
+    expect(importFn).toHaveBeenCalledTimes(1);
+    expect(result.current.results?.totals.imported).toBe(1);
+
+    const state = JSON.parse(secrets.get("t212_sync_c1")!);
+    expect(state.lastSync).toBeTruthy();
+    expect(state.importedRefs).toContain("t212-txn-DEP1");
+  });
+
+  it("falls back to JSON paging when the export fails", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, opts?: RequestInit) => {
+        const u = String(url);
+        const method = ((opts?.method as string | undefined) ?? "GET").toUpperCase();
+
+        if (u.includes("/exports") && method === "GET") {
+          return jsonResponse([]); // no existing reports
+        }
+        if (u.includes("/exports") && method === "POST") {
+          // Simulate export service error → runExport throws → fallback to JSON
+          return { ok: false, status: 500, text: async () => "Error", headers: { get: () => null } } as unknown as Response;
+        }
+        return routeFetch(u); // JSON paging returns the ORDER fixture
+      }),
+    );
+
+    const { ctx, importFn } = makeCtx({
+      syncStates: { c1: { lastSync: null, importedRefs: [] } },
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { result } = renderHook(() => useSync(ctx as any));
+
+    await act(async () => {
+      await result.current.syncAll();
+    });
+
+    expect(result.current.error).toBeNull();
+    // JSON fallback imported the ORDER fixture
+    expect(importFn).toHaveBeenCalledTimes(1);
+    expect(result.current.results?.totals.imported).toBe(1);
   });
 });

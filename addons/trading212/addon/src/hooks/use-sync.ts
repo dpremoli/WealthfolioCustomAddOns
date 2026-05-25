@@ -16,6 +16,7 @@ import {
   mapOrderToActivity,
   mapTransactionToActivity,
 } from "../lib/mapper";
+import { parseCsv, mapCsvRow } from "../lib/csv";
 import { SymbolResolver } from "../lib/symbol-resolver";
 import {
   addImportedRefs,
@@ -79,6 +80,65 @@ async function collectTransactions(
   return out;
 }
 
+/** Fetches and maps all activities for a connection via the JSON paging endpoints. */
+async function collectJsonActivities(
+  client: Trading212ProxyClient,
+  since: string | null,
+  importedRefs: Set<string>,
+  accountId: string,
+  resolver: SymbolResolver,
+): Promise<{ activities: ActivityImport[]; unresolved: number }> {
+  const orders = await collectSince<HistoricalOrder>(
+    (c) => client.pageOrders(c),
+    (o) => o.fill?.filledAt || o.order?.createdAt,
+    since,
+  );
+  const dividends = await collectSince<DividendItem>(
+    (c) => client.pageDividends(c),
+    (d) => d.paidOn,
+    since,
+  );
+  const transactions = await collectTransactions(client, since);
+
+  const activities: ActivityImport[] = [];
+  let unresolved = 0;
+
+  for (const ho of orders) {
+    const o = ho.order;
+    if (!o || o.id === undefined) continue;
+    if (importedRefs.has(`t212-order-${o.id}`)) continue;
+    const ticker = o.instrument?.ticker;
+    if (!ticker) continue;
+    const symbol = await resolver.resolve(ticker, o.instrument);
+    if (!symbol) {
+      unresolved++;
+      continue;
+    }
+    const activity = mapOrderToActivity(ho, accountId, symbol);
+    if (activity) activities.push(activity);
+  }
+
+  for (const d of dividends) {
+    if (importedRefs.has(`t212-div-${d.reference}`)) continue;
+    let symbol: string | null = null;
+    if (d.type !== "INTEREST") {
+      symbol = d.ticker ? await resolver.resolve(d.ticker, d.instrument) : null;
+      if (!symbol) {
+        unresolved++;
+        continue;
+      }
+    }
+    activities.push(mapDividendToActivity(d, accountId, symbol));
+  }
+
+  for (const t of transactions) {
+    if (importedRefs.has(`t212-txn-${t.reference}`)) continue;
+    activities.push(mapTransactionToActivity(t, accountId));
+  }
+
+  return { activities, unresolved };
+}
+
 /** Syncs one connection into its linked Wealthfolio account. */
 async function syncOne(
   ctx: AddonContext,
@@ -92,56 +152,62 @@ async function syncOne(
     const { lastSync: since } = await getSyncState(ctx, conn.id);
     const importedRefs = await getImportedRefs(ctx, conn.id);
 
-    const [orders, dividends, transactions] = [
-      await collectSince<HistoricalOrder>(
-        (c) => client.pageOrders(c),
-        (o) => o.fill?.filledAt || o.order?.createdAt,
-        since,
-      ),
-      await collectSince<DividendItem>(
-        (c) => client.pageDividends(c),
-        (d) => d.paidOn,
-        since,
-      ),
-      await collectTransactions(client, since),
-    ];
+    let activities: ActivityImport[];
+    let unresolved: number;
 
-    const activities: ActivityImport[] = [];
-    let unresolved = 0;
-
-    for (const ho of orders) {
-      const o = ho.order;
-      if (!o || o.id === undefined) continue;
-      if (importedRefs.has(`t212-order-${o.id}`)) continue;
-      const ticker = o.instrument?.ticker;
-      if (!ticker) continue;
-      const symbol = await resolver.resolve(ticker, o.instrument);
-      if (!symbol) {
-        unresolved++;
-        continue; // can't import a trade without a resolved symbol
+    if (since === null) {
+      // ── CSV backfill (full history) ──────────────────────────────────────
+      // Falls back to JSON paging if the export fails or times out.
+      let csvText: string | null = null;
+      try {
+        csvText = await client.runExport();
+      } catch {
+        // intentional: fall through to JSON paging
       }
-      const activity = mapOrderToActivity(ho, conn.accountId, symbol);
-      if (activity) activities.push(activity);
-    }
 
-    for (const d of dividends) {
-      if (importedRefs.has(`t212-div-${d.reference}`)) continue;
-      let symbol: string | null = null;
-      if (d.type !== "INTEREST") {
-        symbol = d.ticker ? await resolver.resolve(d.ticker, d.instrument) : null;
-        if (!symbol) {
-          unresolved++;
-          continue;
+      if (csvText !== null) {
+        const rows = parseCsv(csvText);
+        const mapped: ActivityImport[] = [];
+        let csvUnresolved = 0;
+        for (const row of rows) {
+          const act = await mapCsvRow(row, conn.accountId, resolver);
+          if (act) {
+            if (!importedRefs.has(act.id ?? "")) mapped.push(act);
+          } else {
+            // Count failed symbol lookups as unresolved (not unknown actions or splits).
+            const a = (row["Action"] ?? "").toLowerCase();
+            if (
+              row["Ticker"]?.trim() &&
+              (a.endsWith(" buy") || a.endsWith(" sell") || a.startsWith("dividend"))
+            ) {
+              csvUnresolved++;
+            }
+          }
         }
+        activities = mapped;
+        unresolved = csvUnresolved;
+      } else {
+        // CSV unavailable — use JSON paging for the initial full sync.
+        ({ activities, unresolved } = await collectJsonActivities(
+          client,
+          null,
+          importedRefs,
+          conn.accountId,
+          resolver,
+        ));
       }
-      activities.push(mapDividendToActivity(d, conn.accountId, symbol));
+    } else {
+      // ── JSON incremental (since last watermark) ──────────────────────────
+      ({ activities, unresolved } = await collectJsonActivities(
+        client,
+        since,
+        importedRefs,
+        conn.accountId,
+        resolver,
+      ));
     }
 
-    for (const t of transactions) {
-      if (importedRefs.has(`t212-txn-${t.reference}`)) continue;
-      activities.push(mapTransactionToActivity(t, conn.accountId));
-    }
-
+    // ── Common import tail ───────────────────────────────────────────────
     let imported = 0;
     let duplicates = 0;
     if (activities.length > 0) {

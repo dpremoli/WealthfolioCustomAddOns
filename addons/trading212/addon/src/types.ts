@@ -139,6 +139,32 @@ export interface Paginated<T> {
   nextPagePath: string | null;
 }
 
+// POST /api/v0/equity/history/exports — request body
+export interface ExportDataIncluded {
+  includeDividends: boolean;
+  includeInterest: boolean;
+  includeOrders: boolean;
+  includeTransactions: boolean;
+}
+
+export interface ExportRequest {
+  dataIncluded: ExportDataIncluded;
+  timeFrom?: string; // ISO 8601
+  timeTo?: string;
+}
+
+export type ExportStatus = "Queued" | "Processing" | "Running" | "Canceled" | "Failed" | "Finished";
+
+// GET /api/v0/equity/history/exports — array item
+export interface ExportReport {
+  reportId: number;
+  timeFrom: string;
+  timeTo: string;
+  dataIncluded: ExportDataIncluded;
+  status: ExportStatus;
+  downloadLink?: string;
+}
+
 export interface SyncResult {
   connectionId: string;
   accountId: string;

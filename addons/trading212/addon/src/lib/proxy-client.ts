@@ -1,6 +1,8 @@
 import type {
   AccountSummary,
   DividendItem,
+  ExportReport,
+  ExportRequest,
   HistoricalOrder,
   Paginated,
   Position,
@@ -30,6 +32,33 @@ function buildAuthHeader(config: T212Config): string {
 
 export class Trading212ProxyClient {
   constructor(private readonly config: T212Config) {}
+
+  private async post<T>(endpoint: string, body: unknown): Promise<T> {
+    const url = new URL(`${this.config.proxyUrl.replace(/\/$/, "")}/${endpoint}`);
+    url.searchParams.set("env", this.config.env);
+    const headers = {
+      Authorization: buildAuthHeader(this.config),
+      "Content-Type": "application/json",
+    };
+    for (let attempt = 0; ; attempt++) {
+      const resp = await fetch(url.toString(), {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+      });
+      if (resp.status === 429) {
+        if (attempt >= MAX_429_RETRIES)
+          throw new Error("Trading 212 rate limit exceeded. Try again shortly.");
+        await sleep(this.retryDelayMs(resp));
+        continue;
+      }
+      if (resp.status === 401) throw new Error("UNAUTHORIZED");
+      if (!resp.ok)
+        throw new Error(`Trading 212 request failed (${resp.status}): ${await resp.text()}`);
+      const text = await resp.text();
+      return (text.trim() ? (JSON.parse(text) as T) : ({} as T));
+    }
+  }
 
   private async get<T>(
     endpoint: string,
@@ -102,6 +131,90 @@ export class Trading212ProxyClient {
       time: opts.time,
       limit: opts.limit ?? 50,
     });
+  }
+
+  requestExport(req: ExportRequest): Promise<{ reportId: number }> {
+    return this.post<{ reportId: number }>("exports", req);
+  }
+
+  listExports(): Promise<ExportReport[]> {
+    return this.get<ExportReport[]>("exports");
+  }
+
+  /** Downloads a signed export CSV via the proxy relay. No Authorization header is sent
+   *  to the storage host — the signed URL is self-authenticating. */
+  async downloadExportCsv(downloadLink: string): Promise<string> {
+    const url = new URL(`${this.config.proxyUrl.replace(/\/$/, "")}/export-download`);
+    url.searchParams.set("url", downloadLink);
+    // Deliberately no Authorization header here — signed URL, not the T212 API.
+    const resp = await fetch(url.toString());
+    if (!resp.ok) throw new Error(`Export download failed (${resp.status})`);
+    return resp.text();
+  }
+
+  /**
+   * Requests a full-history CSV export from Trading 212, polls until finished,
+   * and returns the raw CSV text.
+   *
+   * Reuses an already-Finished report if one exists, or waits on an in-flight one,
+   * before POSTing a new request — respects the 1/30s POST and 1/min list rate limits.
+   *
+   * @param opts       Optional timeFrom / timeTo to scope the export.
+   * @param pollMs     Milliseconds between status polls (default 65 s — 1/min limit).
+   */
+  async runExport(
+    opts: { timeFrom?: string; timeTo?: string } = {},
+    pollMs = 65_000,
+  ): Promise<string> {
+    const covers = (r: ExportReport) =>
+      (!opts.timeFrom || r.timeFrom <= opts.timeFrom) &&
+      (!opts.timeTo || r.timeTo >= opts.timeTo);
+
+    // Reuse an existing finished report if it covers the requested range.
+    const existing = await this.listExports();
+    const done = existing.find((r) => r.status === "Finished" && r.downloadLink && covers(r));
+    if (done?.downloadLink) return this.downloadExportCsv(done.downloadLink);
+
+    // Wait on an in-progress report rather than POSTing a duplicate.
+    const inFlight = existing.find(
+      (r) =>
+        (r.status === "Queued" || r.status === "Processing" || r.status === "Running") &&
+        covers(r),
+    );
+
+    let reportId: number;
+    if (inFlight) {
+      reportId = inFlight.reportId;
+    } else {
+      const req: ExportRequest = {
+        dataIncluded: {
+          includeDividends: true,
+          includeInterest: true,
+          includeOrders: true,
+          includeTransactions: true,
+        },
+        timeFrom: opts.timeFrom,
+        timeTo: opts.timeTo,
+      };
+      const result = await this.requestExport(req);
+      reportId = result.reportId;
+    }
+
+    // Poll until the report finishes or we hit the 10-minute cap.
+    const deadline = Date.now() + 10 * 60 * 1000;
+    while (Date.now() < deadline) {
+      await sleep(pollMs);
+      const reports = await this.listExports();
+      const report = reports.find((r) => r.reportId === reportId);
+      if (!report) continue;
+      if (report.status === "Finished" && report.downloadLink) {
+        return this.downloadExportCsv(report.downloadLink);
+      }
+      if (report.status === "Failed" || report.status === "Canceled") {
+        throw new Error(`Trading 212 export ${report.status.toLowerCase()}`);
+      }
+    }
+    throw new Error("Trading 212 export timed out after 10 minutes");
   }
 }
 

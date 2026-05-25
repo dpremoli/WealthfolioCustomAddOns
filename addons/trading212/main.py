@@ -28,6 +28,16 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # Without this the browser cannot read the rate-limit headers, so the
+    # add-on can't honor x-ratelimit-reset and backs off too little on 429.
+    expose_headers=[
+        "x-ratelimit-limit",
+        "x-ratelimit-remaining",
+        "x-ratelimit-reset",
+        "x-ratelimit-period",
+        "x-ratelimit-used",
+        "retry-after",
+    ],
 )
 
 # env -> upstream base URL. Fixed allow-list prevents SSRF.

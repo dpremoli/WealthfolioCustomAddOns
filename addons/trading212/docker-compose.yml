@@ -15,10 +15,10 @@ services:
     command: >
       bash -c "pip install -r requirements.txt &&
                uvicorn main:app --host 0.0.0.0 --port 8000"
-    # Optional: add health check
+    # python:3.11-slim has no curl, so probe with Python's stdlib urllib.
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 10s
+      start_period: 90s

@@ -38,6 +38,10 @@ interface SyncState {
 
 const PAGE_GUARD = 500; // hard cap on pages per endpoint
 
+// Wealthfolio's checkImport/import rejects oversized batches with a 422, so
+// activities are submitted in chunks of this size.
+const IMPORT_CHUNK_SIZE = 50;
+
 /** Pages a cursor endpoint newest-first, stopping once records predate `since`. */
 async function collectSince<T>(
   pageFn: (cursor?: string) => Promise<Paginated<T>>,
@@ -208,65 +212,66 @@ async function syncOne(
     }
 
     // ── Common import tail ───────────────────────────────────────────────
+    // Wealthfolio's checkImport/import rejects large batches (a full CSV backfill
+    // can be hundreds of rows), so submit in chunks.
     let imported = 0;
     let duplicates = 0;
-    if (activities.length > 0) {
+    let invalidCount = 0;
+    let invalidDetail: string | null = null;
+    const accounted: string[] = [];
+
+    for (let i = 0; i < activities.length; i += IMPORT_CHUNK_SIZE) {
+      const chunk = activities.slice(i, i + IMPORT_CHUNK_SIZE);
+
       let checked: ActivityImport[];
       try {
-        checked = await ctx.api.activities.checkImport(activities);
+        checked = await ctx.api.activities.checkImport(chunk);
       } catch (e) {
-        // Isolate whether a single row also fails (per-row schema issue) or only
-        // the batch does, and dump the exact payload so the bad field is visible.
-        let single = "";
-        try {
-          await ctx.api.activities.checkImport([activities[0]]);
-          single = "single-row OK → batch-level issue";
-        } catch (e2) {
-          single = `single-row also fails: ${errDetail(e2)}`;
-        }
         throw new Error(
-          `checkImport rejected ${activities.length}: ${errDetail(e)}. ${single}. payload[0]=${JSON.stringify(activities[0])}`,
+          `checkImport rejected a chunk of ${chunk.length}: ${errDetail(e)} — first: ${describeActivity(chunk[0])}`,
         );
       }
 
       const invalid = checked.filter((a) => a.isValid === false);
       const toImport = checked.filter((a) => a.isValid !== false && !a.duplicateOfId);
       const dupes = checked.filter((a) => a.duplicateOfId);
-      duplicates = dupes.length;
+      duplicates += dupes.length;
+      invalidCount += invalid.length;
+      if (!invalidDetail && invalid.length > 0) {
+        const withErrors = invalid.find((a) => a.errors && Object.keys(a.errors).length > 0);
+        invalidDetail = `${withErrors?.errors ? JSON.stringify(withErrors.errors) : "no detail"} — first: ${describeActivity(invalid[0])}`;
+      }
 
       if (toImport.length > 0) {
         try {
           const res = await ctx.api.activities.import(toImport);
-          imported = res.summary.imported;
+          imported += res.summary.imported;
         } catch (e) {
           throw new Error(
-            `import rejected ${toImport.length} activities: ${errDetail(e)} — first: ${describeActivity(toImport[0])}`,
+            `import rejected a chunk of ${toImport.length}: ${errDetail(e)} — first: ${describeActivity(toImport[0])}`,
           );
         }
       }
 
-      const accounted = [...toImport, ...dupes]
-        .map((a) => a.id)
-        .filter((id): id is string => !!id);
-      await addImportedRefs(ctx, conn.id, accounted);
-
-      // Nothing imported but rows were flagged invalid — surface why.
-      if (imported === 0 && invalid.length > 0) {
-        const withErrors = invalid.find((a) => a.errors && Object.keys(a.errors).length > 0);
-        const detail = withErrors?.errors
-          ? JSON.stringify(withErrors.errors)
-          : "no detail provided";
-        return {
-          ...base,
-          imported,
-          duplicates,
-          unresolved,
-          error: `${invalid.length}/${activities.length} rows invalid: ${detail} — first: ${describeActivity(invalid[0])}`,
-        };
+      for (const a of [...toImport, ...dupes]) {
+        if (a.id) accounted.push(a.id);
       }
     }
 
+    if (accounted.length > 0) await addImportedRefs(ctx, conn.id, accounted);
+
     await setLastSync(ctx, conn.id, new Date().toISOString());
+
+    // Nothing imported but some rows were flagged invalid — surface why.
+    if (imported === 0 && invalidCount > 0) {
+      return {
+        ...base,
+        imported,
+        duplicates,
+        unresolved,
+        error: `${invalidCount}/${activities.length} rows invalid: ${invalidDetail ?? "no detail"}`,
+      };
+    }
 
     return { ...base, imported, duplicates, unresolved };
   } catch (err) {

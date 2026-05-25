@@ -122,6 +122,46 @@ describe("useSync — JSON incremental path", () => {
     expect(state.importedRefs).toContain("t212-order-1");
   });
 
+  it("chunks large imports so the backend batch limit isn't exceeded", async () => {
+    // 120 distinct orders — must be split into chunks of 50 (3 import calls).
+    const orders = Array.from({ length: 120 }, (_, i) => ({
+      order: {
+        id: i + 1,
+        side: "BUY",
+        currency: "USD",
+        instrument: { ticker: "AAPL_US_EQ", isin: "US0378331005", name: "Apple Inc" },
+      },
+      fill: { type: "TRADE", filledAt: "2026-04-01T10:00:00.000Z", price: 100, quantity: 1 },
+    }));
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (String(url).includes("/orders"))
+          return jsonResponse({ items: orders, nextPagePath: null });
+        return jsonResponse({ items: [], nextPagePath: null });
+      }),
+    );
+
+    // Simulate Wealthfolio rejecting any batch larger than 50.
+    const { ctx, importFn } = makeCtx({
+      checkImport: async (a) => {
+        if (a.length > 50) throw new Error("Unprocessable Entity");
+        return a;
+      },
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { result } = renderHook(() => useSync(ctx as any));
+
+    await act(async () => {
+      await result.current.syncAll();
+    });
+
+    expect(result.current.error).toBeNull();
+    expect(result.current.results?.totals.imported).toBe(120);
+    expect(importFn).toHaveBeenCalledTimes(3); // 50 + 50 + 20
+  });
+
   it("skips duplicates flagged by checkImport without importing", async () => {
     const { ctx, importFn } = makeCtx({
       checkImport: async (a) => a.map((x) => ({ ...x, duplicateOfId: "existing" })),

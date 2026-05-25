@@ -11,6 +11,11 @@ import type {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+// History endpoints allow only 6 req/min, so paging a long history hits 429
+// repeatedly. Retry persistently, waiting for the rate-limit window to reset.
+const MAX_429_RETRIES = 12;
+const DEFAULT_BACKOFF_MS = 15_000; // ~ one token for a 6/min limit, when no header
+
 /**
  * Builds the Authorization header for the Trading 212 API.
  * Modern keys use HTTP Basic auth (API Key ID + Secret); older keys pass the
@@ -38,11 +43,15 @@ export class Trading212ProxyClient {
 
     const headers = { Authorization: buildAuthHeader(this.config) };
 
-    // One automatic retry on rate-limit, honoring the reset/Retry-After header.
-    for (let attempt = 0; attempt < 2; attempt++) {
+    // Retry on rate-limit, honoring the reset/Retry-After header, until the
+    // window clears — a long history needs many pages at 6 req/min.
+    for (let attempt = 0; ; attempt++) {
       const resp = await fetch(url.toString(), { headers });
 
-      if (resp.status === 429 && attempt === 0) {
+      if (resp.status === 429) {
+        if (attempt >= MAX_429_RETRIES) {
+          throw new Error("Trading 212 rate limit exceeded. Try again shortly.");
+        }
         await sleep(this.retryDelayMs(resp));
         continue;
       }
@@ -52,7 +61,6 @@ export class Trading212ProxyClient {
       }
       return (await resp.json()) as T;
     }
-    throw new Error("Trading 212 rate limit exceeded. Try again shortly.");
   }
 
   private retryDelayMs(resp: Response): number {
@@ -61,9 +69,9 @@ export class Trading212ProxyClient {
     const reset = resp.headers.get("x-ratelimit-reset");
     if (reset) {
       const ms = Number(reset) * 1000 - Date.now();
-      if (ms > 0) return Math.min(ms, 60_000);
+      if (ms > 0) return Math.min(ms + 500, 60_000); // small cushion past reset
     }
-    return 5_000;
+    return DEFAULT_BACKOFF_MS;
   }
 
   getAccountSummary(): Promise<AccountSummary> {

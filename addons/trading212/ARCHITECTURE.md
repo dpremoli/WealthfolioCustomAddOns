@@ -42,14 +42,14 @@ proxy just relays bytes and can be deployed anywhere without secret management.
 |------|----------------|
 | `main.py` | Stateless FastAPI proxy. Forwards 6 read endpoints; selects upstream host from a fixed `live`/`demo` allow-list; passes through `x-ratelimit-*` headers. |
 | `addon/src/addon.tsx` | Add-on entry point. Registers the sidebar item and the dashboard/settings routes. |
-| `addon/src/types.ts` | TypeScript shapes for the Trading 212 payloads we consume + internal `T212Config`/`SyncResult`. |
-| `addon/src/lib/proxy-client.ts` | HTTP client to the proxy: builds the auth header, retries on `429`, exposes per-endpoint + cursor-paging methods. |
-| `addon/src/lib/symbol-resolver.ts` | Maps a Trading 212 ticker to a Wealthfolio symbol via `market.searchTicker`, with in-memory + persisted caching. |
-| `addon/src/lib/mapper.ts` | Pure functions: Trading 212 order/dividend/transaction → `ActivityImport`. |
-| `addon/src/hooks/use-config.ts` | All keyring reads/writes (config, account id, watermark, symbol map, imported-refs). |
-| `addon/src/hooks/use-sync.ts` | Sync orchestration: fetch → resolve → map → `checkImport` → `import`. |
-| `addon/src/pages/settings-page.tsx` | Connect form (proxy URL, env, key/secret), connection test, securities-account creation, reset/disconnect. |
-| `addon/src/pages/dashboard-page.tsx` | Sync button + status/result display. |
+| `addon/src/types.ts` | TypeScript shapes for the Trading 212 payloads we consume + internal `T212Settings`/`T212Connection`/`SyncResult`/`MultiSyncResult`. |
+| `addon/src/lib/proxy-client.ts` | HTTP client to the proxy: builds the auth header, retries on `429`, exposes per-endpoint + cursor-paging methods. One instance per connection. |
+| `addon/src/lib/symbol-resolver.ts` | Maps a Trading 212 ticker to a Wealthfolio symbol via `market.searchTicker`, with in-memory + persisted caching. Shared across all connections (mapping is account-independent). |
+| `addon/src/lib/mapper.ts` | Pure functions: Trading 212 order/dividend/transaction → `ActivityImport` (take `accountId` as a param). |
+| `addon/src/hooks/use-config.ts` | All keyring reads/writes (shared settings, the connections list, per-connection sync state, shared symbol map) + one-time legacy migration. |
+| `addon/src/hooks/use-sync.ts` | Sync orchestration: `syncAll()` loops connections sequentially → fetch → resolve → map → `checkImport` → `import`. |
+| `addon/src/pages/settings-page.tsx` | Shared proxy/env settings, connected-accounts list, "Add account" form (Invest/ISA picker → editable name), per-row remove/reset. |
+| `addon/src/pages/dashboard-page.tsx` | "Sync All" button + per-account status/result cards. |
 
 ## Trading 212 API specifics
 
@@ -82,21 +82,28 @@ request the next page; a `null` `nextPagePath` ends the loop.
 
 ## Sync flow (`use-sync.ts`)
 
-1. Load config, linked account id, `lastSync` watermark, imported-ref set, and the
-   cached symbol map from the keyring.
+`syncAll()` loads the shared settings + the connections list, builds **one shared**
+`SymbolResolver` from the cached symbol map, then iterates the connections
+**sequentially** (Trading 212 is rate-limited; parallel keys would multiply 429s).
+Each connection is synced by `syncOne()`; one failing key is caught and reported per
+account without aborting the rest. After the loop the symbol cache is written **once**.
+
+`syncOne(ctx, settings, conn, resolver)`:
+
+1. Build a `Trading212ProxyClient` from `connectionConfig(settings, conn)`; load this
+   connection's `lastSync` watermark + imported-ref set from `t212_sync_{id}`.
 2. **Orders** and **dividends**: page newest-first via `collectSince`, stopping once
    a record predates `lastSync`. **Transactions**: use the server-side `time` filter
    from `lastSync`, then follow the cursor.
-3. For each record not already in the imported-ref set:
+3. For each record not already in this connection's imported-ref set:
    - Orders/dividends: resolve the symbol (see below). A trade with no resolvable
-     symbol is skipped and counted as `unresolved` (we never import a position-
-     affecting trade with a wrong/blank symbol). Interest needs no symbol.
-   - Build the `ActivityImport` via the mapper with a **stable `id`**.
-4. Persist the symbol cache if it changed.
-5. `checkImport(activities)` → drop rows flagged `duplicateOfId` or `isValid === false`
-   → `import` the rest.
-6. Record the ids of imported + duplicate rows into the imported-ref set, and set the
-   `lastSync` watermark to now.
+     symbol is skipped and counted as `unresolved`. Interest needs no symbol.
+   - Build the `ActivityImport` via the mapper (with `conn.accountId`) and a **stable `id`**.
+4. `checkImport(activities)` → drop rows flagged `duplicateOfId` or `isValid === false`
+   → `import` the rest into `conn.accountId`.
+5. Record the ids of imported + duplicate rows into this connection's imported-ref set,
+   and set its `lastSync` watermark to now. Return a `SyncResult` tagged with the
+   connection/account.
 
 ### Activity mapping (`mapper.ts`)
 
@@ -127,15 +134,22 @@ keyring, so repeated syncs don't re-query. "Reset sync history" clears it.
 
 Three independent guards ensure re-syncs never duplicate:
 
-1. **Watermark** (`lastSync`) — we only fetch records newer than the last sync.
-2. **Imported-ref set** — locally remembers every reference already accounted for,
-   so anything that slips past the watermark is filtered before import.
+1. **Watermark** (`lastSync`, per connection) — we only fetch records newer than the last sync.
+2. **Imported-ref set** (per connection) — locally remembers every reference already
+   accounted for, so anything that slips past the watermark is filtered before import.
+   It is **per connection** because Trading 212 reference ids are scoped per T212
+   account — an Invest and an ISA account can each independently produce `order id 1`,
+   so a global set would wrongly drop the second.
 3. **Host `checkImport`** — Wealthfolio's own duplicate detection is the final
    backstop; rows flagged `duplicateOfId` are dropped.
 
 The local guards exist because the exact key Wealthfolio uses for `checkImport`
 deduplication is not documented; the stable `id` is supplied to give it the best
-chance, and the watermark + ref-set make the add-on correct regardless.
+chance, and the watermark + ref-set make the add-on correct regardless. Note the
+stable `id` (`t212-order-{id}` etc.) is **not** namespaced by account; if two of your
+T212 accounts ever shared a reference id and Wealthfolio's `checkImport` dedup turned
+out to be global, the second could be dropped. T212 ids are effectively per-user-unique,
+so this is a documented, low-risk limitation rather than an observed problem.
 
 ## Security model
 
@@ -149,11 +163,19 @@ chance, and the watermark + ref-set make the add-on correct regardless.
 
 | Key | Contents |
 |-----|----------|
-| `t212_config` | `{ proxyUrl, env, apiKey, apiSecret? }` |
-| `t212_account_id` | Linked Wealthfolio securities account id |
-| `t212_last_sync` | ISO timestamp watermark |
-| `t212_symbol_map` | `{ ticker: resolvedSymbol }` cache (`""` = known miss) |
-| `t212_imported_refs` | Array of already-imported Trading 212 reference ids |
+| `t212_settings` | `{ proxyUrl, env }` — shared by all connections |
+| `t212_connections` | `T212Connection[]` = `{ id, name, apiKey, apiSecret?, accountId }` |
+| `t212_sync_{id}` | Per-connection `{ lastSync, importedRefs[] }` |
+| `t212_symbol_map` | Shared `{ ticker: resolvedSymbol }` cache (`""` = known miss) |
+
+### Migration from the single-account layout
+
+`migrateLegacyConfig()` runs once at page mount (dashboard + settings). If the legacy
+keys `t212_config` + `t212_account_id` exist and no `t212_connections`/`t212_settings`
+do, it writes `t212_settings`, creates one connection named `"Trading 212 (Invest)"`
+linked to the legacy account, copies `t212_last_sync`/`t212_imported_refs` into
+`t212_sync_{id}`, deletes the four legacy keys, and leaves `t212_symbol_map` untouched.
+It is idempotent.
 
 ## Build, test, release
 

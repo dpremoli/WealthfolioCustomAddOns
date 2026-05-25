@@ -10,6 +10,27 @@ export interface T212Config {
   apiSecret?: string; // API Secret — present for the modern Basic-auth scheme
 }
 
+// Shared connection settings (one proxy/env for all keys).
+export interface T212Settings {
+  proxyUrl: string;
+  env: T212Env;
+}
+
+// One Trading 212 API key linked to one Wealthfolio account.
+export interface T212Connection {
+  id: string; // stable random id, used to key per-connection sync state
+  name: string; // Wealthfolio account name set at creation
+  apiKey: string;
+  apiSecret?: string;
+  accountId: string; // linked Wealthfolio securities account id
+}
+
+// Per-connection sync state (stored under t212_sync_{id}).
+export interface ConnectionSyncState {
+  lastSync: string | null;
+  importedRefs: string[]; // loaded into a Set at runtime
+}
+
 // GET /api/v0/equity/account/summary
 export interface AccountSummary {
   id: number;
@@ -119,7 +140,16 @@ export interface Paginated<T> {
 }
 
 export interface SyncResult {
+  connectionId: string;
+  accountId: string;
+  accountName: string;
   imported: number;
   duplicates: number;
   unresolved: number; // activities skipped because no symbol match was found
+  error?: string; // set if this connection failed; others still sync
+}
+
+export interface MultiSyncResult {
+  perAccount: SyncResult[];
+  totals: { imported: number; duplicates: number; unresolved: number };
 }

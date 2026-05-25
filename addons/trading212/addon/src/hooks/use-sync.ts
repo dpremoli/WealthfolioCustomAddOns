@@ -38,9 +38,9 @@ interface SyncState {
 
 const PAGE_GUARD = 500; // hard cap on pages per endpoint
 
-// Wealthfolio's checkImport/import rejects oversized batches with a 422, so
-// activities are submitted in chunks of this size.
-const IMPORT_CHUNK_SIZE = 50;
+// Initial activity batch size for checkImport/import. The backend rejects
+// oversized batches with a 422; oversized chunks are adaptively halved at runtime.
+const IMPORT_CHUNK_SIZE = 20;
 
 /** Pages a cursor endpoint newest-first, stopping once records predate `since`. */
 async function collectSince<T>(
@@ -212,24 +212,47 @@ async function syncOne(
     }
 
     // ── Common import tail ───────────────────────────────────────────────
-    // Wealthfolio's checkImport/import rejects large batches (a full CSV backfill
-    // can be hundreds of rows), so submit in chunks.
+    // Wealthfolio's checkImport/import rejects oversized batches with a 422. The
+    // exact limit is unknown, so submit in chunks and adaptively halve any chunk
+    // that's rejected — down to a single row, which isolates a genuinely bad row.
     let imported = 0;
     let duplicates = 0;
     let invalidCount = 0;
     let invalidDetail: string | null = null;
     const accounted: string[] = [];
 
-    for (let i = 0; i < activities.length; i += IMPORT_CHUNK_SIZE) {
-      const chunk = activities.slice(i, i + IMPORT_CHUNK_SIZE);
+    // Imports a set, halving and retrying if the backend rejects the batch.
+    const doImport = async (items: ActivityImport[]): Promise<void> => {
+      if (items.length === 0) return;
+      try {
+        const res = await ctx.api.activities.import(items);
+        imported += res.summary.imported;
+        for (const a of items) if (a.id) accounted.push(a.id);
+      } catch (e) {
+        if (items.length > 1) {
+          const mid = Math.ceil(items.length / 2);
+          await doImport(items.slice(0, mid));
+          await doImport(items.slice(mid));
+          return;
+        }
+        throw new Error(`import rejected a single activity: ${errDetail(e)} — payload=${JSON.stringify(items[0])}`);
+      }
+    };
 
+    // Validates a chunk, halving and retrying if the backend rejects the batch.
+    const process = async (chunk: ActivityImport[]): Promise<void> => {
+      if (chunk.length === 0) return;
       let checked: ActivityImport[];
       try {
         checked = await ctx.api.activities.checkImport(chunk);
       } catch (e) {
-        throw new Error(
-          `checkImport rejected a chunk of ${chunk.length}: ${errDetail(e)} — first: ${describeActivity(chunk[0])}`,
-        );
+        if (chunk.length > 1) {
+          const mid = Math.ceil(chunk.length / 2);
+          await process(chunk.slice(0, mid));
+          await process(chunk.slice(mid));
+          return;
+        }
+        throw new Error(`checkImport rejected a single activity: ${errDetail(e)} — payload=${JSON.stringify(chunk[0])}`);
       }
 
       const invalid = checked.filter((a) => a.isValid === false);
@@ -241,21 +264,13 @@ async function syncOne(
         const withErrors = invalid.find((a) => a.errors && Object.keys(a.errors).length > 0);
         invalidDetail = `${withErrors?.errors ? JSON.stringify(withErrors.errors) : "no detail"} — first: ${describeActivity(invalid[0])}`;
       }
+      for (const a of dupes) if (a.id) accounted.push(a.id);
 
-      if (toImport.length > 0) {
-        try {
-          const res = await ctx.api.activities.import(toImport);
-          imported += res.summary.imported;
-        } catch (e) {
-          throw new Error(
-            `import rejected a chunk of ${toImport.length}: ${errDetail(e)} — first: ${describeActivity(toImport[0])}`,
-          );
-        }
-      }
+      await doImport(toImport);
+    };
 
-      for (const a of [...toImport, ...dupes]) {
-        if (a.id) accounted.push(a.id);
-      }
+    for (let i = 0; i < activities.length; i += IMPORT_CHUNK_SIZE) {
+      await process(activities.slice(i, i + IMPORT_CHUNK_SIZE));
     }
 
     if (accounted.length > 0) await addImportedRefs(ctx, conn.id, accounted);

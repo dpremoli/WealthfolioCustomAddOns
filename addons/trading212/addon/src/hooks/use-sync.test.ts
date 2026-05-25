@@ -122,8 +122,9 @@ describe("useSync — JSON incremental path", () => {
     expect(state.importedRefs).toContain("t212-order-1");
   });
 
-  it("chunks large imports so the backend batch limit isn't exceeded", async () => {
-    // 120 distinct orders — must be split into chunks of 50 (3 import calls).
+  it("adaptively halves batches the backend rejects, importing everything", async () => {
+    // 120 distinct orders. The starting chunk size (20) exceeds the simulated
+    // backend limit of 10, so each chunk must be halved before it's accepted.
     const orders = Array.from({ length: 120 }, (_, i) => ({
       order: {
         id: i + 1,
@@ -143,10 +144,10 @@ describe("useSync — JSON incremental path", () => {
       }),
     );
 
-    // Simulate Wealthfolio rejecting any batch larger than 50.
+    // Simulate Wealthfolio rejecting any batch larger than 10.
     const { ctx, importFn } = makeCtx({
       checkImport: async (a) => {
-        if (a.length > 50) throw new Error("Unprocessable Entity");
+        if (a.length > 10) throw new Error("Unprocessable Entity");
         return a;
       },
     });
@@ -159,7 +160,45 @@ describe("useSync — JSON incremental path", () => {
 
     expect(result.current.error).toBeNull();
     expect(result.current.results?.totals.imported).toBe(120);
-    expect(importFn).toHaveBeenCalledTimes(3); // 50 + 50 + 20
+    // 6 chunks of 20 → each halved to 10+10 → 12 accepted import batches.
+    expect(importFn).toHaveBeenCalledTimes(12);
+  });
+
+  it("surfaces the payload when a single activity is genuinely rejected", async () => {
+    const orders = Array.from({ length: 5 }, (_, i) => ({
+      order: {
+        id: i + 1,
+        side: "BUY",
+        currency: "USD",
+        instrument: { ticker: "AAPL_US_EQ", isin: "US0378331005", name: "Apple Inc" },
+      },
+      fill: { type: "TRADE", filledAt: "2026-04-01T10:00:00.000Z", price: 100, quantity: 1 },
+    }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (String(url).includes("/orders"))
+          return jsonResponse({ items: orders, nextPagePath: null });
+        return jsonResponse({ items: [], nextPagePath: null });
+      }),
+    );
+
+    // checkImport always rejects, even a single row → genuine per-row failure.
+    const { ctx } = makeCtx({
+      checkImport: async () => {
+        throw new Error("Unprocessable Entity");
+      },
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { result } = renderHook(() => useSync(ctx as any));
+
+    await act(async () => {
+      await result.current.syncAll();
+    });
+
+    const r = result.current.results!.perAccount[0];
+    expect(r.error).toContain("checkImport rejected a single activity");
+    expect(r.error).toContain("payload=");
   });
 
   it("skips duplicates flagged by checkImport without importing", async () => {

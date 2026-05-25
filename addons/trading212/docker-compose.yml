@@ -1,0 +1,24 @@
+version: '3.8'
+
+services:
+  trading212-proxy:
+    image: python:3.11-slim
+    container_name: trading212-proxy
+    restart: unless-stopped
+    ports:
+      - "8005:8000"
+    volumes:
+      - /mnt/user/appdata/trading212-proxy:/app
+    working_dir: /app
+    environment:
+      - PORT=8000
+    command: >
+      bash -c "pip install -r requirements.txt &&
+               uvicorn main:app --host 0.0.0.0 --port 8000"
+    # python:3.11-slim has no curl, so probe with Python's stdlib urllib.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s

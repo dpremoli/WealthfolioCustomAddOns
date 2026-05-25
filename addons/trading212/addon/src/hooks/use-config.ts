@@ -1,63 +1,131 @@
 import type { AddonContext } from "@wealthfolio/addon-sdk";
-import type { T212Config } from "../types";
+import type {
+  ConnectionSyncState,
+  T212Config,
+  T212Connection,
+  T212Settings,
+} from "../types";
 
 export const KEYS = {
-  config: "t212_config",
-  accountId: "t212_account_id",
-  lastSync: "t212_last_sync",
+  settings: "t212_settings",
+  connections: "t212_connections",
   symbolMap: "t212_symbol_map",
-  importedRefs: "t212_imported_refs",
+  // Legacy single-account keys — read once during migration, then deleted.
+  legacyConfig: "t212_config",
+  legacyAccountId: "t212_account_id",
+  legacyLastSync: "t212_last_sync",
+  legacyImportedRefs: "t212_imported_refs",
 } as const;
 
-export async function getConfig(ctx: AddonContext): Promise<T212Config | null> {
-  const raw = await ctx.api.secrets.get(KEYS.config);
-  if (!raw) return null;
+const syncKey = (id: string) => `t212_sync_${id}`;
+
+function parse<T>(raw: string | null, fallback: T): T {
+  if (!raw) return fallback;
   try {
-    return JSON.parse(raw) as T212Config;
+    return JSON.parse(raw) as T;
   } catch {
-    return null;
+    return fallback;
   }
 }
 
-export async function setConfig(ctx: AddonContext, config: T212Config): Promise<void> {
-  await ctx.api.secrets.set(KEYS.config, JSON.stringify(config));
+// --- shared settings -----------------------------------------------------
+
+export async function getSettings(ctx: AddonContext): Promise<T212Settings | null> {
+  return parse<T212Settings | null>(await ctx.api.secrets.get(KEYS.settings), null);
 }
 
-export async function clearConfig(ctx: AddonContext): Promise<void> {
-  await ctx.api.secrets.delete(KEYS.config);
+export async function setSettings(ctx: AddonContext, s: T212Settings): Promise<void> {
+  await ctx.api.secrets.set(KEYS.settings, JSON.stringify(s));
 }
 
-export async function getAccountId(ctx: AddonContext): Promise<string | null> {
-  return ctx.api.secrets.get(KEYS.accountId);
+// --- connections (whole-array CRUD) --------------------------------------
+
+export async function getConnections(ctx: AddonContext): Promise<T212Connection[]> {
+  return parse<T212Connection[]>(await ctx.api.secrets.get(KEYS.connections), []);
 }
 
-export async function setAccountId(ctx: AddonContext, id: string): Promise<void> {
-  await ctx.api.secrets.set(KEYS.accountId, id);
+async function saveConnections(ctx: AddonContext, conns: T212Connection[]): Promise<void> {
+  await ctx.api.secrets.set(KEYS.connections, JSON.stringify(conns));
 }
 
-export async function getLastSync(ctx: AddonContext): Promise<string | null> {
-  const raw = await ctx.api.secrets.get(KEYS.lastSync);
-  return raw ? (JSON.parse(raw) as string) : null;
+export async function addConnection(ctx: AddonContext, conn: T212Connection): Promise<void> {
+  const conns = await getConnections(ctx);
+  conns.push(conn);
+  await saveConnections(ctx, conns);
 }
 
-export async function setLastSync(ctx: AddonContext, iso: string): Promise<void> {
-  await ctx.api.secrets.set(KEYS.lastSync, JSON.stringify(iso));
+export async function updateConnection(
+  ctx: AddonContext,
+  id: string,
+  patch: Partial<T212Connection>,
+): Promise<void> {
+  const conns = await getConnections(ctx);
+  const next = conns.map((c) => (c.id === id ? { ...c, ...patch, id: c.id } : c));
+  await saveConnections(ctx, next);
 }
 
-export async function resetSyncState(ctx: AddonContext): Promise<void> {
-  await ctx.api.secrets.delete(KEYS.lastSync);
-  await ctx.api.secrets.delete(KEYS.importedRefs);
-  await ctx.api.secrets.delete(KEYS.symbolMap);
+/** Forgets the credentials + sync state. The Wealthfolio account is left intact
+ *  (the SDK has no accounts.delete); the user removes it natively if desired. */
+export async function removeConnection(ctx: AddonContext, id: string): Promise<void> {
+  const conns = await getConnections(ctx);
+  await saveConnections(ctx, conns.filter((c) => c.id !== id));
+  await ctx.api.secrets.delete(syncKey(id));
 }
+
+/** Builds the proxy-client config for one connection from the shared settings. */
+export function connectionConfig(settings: T212Settings, conn: T212Connection): T212Config {
+  return {
+    proxyUrl: settings.proxyUrl,
+    env: settings.env,
+    apiKey: conn.apiKey,
+    apiSecret: conn.apiSecret,
+  };
+}
+
+// --- per-connection sync state -------------------------------------------
+
+export async function getSyncState(
+  ctx: AddonContext,
+  id: string,
+): Promise<ConnectionSyncState> {
+  return parse<ConnectionSyncState>(await ctx.api.secrets.get(syncKey(id)), {
+    lastSync: null,
+    importedRefs: [],
+  });
+}
+
+export async function setLastSync(ctx: AddonContext, id: string, iso: string): Promise<void> {
+  const state = await getSyncState(ctx, id);
+  state.lastSync = iso;
+  await ctx.api.secrets.set(syncKey(id), JSON.stringify(state));
+}
+
+export async function getImportedRefs(ctx: AddonContext, id: string): Promise<Set<string>> {
+  const state = await getSyncState(ctx, id);
+  return new Set(state.importedRefs);
+}
+
+export async function addImportedRefs(
+  ctx: AddonContext,
+  id: string,
+  refs: string[],
+): Promise<void> {
+  if (refs.length === 0) return;
+  const state = await getSyncState(ctx, id);
+  const set = new Set(state.importedRefs);
+  for (const r of refs) set.add(r);
+  state.importedRefs = [...set];
+  await ctx.api.secrets.set(syncKey(id), JSON.stringify(state));
+}
+
+export async function resetSyncState(ctx: AddonContext, id: string): Promise<void> {
+  await ctx.api.secrets.delete(syncKey(id));
+}
+
+// --- shared symbol map (account-independent) -----------------------------
 
 export async function getSymbolMap(ctx: AddonContext): Promise<Record<string, string>> {
-  const raw = await ctx.api.secrets.get(KEYS.symbolMap);
-  if (!raw) return {};
-  try {
-    return JSON.parse(raw) as Record<string, string>;
-  } catch {
-    return {};
-  }
+  return parse<Record<string, string>>(await ctx.api.secrets.get(KEYS.symbolMap), {});
 }
 
 export async function setSymbolMap(
@@ -67,19 +135,37 @@ export async function setSymbolMap(
   await ctx.api.secrets.set(KEYS.symbolMap, JSON.stringify(map));
 }
 
-export async function getImportedRefs(ctx: AddonContext): Promise<Set<string>> {
-  const raw = await ctx.api.secrets.get(KEYS.importedRefs);
-  if (!raw) return new Set();
-  try {
-    return new Set(JSON.parse(raw) as string[]);
-  } catch {
-    return new Set();
-  }
-}
+// --- one-time migration from the single-account layout -------------------
 
-export async function addImportedRefs(ctx: AddonContext, refs: string[]): Promise<void> {
-  if (refs.length === 0) return;
-  const existing = await getImportedRefs(ctx);
-  for (const r of refs) existing.add(r);
-  await ctx.api.secrets.set(KEYS.importedRefs, JSON.stringify([...existing]));
+/** Converts the legacy single-key layout into one connection. Idempotent. */
+export async function migrateLegacyConfig(ctx: AddonContext): Promise<void> {
+  const [settings, connections] = [await getSettings(ctx), await getConnections(ctx)];
+  if (settings || connections.length > 0) return; // already migrated
+
+  const legacy = parse<T212Config | null>(
+    await ctx.api.secrets.get(KEYS.legacyConfig),
+    null,
+  );
+  const legacyAccountId = await ctx.api.secrets.get(KEYS.legacyAccountId);
+  if (!legacy || !legacyAccountId) return; // nothing to migrate
+
+  await setSettings(ctx, { proxyUrl: legacy.proxyUrl, env: legacy.env });
+
+  const id = crypto.randomUUID();
+  await addConnection(ctx, {
+    id,
+    name: "Trading 212 (Invest)",
+    apiKey: legacy.apiKey,
+    apiSecret: legacy.apiSecret,
+    accountId: legacyAccountId,
+  });
+
+  const lastSync = parse<string | null>(await ctx.api.secrets.get(KEYS.legacyLastSync), null);
+  const importedRefs = parse<string[]>(await ctx.api.secrets.get(KEYS.legacyImportedRefs), []);
+  await ctx.api.secrets.set(syncKey(id), JSON.stringify({ lastSync, importedRefs }));
+
+  await ctx.api.secrets.delete(KEYS.legacyConfig);
+  await ctx.api.secrets.delete(KEYS.legacyAccountId);
+  await ctx.api.secrets.delete(KEYS.legacyLastSync);
+  await ctx.api.secrets.delete(KEYS.legacyImportedRefs);
 }

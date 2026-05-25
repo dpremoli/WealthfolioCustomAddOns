@@ -9,25 +9,39 @@ import {
   CardHeader,
   CardTitle,
 } from "@wealthfolio/ui";
+import { useEffect, useState } from "react";
 import { useSync } from "../hooks/use-sync";
-import { getConfig, getLastSync } from "../hooks/use-config";
+import { getConnections, getSyncState, migrateLegacyConfig } from "../hooks/use-config";
+import type { SyncResult } from "../types";
 
 export default function DashboardPage({ ctx }: { ctx: AddonContext }) {
-  const { isSyncing, lastResult, error, sync } = useSync(ctx);
+  const { isSyncing, results, error, syncAll } = useSync(ctx);
+  const [migrated, setMigrated] = useState(false);
 
-  const { data: config } = useQuery({
-    queryKey: ["t212_config"],
-    queryFn: () => getConfig(ctx),
+  useEffect(() => {
+    migrateLegacyConfig(ctx).finally(() => setMigrated(true));
+  }, [ctx]);
+
+  const { data: connections } = useQuery({
+    queryKey: ["t212_connections", migrated, isSyncing],
+    queryFn: () => getConnections(ctx),
+    enabled: migrated,
   });
 
-  const { data: lastSyncIso } = useQuery({
-    queryKey: ["t212_last_sync"],
-    queryFn: () => getLastSync(ctx),
+  const { data: syncStates } = useQuery({
+    queryKey: ["t212_sync_states", connections?.length, isSyncing],
+    queryFn: async () => {
+      const out: Record<string, string | null> = {};
+      for (const c of connections ?? []) out[c.id] = (await getSyncState(ctx, c.id)).lastSync;
+      return out;
+    },
+    enabled: !!connections,
   });
 
-  const lastSyncDisplay = lastSyncIso ? new Date(lastSyncIso).toLocaleString() : "Never";
-  const connected = !!config;
+  const connected = (connections?.length ?? 0) > 0;
   const canSync = connected && !isSyncing;
+  const resultFor = (id: string): SyncResult | undefined =>
+    results?.perAccount.find((r) => r.connectionId === id);
 
   function openSettings() {
     ctx.api.navigation.navigate("/addons/trading212/settings");
@@ -46,8 +60,8 @@ export default function DashboardPage({ ctx }: { ctx: AddonContext }) {
           <Button variant="outline" size="lg" onClick={openSettings}>
             Settings
           </Button>
-          <Button onClick={sync} disabled={!canSync} size="lg">
-            {isSyncing ? "Syncing…" : "Sync Now"}
+          <Button onClick={syncAll} disabled={!canSync} size="lg">
+            {isSyncing ? "Syncing…" : "Sync All"}
           </Button>
         </div>
       </div>
@@ -56,44 +70,68 @@ export default function DashboardPage({ ctx }: { ctx: AddonContext }) {
         <Card className="border-amber-200 bg-amber-50">
           <CardContent className="pt-6">
             <p className="text-sm text-amber-800">
-              ⚠️ Not connected.{" "}
+              ⚠️ No accounts connected.{" "}
               <button className="underline font-medium" onClick={openSettings}>
                 Open Settings
               </button>{" "}
-              to add your Trading 212 API key.
+              to add a Trading 212 API key.
             </p>
           </CardContent>
         </Card>
       )}
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Status</CardTitle>
-          <CardDescription>Last sync: {lastSyncDisplay}</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-2">
-          {isSyncing && (
-            <p className="text-sm text-muted-foreground animate-pulse">
-              Syncing activity… (Trading 212 is rate-limited, this can take a moment)
-            </p>
-          )}
-          {error && <p className="text-sm text-destructive">{error}</p>}
-          {!error && !isSyncing && !lastResult && connected && (
-            <p className="text-sm text-muted-foreground">Ready to sync.</p>
-          )}
-          {lastResult && !isSyncing && (
-            <div className="flex flex-wrap gap-2">
-              <Badge variant="outline">{lastResult.imported} imported</Badge>
-              <Badge variant="outline">{lastResult.duplicates} duplicates skipped</Badge>
-              {lastResult.unresolved > 0 && (
-                <Badge variant="outline" className="text-amber-600 border-amber-600">
-                  {lastResult.unresolved} unmatched symbols
-                </Badge>
+      {error && (
+        <Card className="border-destructive">
+          <CardContent className="pt-6">
+            <p className="text-sm text-destructive">{error}</p>
+          </CardContent>
+        </Card>
+      )}
+
+      {isSyncing && (
+        <p className="text-sm text-muted-foreground animate-pulse">
+          Syncing activity… (Trading 212 is rate-limited, this can take a moment)
+        </p>
+      )}
+
+      {connections?.map((conn) => {
+        const last = syncStates?.[conn.id];
+        const r = resultFor(conn.id);
+        return (
+          <Card key={conn.id}>
+            <CardHeader>
+              <CardTitle>{conn.name}</CardTitle>
+              <CardDescription>
+                Last sync: {last ? new Date(last).toLocaleString() : "Never"}
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-2">
+              {r?.error && <p className="text-sm text-destructive">{r.error}</p>}
+              {r && !r.error && (
+                <div className="flex flex-wrap gap-2">
+                  <Badge variant="outline">{r.imported} imported</Badge>
+                  <Badge variant="outline">{r.duplicates} duplicates skipped</Badge>
+                  {r.unresolved > 0 && (
+                    <Badge variant="outline" className="text-amber-600 border-amber-600">
+                      {r.unresolved} unmatched symbols
+                    </Badge>
+                  )}
+                </div>
               )}
-            </div>
-          )}
-        </CardContent>
-      </Card>
+              {!r && !isSyncing && (
+                <p className="text-sm text-muted-foreground">Ready to sync.</p>
+              )}
+            </CardContent>
+          </Card>
+        );
+      })}
+
+      {results && results.perAccount.length > 1 && (
+        <p className="text-sm text-muted-foreground">
+          Totals: {results.totals.imported} imported, {results.totals.duplicates} duplicates,{" "}
+          {results.totals.unresolved} unmatched.
+        </p>
+      )}
     </div>
   );
 }

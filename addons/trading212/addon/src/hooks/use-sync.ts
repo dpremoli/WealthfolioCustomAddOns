@@ -215,8 +215,17 @@ async function syncOne(
       try {
         checked = await ctx.api.activities.checkImport(activities);
       } catch (e) {
+        // Isolate whether a single row also fails (per-row schema issue) or only
+        // the batch does, and dump the exact payload so the bad field is visible.
+        let single = "";
+        try {
+          await ctx.api.activities.checkImport([activities[0]]);
+          single = "single-row OK → batch-level issue";
+        } catch (e2) {
+          single = `single-row also fails: ${errDetail(e2)}`;
+        }
         throw new Error(
-          `checkImport rejected ${activities.length} activities: ${errDetail(e)} — first: ${describeActivity(activities[0])}`,
+          `checkImport rejected ${activities.length}: ${errDetail(e)}. ${single}. payload[0]=${JSON.stringify(activities[0])}`,
         );
       }
 

@@ -91,6 +91,23 @@ function col(row: Record<string, string>, ...names: string[]): string {
 }
 
 /**
+ * Normalises a T212 CSV timestamp to ISO 8601 (UTC).
+ * The CSV uses "YYYY-MM-DD HH:MM:SS" (space-separated, no timezone); Wealthfolio's
+ * import expects ISO 8601, so we insert the `T` and append `Z` (T212 times are UTC).
+ * Already-ISO values (with `T` and a `Z`/offset) pass through unchanged.
+ */
+function toIsoDate(s: string): string {
+  const t = s.trim();
+  // Already ISO with a timezone — leave as-is.
+  if (/T\d{2}:\d{2}/.test(t) && /(Z|[+-]\d{2}:?\d{2})$/.test(t)) return t;
+  const dt = t.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}(?::\d{2})?)(\.\d+)?/);
+  if (dt) return `${dt[1]}T${dt[2]}${dt[3] ?? ""}Z`;
+  const dateOnly = t.match(/^(\d{4}-\d{2}-\d{2})$/);
+  if (dateOnly) return `${dateOnly[1]}T00:00:00Z`;
+  return t; // unknown format — pass through and let import validate it
+}
+
+/**
  * Maps one T212 CSV row to a Wealthfolio ActivityImport.
  *
  * Returns null for unrecognised actions (stock splits, spin-offs, unknown rows),
@@ -102,12 +119,13 @@ export async function mapCsvRow(
   accountId: string,
   resolver: SymbolResolver,
 ): Promise<ActivityImport | null> {
-  const id = row["ID"];
+  const csvId = row["ID"]?.trim() ?? "";
   const action = row["Action"]?.trim();
-  if (!id || !action) return null;
+  if (!action) return null;
 
-  const time = row["Time"];
-  if (!time) return null;
+  const rawTime = row["Time"];
+  if (!rawTime) return null;
+  const date = toIsoDate(rawTime);
 
   const ticker = row["Ticker"]?.trim() || undefined;
   const isin = row["ISIN"]?.trim() || undefined;
@@ -119,7 +137,17 @@ export async function mapCsvRow(
   const total = Math.abs(parseAmount(totalStr));
   const currency = totalCurStr || "GBP";
 
+  // T212 CSV omits the ID field for dividends. Build a stable composite ID
+  // from the key fields so the row can still be deduplicated across re-imports.
+  const stableId = (action: string) =>
+    csvId ||
+    `${ticker ?? ""}-${rawTime.replace(/[^0-9]/g, "")}-${totalStr.replace(/[^0-9.]/g, "")}-${action}`;
+
   const actionLower = action.toLowerCase();
+
+  // Dividends in the T212 CSV consistently have an empty ID column.
+  // All other action types carry a UUID — skip them if the ID is missing.
+  if (!csvId && !actionLower.startsWith("dividend")) return null;
 
   // ── BUY ────────────────────────────────────────────────────────────────
   if (actionLower.endsWith(" buy") || actionLower === "buy") {
@@ -137,10 +165,10 @@ export async function mapCsvRow(
         Math.abs(parseAmount(row["Currency conversion fee"])),
     );
     return {
-      id: `t212-order-${id}`,
+      id: `t212-order-${csvId}`,
       accountId,
       activityType: "BUY" as ActivityType,
-      date: time,
+      date,
       symbol,
       quantity: qty,
       unitPrice,
@@ -169,10 +197,10 @@ export async function mapCsvRow(
         Math.abs(parseAmount(row["Currency conversion fee"])),
     );
     return {
-      id: `t212-order-${id}`,
+      id: `t212-order-${csvId}`,
       accountId,
       activityType: "SELL" as ActivityType,
-      date: time,
+      date,
       symbol,
       quantity: qty,
       unitPrice,
@@ -191,10 +219,10 @@ export async function mapCsvRow(
     const symbol = await resolver.resolve(ticker, { isin, name });
     if (!symbol) return null;
     return {
-      id: `t212-div-${id}`,
+      id: `t212-div-${stableId(actionLower)}`,
       accountId,
       activityType: "DIVIDEND" as ActivityType,
-      date: time,
+      date,
       symbol,
       amount: total,
       currency,
@@ -207,10 +235,10 @@ export async function mapCsvRow(
   if (actionLower.includes("interest")) {
     if (total <= 0) return null;
     return {
-      id: `t212-txn-${id}`,
+      id: `t212-txn-${csvId}`,
       accountId,
       activityType: "INTEREST" as ActivityType,
-      date: time,
+      date,
       amount: total,
       currency,
       isValid: true,
@@ -222,10 +250,10 @@ export async function mapCsvRow(
   if (actionLower === "deposit") {
     if (total <= 0) return null;
     return {
-      id: `t212-txn-${id}`,
+      id: `t212-txn-${csvId}`,
       accountId,
       activityType: "DEPOSIT" as ActivityType,
-      date: time,
+      date,
       amount: total,
       currency,
       isValid: true,
@@ -237,10 +265,10 @@ export async function mapCsvRow(
   if (actionLower === "withdrawal" || actionLower === "withdraw") {
     if (total <= 0) return null;
     return {
-      id: `t212-txn-${id}`,
+      id: `t212-txn-${csvId}`,
       accountId,
       activityType: "WITHDRAWAL" as ActivityType,
-      date: time,
+      date,
       amount: total,
       currency,
       isValid: true,
@@ -257,10 +285,10 @@ export async function mapCsvRow(
   ) {
     if (total <= 0) return null;
     return {
-      id: `t212-txn-${id}`,
+      id: `t212-txn-${csvId}`,
       accountId,
       activityType: "FEE" as ActivityType,
-      date: time,
+      date,
       amount: total,
       currency,
       isValid: true,

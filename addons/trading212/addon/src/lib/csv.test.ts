@@ -213,6 +213,35 @@ describe("mapCsvRow", () => {
       expect(act!.currency).toBe("GBP");
     });
 
+    it("generates a stable ID when the CSV ID column is empty (real T212 behaviour)", async () => {
+      // T212 exports consistently omit the ID field for dividends.
+      const row = {
+        Action: "Dividend (Dividend)",
+        Time: "2026-04-28 13:51:46",
+        ISIN: "CA0641491075",
+        Ticker: "AAPL_US_EQ",
+        Name: "Apple",
+        Notes: "",
+        ID: "",
+        "No. of shares": "2.9906080000",
+        "Price / share": "0.685554",
+        "Currency (Price / share)": "USD",
+        "Exchange rate": "0.85428500",
+        Result: "",
+        "Currency (Result)": "",
+        Total: "1.75",
+        "Currency (Total)": "EUR",
+        "Withholding tax": "0.36",
+        "Currency (Withholding tax)": "USD",
+      };
+      const act = await mapCsvRow(row, ACC, RESOLVER);
+      expect(act).not.toBeNull();
+      expect(act!.activityType).toBe("DIVIDEND");
+      expect(act!.id).toMatch(/^t212-div-/);
+      expect(act!.amount).toBe(1.75);
+      expect(act!.currency).toBe("EUR");
+    });
+
     it("returns null for unresolved ticker", async () => {
       const row = {
         ...cashRow("Dividend (Ordinary)", { Total: "5", ID: "DIV2" }),
@@ -252,6 +281,35 @@ describe("mapCsvRow", () => {
       const act = await mapCsvRow(cashRow("Withdrawal", { Total: "500", ID: "WD1" }), ACC, makeResolver());
       expect(act!.activityType).toBe("WITHDRAWAL");
       expect(act!.amount).toBe(500);
+    });
+  });
+
+  describe("date normalisation", () => {
+    it("converts T212 space-separated UTC time to ISO 8601", async () => {
+      const act = await mapCsvRow(
+        tradeRow("Market buy", { Time: "2025-01-15 10:00:00", ID: "D1" }),
+        ACC,
+        RESOLVER,
+      );
+      expect(act!.date).toBe("2025-01-15T10:00:00Z");
+    });
+
+    it("preserves a fractional-seconds time", async () => {
+      const act = await mapCsvRow(
+        tradeRow("Market buy", { Time: "2025-01-15 10:00:00.123", ID: "D2" }),
+        ACC,
+        RESOLVER,
+      );
+      expect(act!.date).toBe("2025-01-15T10:00:00.123Z");
+    });
+
+    it("passes through an already-ISO time", async () => {
+      const act = await mapCsvRow(
+        tradeRow("Market buy", { Time: "2025-01-15T10:00:00.000Z", ID: "D3" }),
+        ACC,
+        RESOLVER,
+      );
+      expect(act!.date).toBe("2025-01-15T10:00:00.000Z");
     });
   });
 

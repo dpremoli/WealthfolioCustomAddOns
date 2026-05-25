@@ -211,20 +211,50 @@ async function syncOne(
     let imported = 0;
     let duplicates = 0;
     if (activities.length > 0) {
-      const checked = await ctx.api.activities.checkImport(activities);
+      let checked: ActivityImport[];
+      try {
+        checked = await ctx.api.activities.checkImport(activities);
+      } catch (e) {
+        throw new Error(
+          `checkImport rejected ${activities.length} activities: ${errDetail(e)} — first: ${describeActivity(activities[0])}`,
+        );
+      }
+
+      const invalid = checked.filter((a) => a.isValid === false);
       const toImport = checked.filter((a) => a.isValid !== false && !a.duplicateOfId);
       const dupes = checked.filter((a) => a.duplicateOfId);
       duplicates = dupes.length;
 
       if (toImport.length > 0) {
-        const res = await ctx.api.activities.import(toImport);
-        imported = res.summary.imported;
+        try {
+          const res = await ctx.api.activities.import(toImport);
+          imported = res.summary.imported;
+        } catch (e) {
+          throw new Error(
+            `import rejected ${toImport.length} activities: ${errDetail(e)} — first: ${describeActivity(toImport[0])}`,
+          );
+        }
       }
 
       const accounted = [...toImport, ...dupes]
         .map((a) => a.id)
         .filter((id): id is string => !!id);
       await addImportedRefs(ctx, conn.id, accounted);
+
+      // Nothing imported but rows were flagged invalid — surface why.
+      if (imported === 0 && invalid.length > 0) {
+        const withErrors = invalid.find((a) => a.errors && Object.keys(a.errors).length > 0);
+        const detail = withErrors?.errors
+          ? JSON.stringify(withErrors.errors)
+          : "no detail provided";
+        return {
+          ...base,
+          imported,
+          duplicates,
+          unresolved,
+          error: `${invalid.length}/${activities.length} rows invalid: ${detail} — first: ${describeActivity(invalid[0])}`,
+        };
+      }
     }
 
     await setLastSync(ctx, conn.id, new Date().toISOString());
@@ -237,6 +267,23 @@ async function syncOne(
         : (err as Error).message;
     return { ...base, imported: 0, duplicates: 0, unresolved: 0, error: message };
   }
+}
+
+/** Extracts a readable message from a thrown value (Error, string, or object). */
+function errDetail(e: unknown): string {
+  if (e instanceof Error) return e.message;
+  if (typeof e === "string") return e;
+  try {
+    return JSON.stringify(e);
+  } catch {
+    return String(e);
+  }
+}
+
+/** One-line summary of an activity for diagnostic error messages. */
+function describeActivity(a: ActivityImport | undefined): string {
+  if (!a) return "(none)";
+  return `${a.activityType} ${a.symbol ?? "-"} ${String(a.date ?? "")} amt=${a.amount ?? "-"} qty=${a.quantity ?? "-"} px=${a.unitPrice ?? "-"} fee=${a.fee ?? "-"} ccy=${a.currency ?? "-"} fx=${a.fxRate ?? "-"}`;
 }
 
 export function useSync(ctx: AddonContext) {

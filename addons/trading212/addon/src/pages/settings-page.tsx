@@ -12,7 +12,7 @@ import {
 } from "@wealthfolio/ui";
 import { useEffect, useState } from "react";
 import { Trading212ProxyClient } from "../lib/proxy-client";
-import type { T212Connection, T212Env, T212Settings } from "../types";
+import type { T212Connection, T212Env, T212Settings, T212TrackingMode } from "../types";
 import {
   addConnection,
   connectionConfig,
@@ -88,7 +88,8 @@ function ConnectionRow({
           {badge}
         </div>
         <p className="text-xs text-muted-foreground">
-          {settings.env === "live" ? "Live" : "Demo"} · key {maskKey(conn.apiKey)}
+          {settings.env === "live" ? "Live" : "Demo"} · key {maskKey(conn.apiKey)} ·{" "}
+          {(conn.trackingMode ?? "TRANSACTIONS") === "HOLDINGS" ? "Holdings" : "Transactions"}
         </p>
       </div>
       <div className="flex gap-2">
@@ -112,6 +113,7 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
   const [settingsSaved, setSettingsSaved] = useState<string | null>(null);
 
   const [accountType, setAccountType] = useState<"invest" | "isa">("invest");
+  const [trackingMode, setTrackingMode] = useState<T212TrackingMode>("HOLDINGS");
   const [name, setName] = useState("Trading 212 (Invest)");
   const [nameTouched, setNameTouched] = useState(false);
   const [apiKey, setApiKey] = useState("");
@@ -185,7 +187,7 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
         apiSecret: apiSecret.trim() || undefined,
       });
       const summary = await new Trading212ProxyClient(cfg).getAccountSummary();
-      const accountId = await ensureProviderAccount(ctx, name.trim(), summary);
+      const accountId = await ensureProviderAccount(ctx, name.trim(), summary, trackingMode);
 
       await addConnection(ctx, {
         id: randomId(),
@@ -193,6 +195,7 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
         apiKey: apiKey.trim(),
         apiSecret: apiSecret.trim() || undefined,
         accountId,
+        trackingMode,
       });
 
       queryClient.invalidateQueries({ queryKey: ["t212_connections"] });
@@ -337,6 +340,28 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
                 </Button>
               ))}
             </div>
+          </div>
+          <div className="space-y-1">
+            <label className="text-sm font-medium">Sync mode</label>
+            <div className="flex gap-2">
+              {(["HOLDINGS", "TRANSACTIONS"] as T212TrackingMode[]).map((m) => (
+                <Button
+                  key={m}
+                  variant={trackingMode === m ? "default" : "outline"}
+                  size="sm"
+                  onClick={() => setTrackingMode(m)}
+                >
+                  {m === "HOLDINGS" ? "Holdings" : "Transactions"}
+                </Button>
+              ))}
+            </div>
+            <p className="text-xs text-muted-foreground">
+              {trackingMode === "HOLDINGS"
+                ? "Holdings: sync only your current positions and cash as a snapshot — instant, no history."
+                : "Transactions: import full trade/dividend/cash history. The first sync can take a few minutes."}{" "}
+              The mode is fixed when the account is created; to change it later, switch the account's
+              tracking mode in Wealthfolio and re-sync.
+            </p>
           </div>
           <div className="space-y-1">
             <label className="text-sm font-medium">Account name</label>

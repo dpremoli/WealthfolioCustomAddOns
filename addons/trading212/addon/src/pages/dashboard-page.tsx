@@ -1,6 +1,14 @@
 import { useQuery } from "@tanstack/react-query";
 import type { AddonContext } from "@wealthfolio/addon-sdk";
 import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
   Badge,
   Button,
   Card,
@@ -13,11 +21,21 @@ import {
 import { useEffect, useState } from "react";
 import { useSync } from "../hooks/use-sync";
 import { getConnections, getSyncState, migrateLegacyConfig } from "../hooks/use-config";
-import type { SyncResult } from "../types";
+import type { SyncResult, T212TrackingMode } from "../types";
+
+interface ModeDrift {
+  id: string;
+  name: string;
+  from: T212TrackingMode;
+  to: T212TrackingMode;
+}
+
+const modeLabel = (m: T212TrackingMode) => (m === "HOLDINGS" ? "Holdings" : "Transactions");
 
 export default function DashboardPage({ ctx }: { ctx: AddonContext }) {
   const { isSyncing, results, error, progress, syncAll } = useSync(ctx);
   const [migrated, setMigrated] = useState(false);
+  const [pendingDrifts, setPendingDrifts] = useState<ModeDrift[]>([]);
 
   useEffect(() => {
     migrateLegacyConfig(ctx).finally(() => setMigrated(true));
@@ -48,7 +66,67 @@ export default function DashboardPage({ ctx }: { ctx: AddonContext }) {
     ctx.api.navigation.navigate("/addons/trading212/settings");
   }
 
+  // Detect accounts whose tracking mode was changed in Wealthfolio after setup. The
+  // add-on can't change it back, so re-syncing means clearing the old mode's data —
+  // confirm that destructive step before running.
+  async function handleSync() {
+    const conns = connections ?? [];
+    const accounts = await ctx.api.accounts.getAll();
+    const drifts: ModeDrift[] = [];
+    for (const c of conns) {
+      const live = accounts.find((a) => a.id === c.accountId)?.trackingMode;
+      const current = (c.trackingMode ?? "TRANSACTIONS") as T212TrackingMode;
+      if (live && live !== "NOT_SET" && live !== current) {
+        drifts.push({ id: c.id, name: c.name, from: current, to: live });
+      }
+    }
+    if (drifts.length > 0) {
+      setPendingDrifts(drifts);
+      return;
+    }
+    syncAll();
+  }
+
+  function confirmDrifts() {
+    const ids = new Set(pendingDrifts.map((d) => d.id));
+    setPendingDrifts([]);
+    syncAll(ids);
+  }
+
+  function cancelDrifts() {
+    setPendingDrifts([]);
+    syncAll(new Set());
+  }
+
   return (
+    <>
+    <AlertDialog open={pendingDrifts.length > 0} onOpenChange={(o) => !o && setPendingDrifts([])}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Tracking mode changed</AlertDialogTitle>
+          <AlertDialogDescription asChild>
+            <div className="space-y-2">
+              <p>
+                The tracking mode of {pendingDrifts.length > 1 ? "these accounts was" : "this account was"}{" "}
+                changed in Wealthfolio. Re-syncing will <strong>delete</strong> the data synced under
+                the previous mode and rebuild it in the new one:
+              </p>
+              <ul className="list-disc pl-5">
+                {pendingDrifts.map((d) => (
+                  <li key={d.id}>
+                    <strong>{d.name}</strong>: {modeLabel(d.from)} → {modeLabel(d.to)}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel onClick={cancelDrifts}>Skip these</AlertDialogCancel>
+          <AlertDialogAction onClick={confirmDrifts}>Clear and re-sync</AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
     <div className="space-y-6 p-6 max-w-2xl">
       <div className="flex items-center justify-between">
         <div>
@@ -61,7 +139,7 @@ export default function DashboardPage({ ctx }: { ctx: AddonContext }) {
           <Button variant="outline" size="lg" onClick={openSettings}>
             Settings
           </Button>
-          <Button onClick={syncAll} disabled={!canSync} size="lg">
+          <Button onClick={handleSync} disabled={!canSync} size="lg">
             {isSyncing ? "Syncing…" : "Sync All"}
           </Button>
         </div>
@@ -165,5 +243,6 @@ export default function DashboardPage({ ctx }: { ctx: AddonContext }) {
         </p>
       )}
     </div>
+    </>
   );
 }

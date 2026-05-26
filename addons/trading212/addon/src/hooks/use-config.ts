@@ -5,6 +5,7 @@ import type {
   T212Config,
   T212Connection,
   T212Settings,
+  T212TrackingMode,
 } from "../types";
 
 /** Wealthfolio account `provider` tag for accounts this addon creates. */
@@ -97,6 +98,7 @@ export async function ensureProviderAccount(
   ctx: AddonContext,
   name: string,
   summary: AccountSummary,
+  trackingMode: T212TrackingMode = "TRANSACTIONS",
 ): Promise<string> {
   const accounts = await ctx.api.accounts.getAll();
   const providerId = String(summary.id);
@@ -111,12 +113,37 @@ export async function ensureProviderAccount(
     currency: summary.currency || "GBP",
     isDefault: false,
     isActive: true,
-    trackingMode: "TRANSACTIONS",
+    trackingMode,
     provider: PROVIDER,
     providerAccountId: providerId,
   });
   return created.id;
 }
+
+/** Removes all data this add-on synced into an account under a given mode, then
+ *  resets the connection's sync state. Used when a tracking-mode change is detected
+ *  and confirmed: the stale data from the previous mode is cleared before re-syncing. */
+export async function clearAccountData(
+  ctx: AddonContext,
+  connectionId: string,
+  accountId: string,
+  mode: T212TrackingMode,
+): Promise<void> {
+  if (mode === "HOLDINGS") {
+    const snapshots = await ctx.api.snapshots.getAll(accountId);
+    for (const s of snapshots) await ctx.api.snapshots.delete(accountId, s.snapshotDate);
+  } else {
+    const activities = await ctx.api.activities.getAll(accountId);
+    const ids = activities.map((a) => a.id).filter((id): id is string => Boolean(id));
+    // Chunk deletes so a large history stays under the backend's batch limit.
+    for (let i = 0; i < ids.length; i += CLEAR_CHUNK_SIZE) {
+      await ctx.api.activities.saveMany({ deleteIds: ids.slice(i, i + CLEAR_CHUNK_SIZE) });
+    }
+  }
+  await resetSyncState(ctx, connectionId);
+}
+
+const CLEAR_CHUNK_SIZE = 100;
 
 /** Builds the proxy-client config for one connection from the shared settings. */
 export function connectionConfig(settings: T212Settings, conn: T212Connection): T212Config {

@@ -105,6 +105,28 @@ account without aborting the rest. After the loop the symbol cache is written **
    and set its `lastSync` watermark to now. Return a `SyncResult` tagged with the
    connection/account.
 
+### Tracking modes (HOLDINGS vs TRANSACTIONS)
+
+Each connection syncs into its Wealthfolio account in one of two modes, chosen **at
+setup** (the "Sync mode" picker; default **Holdings**) and stored on the connection
+(`trackingMode`, absent ⇒ `TRANSACTIONS` for connections created before this existed):
+
+- **TRANSACTIONS** — the full flow above: CSV-export backfill on the first sync, JSON
+  incrementals thereafter. Gives complete history/performance.
+- **HOLDINGS** — `syncHoldings()` fetches `account/summary` + `positions` and writes a
+  single **snapshot** via `snapshots.save(accountId, holdings, cashBalances)` — instant,
+  no history, no rate-limited backfill. Positions whose symbol can't be resolved are
+  counted as `unresolved` and omitted.
+
+The Wealthfolio account's own `trackingMode` is **authoritative**: the SDK's `accounts`
+API has no `update`, so the add-on can only set the mode at `accounts.create(...)`. If a
+user changes the mode natively in Wealthfolio afterwards, `syncOne` **detects the drift**
+(live `account.trackingMode` ≠ the connection's recorded mode). Because reconciling means
+deleting the data synced under the old mode, the dashboard shows an **AlertDialog** and only
+the confirmed connections (passed to `syncAll(confirmedModeSwitches)`) are cleared via
+`clearAccountData` (`activities.saveMany({deleteIds})` for TRANSACTIONS, `snapshots.delete`
+per date for HOLDINGS) and re-synced; unconfirmed drifted connections are skipped.
+
 ### Activity mapping (`mapper.ts`)
 
 | Trading 212 source | `activityType` | Notes |

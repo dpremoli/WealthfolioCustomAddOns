@@ -1,5 +1,5 @@
-import type { ActivityImport } from "@wealthfolio/addon-sdk";
-import type { DividendItem, HistoricalOrder, TransactionItem } from "../types";
+import type { ActivityImport, SnapshotHoldingInput } from "@wealthfolio/addon-sdk";
+import type { DividendItem, HistoricalOrder, Position, TransactionItem } from "../types";
 
 type ActivityType = ActivityImport["activityType"];
 const BUY = "BUY" as ActivityType;
@@ -120,6 +120,26 @@ export function mapTransactionToActivity(
     currency,
     isValid: true,
     isDraft: false,
+  };
+}
+
+/**
+ * Maps a Trading 212 position to a holdings-snapshot entry. `symbol` is the
+ * Wealthfolio symbol already resolved from the position's ticker/ISIN. The
+ * snapshot API takes string-encoded numbers; `accountCurrency` is the fallback
+ * when the instrument doesn't carry its own currency.
+ */
+export function mapPositionToHolding(
+  pos: Position,
+  symbol: string,
+  accountCurrency: string,
+): SnapshotHoldingInput {
+  return {
+    symbol,
+    quantity: String(pos.quantity),
+    currency: pos.instrument?.currency || accountCurrency,
+    averageCost: pos.averagePricePaid != null ? String(pos.averagePricePaid) : undefined,
+    name: pos.instrument?.name,
   };
 }
 

@@ -36,6 +36,7 @@ interface Conn {
   apiKey: string;
   apiSecret?: string;
   accountId: string;
+  trackingMode?: "TRANSACTIONS" | "HOLDINGS";
 }
 
 type SyncStateMap = Record<string, { lastSync: string | null; importedRefs: string[] }>;
@@ -45,7 +46,9 @@ function makeCtx(opts: {
   checkImport?: (a: ActivityImport[]) => Promise<ActivityImport[]>;
   searchTicker?: () => Promise<unknown[]>;
   syncStates?: SyncStateMap;
-  existingAccounts?: { id: string; providerAccountId?: string }[];
+  existingAccounts?: { id: string; providerAccountId?: string; trackingMode?: string }[];
+  existingActivities?: { id: string }[];
+  existingSnapshots?: { snapshotDate: string }[];
 }) {
   const connections = opts.connections ?? [
     { id: "c1", name: "Trading 212 (Invest)", apiKey: "k", apiSecret: "s", accountId: "acc-1" },
@@ -78,6 +81,12 @@ function makeCtx(opts: {
     opts.existingAccounts ?? connections.map((c) => ({ id: c.accountId, providerAccountId: "" }));
   const accountsCreate = vi.fn(async () => ({ id: "acc-new" }));
 
+  const snapshotsSave = vi.fn(
+    async (_accountId: string, _holdings: unknown, _cash: Record<string, string>) => {},
+  );
+  const snapshotsDelete = vi.fn(async (_accountId: string, _date: string) => {});
+  const activitiesSaveMany = vi.fn(async (_req: { deleteIds?: string[] }) => ({}));
+
   return {
     ctx: {
       api: {
@@ -94,6 +103,13 @@ function makeCtx(opts: {
         activities: {
           checkImport: opts.checkImport ?? (async (a: ActivityImport[]) => a),
           import: importFn,
+          getAll: async () => opts.existingActivities ?? [],
+          saveMany: activitiesSaveMany,
+        },
+        snapshots: {
+          getAll: async () => opts.existingSnapshots ?? [],
+          save: snapshotsSave,
+          delete: snapshotsDelete,
         },
       },
     },
@@ -101,6 +117,9 @@ function makeCtx(opts: {
     importFn,
     searchTicker,
     accountsCreate,
+    snapshotsSave,
+    snapshotsDelete,
+    activitiesSaveMany,
   };
 }
 
@@ -492,5 +511,107 @@ describe("useSync — CSV export / hybrid path", () => {
     // JSON fallback imported the ORDER fixture
     expect(importFn).toHaveBeenCalledTimes(1);
     expect(result.current.results?.totals.imported).toBe(1);
+  });
+});
+
+// --- HOLDINGS mode + tracking-mode drift --------------------------------
+
+const POSITION = {
+  instrument: { ticker: "AAPL_US_EQ", isin: "US0378331005", name: "Apple Inc", currency: "USD" },
+  quantity: 3,
+  averagePricePaid: 150,
+};
+
+function routeHoldingsFetch(url: string): Response {
+  const u = String(url);
+  if (u.includes("account/summary"))
+    return jsonResponse({ id: 1, currency: "GBP", cash: { availableToTrade: 250 } });
+  if (u.includes("/positions")) return jsonResponse([POSITION]);
+  return jsonResponse([]);
+}
+
+describe("useSync — HOLDINGS mode", () => {
+  it("writes a positions/cash snapshot and skips activity import", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => routeHoldingsFetch(String(url))));
+
+    const { ctx, importFn, snapshotsSave, secrets } = makeCtx({
+      connections: [
+        { id: "c1", name: "Invest", apiKey: "k", accountId: "acc-1", trackingMode: "HOLDINGS" },
+      ],
+      existingAccounts: [{ id: "acc-1", trackingMode: "HOLDINGS" }],
+      syncStates: { c1: { lastSync: null, importedRefs: [] } },
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { result } = renderHook(() => useSync(ctx as any));
+
+    await act(async () => {
+      await result.current.syncAll();
+    });
+
+    expect(result.current.error).toBeNull();
+    expect(importFn).not.toHaveBeenCalled();
+    expect(snapshotsSave).toHaveBeenCalledTimes(1);
+
+    const [accountId, holdings, cash] = snapshotsSave.mock.calls[0];
+    expect(accountId).toBe("acc-1");
+    expect(holdings).toEqual([
+      { symbol: "AAPL", quantity: "3", currency: "USD", averageCost: "150", name: "Apple Inc" },
+    ]);
+    expect(cash).toEqual({ GBP: "250" });
+
+    expect(result.current.results?.totals.imported).toBe(1);
+    expect(JSON.parse(secrets.get("t212_sync_c1")!).lastSync).toBeTruthy();
+  });
+});
+
+describe("useSync — tracking-mode drift", () => {
+  it("skips a drifted connection that has not been confirmed (no clearing)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => routeHoldingsFetch(String(url))));
+
+    // Connection recorded as TRANSACTIONS but the WF account is now HOLDINGS.
+    const { ctx, snapshotsSave, activitiesSaveMany } = makeCtx({
+      connections: [
+        { id: "c1", name: "Invest", apiKey: "k", accountId: "acc-1", trackingMode: "TRANSACTIONS" },
+      ],
+      existingAccounts: [{ id: "acc-1", trackingMode: "HOLDINGS" }],
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { result } = renderHook(() => useSync(ctx as any));
+
+    await act(async () => {
+      await result.current.syncAll(); // empty confirmation set
+    });
+
+    const r = result.current.results!.perAccount[0];
+    expect(r.error).toContain("Tracking mode changed");
+    expect(activitiesSaveMany).not.toHaveBeenCalled();
+    expect(snapshotsSave).not.toHaveBeenCalled();
+  });
+
+  it("clears old-mode data and re-syncs when the switch is confirmed", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => routeHoldingsFetch(String(url))));
+
+    // Old mode TRANSACTIONS with two imported activities; account now HOLDINGS.
+    const { ctx, snapshotsSave, activitiesSaveMany, secrets } = makeCtx({
+      connections: [
+        { id: "c1", name: "Invest", apiKey: "k", accountId: "acc-1", trackingMode: "TRANSACTIONS" },
+      ],
+      existingAccounts: [{ id: "acc-1", trackingMode: "HOLDINGS" }],
+      existingActivities: [{ id: "a1" }, { id: "a2" }],
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { result } = renderHook(() => useSync(ctx as any));
+
+    await act(async () => {
+      await result.current.syncAll(new Set(["c1"]));
+    });
+
+    expect(result.current.error).toBeNull();
+    // Old TRANSACTIONS data cleared via saveMany({deleteIds}).
+    expect(activitiesSaveMany).toHaveBeenCalledWith({ deleteIds: ["a1", "a2"] });
+    // Re-synced in the new HOLDINGS mode.
+    expect(snapshotsSave).toHaveBeenCalledTimes(1);
+    // Connection's recorded mode updated to the new mode.
+    expect(JSON.parse(secrets.get("t212_connections")!)[0].trackingMode).toBe("HOLDINGS");
   });
 });

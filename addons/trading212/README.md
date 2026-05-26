@@ -84,11 +84,21 @@ In Wealthfolio: **Settings → Add-ons → Install from ZIP**.
 2. Under **Connection settings**, enter the proxy URL (`http://YOUR_SERVER_IP:8000`),
    pick **Live** or **Demo**, and click **Save settings**. (Shared by every account.)
 3. Under **Add account**, pick the type (**Invest** or **Stocks ISA** — this sets the
-   account name, which you can edit), then paste that account's **API Key** (and Secret)
-   and click **Add account**. A Wealthfolio **securities** account (tracking mode
-   `TRANSACTIONS`) is created automatically. Repeat to add more keys — each Trading 212
-   account has its own key.
+   account name, which you can edit), choose a **Sync mode** (see below), then paste that
+   account's **API Key** (and Secret) and click **Add account**. A Wealthfolio
+   **securities** account is created automatically in the chosen mode. Repeat to add more
+   keys — each Trading 212 account has its own key.
 4. Go back to the dashboard and click **Sync All**.
+
+> **Sync mode (per account, chosen at setup):**
+> - **Holdings** (default) — syncs only your *current positions and cash* as a snapshot.
+>   Instant, no history, no rate-limited backfill. Best for a quick portfolio view.
+> - **Transactions** — imports your *full* trade/dividend/cash history (the first sync
+>   walks back year by year and can take a few minutes). Best for performance tracking.
+>
+> The mode is fixed when the account is created — the add-on can't change it afterwards.
+> To switch, change the account's tracking mode in Wealthfolio, then **Sync All**: the
+> add-on detects the change and asks before clearing the old data and re-syncing.
 
 > **Renaming / removing:** rename or delete the accounts in Wealthfolio's own **Accounts**
 > page. Removing an account in the add-on only forgets the API key — the Wealthfolio

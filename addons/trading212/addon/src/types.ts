@@ -3,6 +3,11 @@
 
 export type T212Env = "live" | "demo";
 
+// How the add-on syncs a connection into its Wealthfolio account. Mirrors the
+// account's own `trackingMode`: TRANSACTIONS imports the full activity history;
+// HOLDINGS writes a current positions/cash snapshot.
+export type T212TrackingMode = "TRANSACTIONS" | "HOLDINGS";
+
 export interface T212Config {
   proxyUrl: string;
   env: T212Env;
@@ -23,6 +28,9 @@ export interface T212Connection {
   apiKey: string;
   apiSecret?: string;
   accountId: string; // linked Wealthfolio securities account id
+  // Mode the linked account was created in / last synced in. Absent ⇒ TRANSACTIONS
+  // (connections created before the mode picker existed keep their behaviour).
+  trackingMode?: T212TrackingMode;
 }
 
 // Per-connection sync state (stored under t212_sync_{id}).

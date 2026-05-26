@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
 import {
   addConnection,
+  clearAccountData,
+  ensureProviderAccount,
   getConnections,
   migrateLegacyConfig,
   removeConnection,
@@ -63,6 +65,120 @@ describe("connection CRUD", () => {
 
     expect(ctxWrap.secrets.has("t212_sync_a")).toBe(false);
     expect(ctxWrap.accountsCalled()).toBe(false);
+  });
+});
+
+describe("ensureProviderAccount", () => {
+  it("creates the account in the requested tracking mode", async () => {
+    let createdWith: { trackingMode?: string } | null = null;
+    const ctx = {
+      api: {
+        accounts: {
+          getAll: async () => [],
+          create: async (a: { trackingMode?: string }) => {
+            createdWith = a;
+            return { id: "acc-new" };
+          },
+        },
+      },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any;
+
+    const id = await ensureProviderAccount(ctx, "Invest", { id: 1, currency: "GBP" }, "HOLDINGS");
+    expect(id).toBe("acc-new");
+    expect(createdWith!.trackingMode).toBe("HOLDINGS");
+  });
+
+  it("defaults to TRANSACTIONS when no mode is given", async () => {
+    let createdWith: { trackingMode?: string } | null = null;
+    const ctx = {
+      api: {
+        accounts: {
+          getAll: async () => [],
+          create: async (a: { trackingMode?: string }) => {
+            createdWith = a;
+            return { id: "acc-new" };
+          },
+        },
+      },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any;
+
+    await ensureProviderAccount(ctx, "Invest", { id: 1, currency: "GBP" });
+    expect(createdWith!.trackingMode).toBe("TRANSACTIONS");
+  });
+});
+
+describe("clearAccountData", () => {
+  it("deletes all activities then resets sync state in TRANSACTIONS mode", async () => {
+    const secrets = new Map<string, string>([
+      ["t212_sync_c1", JSON.stringify({ lastSync: "2026-01-01", importedRefs: ["r1"] })],
+    ]);
+    const deleted: string[] = [];
+    const ctx = {
+      api: {
+        secrets: {
+          get: async (k: string) => secrets.get(k) ?? null,
+          set: async (k: string, v: string) => void secrets.set(k, v),
+          delete: async (k: string) => void secrets.delete(k),
+        },
+        activities: {
+          getAll: async () => [{ id: "a1" }, { id: "a2" }, { id: undefined }],
+          saveMany: async (req: { deleteIds?: string[] }) => {
+            deleted.push(...(req.deleteIds ?? []));
+            return {};
+          },
+        },
+        snapshots: { getAll: async () => [], delete: async () => {} },
+      },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any;
+
+    await clearAccountData(ctx, "c1", "acc-1", "TRANSACTIONS");
+
+    expect(deleted).toEqual(["a1", "a2"]);
+    expect(secrets.has("t212_sync_c1")).toBe(false);
+  });
+
+  it("deletes each snapshot date then resets sync state in HOLDINGS mode", async () => {
+    const secrets = new Map<string, string>([
+      ["t212_sync_c1", JSON.stringify({ lastSync: "2026-01-01", importedRefs: [] })],
+    ]);
+    const deletedDates: string[] = [];
+    let activitiesTouched = false;
+    const ctx = {
+      api: {
+        secrets: {
+          get: async (k: string) => secrets.get(k) ?? null,
+          set: async (k: string, v: string) => void secrets.set(k, v),
+          delete: async (k: string) => void secrets.delete(k),
+        },
+        activities: {
+          getAll: async () => {
+            activitiesTouched = true;
+            return [];
+          },
+          saveMany: async () => {
+            activitiesTouched = true;
+            return {};
+          },
+        },
+        snapshots: {
+          getAll: async () => [
+            { snapshotDate: "2026-01-01" },
+            { snapshotDate: "2026-02-01" },
+          ],
+          delete: async (_acc: string, date: string) => void deletedDates.push(date),
+        },
+      },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any;
+
+    await clearAccountData(ctx, "c1", "acc-1", "HOLDINGS");
+
+    expect(deletedDates).toEqual(["2026-01-01", "2026-02-01"]);
+    expect(activitiesTouched).toBe(false);
+    expect(secrets.has("t212_sync_c1")).toBe(false);
   });
 });
 

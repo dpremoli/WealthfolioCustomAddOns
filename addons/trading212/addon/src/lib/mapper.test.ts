@@ -2,9 +2,10 @@ import { describe, it, expect } from "vitest";
 import {
   mapDividendToActivity,
   mapOrderToActivity,
+  mapPositionToHolding,
   mapTransactionToActivity,
 } from "./mapper";
-import type { DividendItem, HistoricalOrder, TransactionItem } from "../types";
+import type { DividendItem, HistoricalOrder, Position, TransactionItem } from "../types";
 
 describe("mapOrderToActivity", () => {
   const baseOrder: HistoricalOrder = {
@@ -113,5 +114,34 @@ describe("mapTransactionToActivity", () => {
     expect(
       mapTransactionToActivity({ ...base, type: "TRANSFER", amount: -50 }, "acc-1").activityType,
     ).toBe("TRANSFER_OUT");
+  });
+});
+
+describe("mapPositionToHolding", () => {
+  const base: Position = {
+    instrument: { ticker: "AAPL_US_EQ", isin: "US0378331005", name: "Apple Inc", currency: "USD" },
+    quantity: 3.5,
+    averagePricePaid: 170.25,
+  };
+
+  it("maps quantity, currency, averageCost and name as strings", () => {
+    const h = mapPositionToHolding(base, "AAPL", "GBP");
+    expect(h).toEqual({
+      symbol: "AAPL",
+      quantity: "3.5",
+      currency: "USD",
+      averageCost: "170.25",
+      name: "Apple Inc",
+    });
+  });
+
+  it("falls back to the account currency when the instrument has none", () => {
+    const pos: Position = { ...base, instrument: { ticker: "X", name: "X" } };
+    expect(mapPositionToHolding(pos, "X", "GBP").currency).toBe("GBP");
+  });
+
+  it("omits averageCost when averagePricePaid is missing", () => {
+    const pos: Position = { instrument: { ticker: "X" }, quantity: 1 };
+    expect(mapPositionToHolding(pos, "X", "GBP").averageCost).toBeUndefined();
   });
 });

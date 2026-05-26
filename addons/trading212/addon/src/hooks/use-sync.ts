@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { ActivityImport, AddonContext } from "@wealthfolio/addon-sdk";
+import type { Account, ActivityImport, AddonContext, SnapshotHoldingInput } from "@wealthfolio/addon-sdk";
 import type {
   DividendItem,
   ExportReport,
@@ -10,18 +10,21 @@ import type {
   SyncResult,
   T212Connection,
   T212Settings,
+  T212TrackingMode,
   TransactionItem,
 } from "../types";
 import { Trading212ProxyClient, cursorFromNextPage, transactionPageParams } from "../lib/proxy-client";
 import {
   mapDividendToActivity,
   mapOrderToActivity,
+  mapPositionToHolding,
   mapTransactionToActivity,
 } from "../lib/mapper";
 import { parseCsv, mapCsvRow } from "../lib/csv";
 import { SymbolResolver } from "../lib/symbol-resolver";
 import {
   addImportedRefs,
+  clearAccountData,
   connectionConfig,
   ensureProviderAccount,
   getConnections,
@@ -35,6 +38,11 @@ import {
   setSymbolMap,
   updateConnection,
 } from "./use-config";
+
+/** Effective tracking mode of a connection (absent ⇒ TRANSACTIONS). */
+function connectionMode(conn: T212Connection): T212TrackingMode {
+  return conn.trackingMode ?? "TRANSACTIONS";
+}
 
 interface SyncState {
   isSyncing: boolean;
@@ -163,26 +171,74 @@ async function collectJsonActivities(
 }
 
 /**
- * Returns the Wealthfolio account id to import into, healing a stale link. If the
- * linked account was deleted in Wealthfolio, recreate it, re-link the connection,
- * and reset this connection's sync state so the (now-gone) history re-imports
- * cleanly instead of every row failing with "Record not found".
+ * Returns the Wealthfolio account to sync into, healing a stale link. If the
+ * linked account was deleted in Wealthfolio, recreate it (in the connection's
+ * tracking mode), re-link the connection, and reset this connection's sync state
+ * so the (now-gone) history re-imports cleanly instead of every row failing with
+ * "Record not found". `account` is null when freshly recreated.
  */
 async function resolveAccountId(
   ctx: AddonContext,
   conn: T212Connection,
   client: Trading212ProxyClient,
   log: string[],
-): Promise<string> {
+): Promise<{ accountId: string; account: Account | null }> {
   const accounts = await ctx.api.accounts.getAll();
-  if (accounts.some((a) => a.id === conn.accountId)) return conn.accountId;
+  const match = accounts.find((a) => a.id === conn.accountId);
+  if (match) return { accountId: match.id, account: match };
 
   log.push("Linked Wealthfolio account not found — recreating and resetting sync state.");
   const summary = await client.getAccountSummary();
-  const accountId = await ensureProviderAccount(ctx, conn.name, summary);
+  const accountId = await ensureProviderAccount(ctx, conn.name, summary, connectionMode(conn));
   await updateConnection(ctx, conn.id, { accountId });
   await resetSyncState(ctx, conn.id);
-  return accountId;
+  return { accountId, account: null };
+}
+
+/** HOLDINGS-mode sync: writes a current positions + cash snapshot (no history). */
+async function syncHoldings(
+  ctx: AddonContext,
+  client: Trading212ProxyClient,
+  conn: T212Connection,
+  accountId: string,
+  resolver: SymbolResolver,
+  onProgress: ProgressFn,
+  log: string[],
+  base: { connectionId: string; accountId: string; accountName: string; log: string[] },
+): Promise<SyncResult> {
+  log.push("Holdings sync — writing a current positions snapshot.");
+  onProgress({ phase: "export", message: "Fetching current positions…" });
+  const summary = await client.getAccountSummary();
+  const positions = await client.getPositions();
+  const accountCurrency = summary.currency || "GBP";
+
+  onProgress({ phase: "map", message: "Matching symbols…" });
+  const holdings: SnapshotHoldingInput[] = [];
+  let unresolved = 0;
+  for (const pos of positions) {
+    const ticker = pos.instrument?.ticker ?? pos.ticker;
+    if (!ticker) continue;
+    const symbol = await resolver.resolve(ticker, pos.instrument);
+    if (!symbol) {
+      unresolved++;
+      continue;
+    }
+    holdings.push(mapPositionToHolding(pos, symbol, accountCurrency));
+  }
+
+  const cashBalances: Record<string, string> = {
+    [accountCurrency]: String(summary.cash?.availableToTrade ?? 0),
+  };
+
+  onProgress({ phase: "import", message: `Saving snapshot (${holdings.length} holdings)…` });
+  await ctx.api.snapshots.save(accountId, holdings, cashBalances);
+  await setLastSync(ctx, conn.id, new Date().toISOString());
+
+  log.push(`Snapshot saved: ${holdings.length} holdings, cash ${cashBalances[accountCurrency]} ${accountCurrency}.`);
+  if (unresolved > 0) log.push(`${unresolved} positions skipped (symbol not matched).`);
+  onProgress({ phase: "done", message: "Snapshot saved." });
+
+  return { ...base, imported: holdings.length, duplicates: 0, unresolved };
 }
 
 /** Syncs one connection into its linked Wealthfolio account. */
@@ -192,14 +248,47 @@ async function syncOne(
   conn: T212Connection,
   resolver: SymbolResolver,
   onProgress: ProgressFn,
+  confirmedModeSwitches: Set<string>,
 ): Promise<SyncResult> {
   const log: string[] = [];
   const base = { connectionId: conn.id, accountId: conn.accountId, accountName: conn.name, log };
   try {
     const client = new Trading212ProxyClient(connectionConfig(settings, conn));
     // Heal a stale account link (account deleted in Wealthfolio) before doing anything.
-    const accountId = await resolveAccountId(ctx, conn, client, log);
+    const { accountId, account } = await resolveAccountId(ctx, conn, client, log);
     base.accountId = accountId;
+
+    // Reconcile the tracking mode. The Wealthfolio account's mode is authoritative
+    // (the add-on can't change it after creation); if the user switched it natively,
+    // the data we synced under the old mode is now stale. Clearing is destructive, so
+    // it only happens once the dashboard has confirmed this connection's switch.
+    const current = connectionMode(conn);
+    const liveMode = account?.trackingMode;
+    let mode: T212TrackingMode = current;
+    if (liveMode && liveMode !== "NOT_SET" && liveMode !== current) {
+      if (!confirmedModeSwitches.has(conn.id)) {
+        log.push(
+          `Tracking mode changed to ${liveMode} in Wealthfolio — confirm in the dashboard to clear the ${current} data and re-sync.`,
+        );
+        return {
+          ...base,
+          imported: 0,
+          duplicates: 0,
+          unresolved: 0,
+          error: `Tracking mode changed to ${liveMode}. Run Sync All and confirm to re-sync.`,
+        };
+      }
+      log.push(`Tracking mode changed ${current} → ${liveMode}; clearing ${current} data and re-syncing.`);
+      onProgress({ phase: "map", message: `Clearing ${current.toLowerCase()} data…` });
+      await clearAccountData(ctx, conn.id, accountId, current);
+      await updateConnection(ctx, conn.id, { trackingMode: liveMode });
+      mode = liveMode;
+    }
+
+    if (mode === "HOLDINGS") {
+      return await syncHoldings(ctx, client, conn, accountId, resolver, onProgress, log, base);
+    }
+
     const { lastSync: since, backfillCheckpoint } = await getSyncState(ctx, conn.id);
     const importedRefs = await getImportedRefs(ctx, conn.id);
 
@@ -498,7 +587,7 @@ export function useSync(ctx: AddonContext) {
     progress: null,
   });
 
-  async function syncAll() {
+  async function syncAll(confirmedModeSwitches: Set<string> = new Set()) {
     setState((s) => ({ ...s, isSyncing: true, error: null, progress: null }));
     try {
       const settings = await getSettings(ctx);
@@ -518,7 +607,9 @@ export function useSync(ctx: AddonContext) {
       for (const conn of connections) {
         const report: ProgressFn = (p) =>
           setState((s) => ({ ...s, progress: { accountName: conn.name, ...p } }));
-        perAccount.push(await syncOne(ctx, settings, conn, resolver, report));
+        perAccount.push(
+          await syncOne(ctx, settings, conn, resolver, report, confirmedModeSwitches),
+        );
       }
 
       if (resolver.isDirty) await setSymbolMap(ctx, resolver.snapshot());

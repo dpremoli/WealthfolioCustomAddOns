@@ -90,7 +90,9 @@ export default function DashboardPage({ ctx }: { ctx: AddonContext }) {
 
       {isSyncing && (
         <p className="text-sm text-muted-foreground animate-pulse">
-          Syncing activity… (Trading 212 is rate-limited, this can take a moment)
+          Syncing activity… A first full-history sync walks back year by year and
+          can take a few minutes — Trading 212 is rate-limited, so this is normal.
+          You can leave this open; it'll finish on its own.
         </p>
       )}
 

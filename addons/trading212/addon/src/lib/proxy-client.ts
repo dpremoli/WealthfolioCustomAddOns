@@ -161,10 +161,14 @@ export class Trading212ProxyClient {
    *
    * @param opts       Optional timeFrom / timeTo to scope the export.
    * @param pollMs     Milliseconds between status polls (default 65 s — 1/min limit).
+   * @param firstPollMs  Delay before the first poll. T212 usually finishes an
+   *                     export within ~10-15 s, so check early; later polls fall
+   *                     back to pollMs to respect the 1/min list limit.
    */
   async runExport(
     opts: { timeFrom?: string; timeTo?: string; knownReports?: ExportReport[] } = {},
     pollMs = 65_000,
+    firstPollMs = 12_000,
   ): Promise<string> {
     const covers = (r: ExportReport) =>
       (!opts.timeFrom || r.timeFrom <= opts.timeFrom) &&
@@ -202,10 +206,14 @@ export class Trading212ProxyClient {
       reportId = result.reportId;
     }
 
-    // Poll until the report finishes or we hit the 10-minute cap.
+    // Poll until the report finishes or we hit the 10-minute cap. Check early
+    // (firstPollMs) since exports usually finish in ~10-15 s, then back off to
+    // pollMs so the 1/min list endpoint isn't hammered while a slow one runs.
     const deadline = Date.now() + 10 * 60 * 1000;
+    let firstPoll = true;
     while (Date.now() < deadline) {
-      await sleep(pollMs);
+      await sleep(firstPoll ? Math.min(firstPollMs, pollMs) : pollMs);
+      firstPoll = false;
       const reports = await this.listExports();
       const report = reports.find((r) => r.reportId === reportId);
       if (!report) continue;

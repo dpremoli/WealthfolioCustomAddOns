@@ -180,3 +180,13 @@ export interface MultiSyncResult {
   perAccount: SyncResult[];
   totals: { imported: number; duplicates: number; unresolved: number };
 }
+
+/** Live progress emitted during a sync so the UI can show the current step. */
+export interface SyncProgress {
+  accountName: string;
+  phase: "export" | "map" | "import" | "done";
+  message: string;
+  // When both are set the UI can show a determinate bar; otherwise indeterminate.
+  current?: number;
+  total?: number;
+}

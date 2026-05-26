@@ -8,6 +8,7 @@ import {
   CardDescription,
   CardHeader,
   CardTitle,
+  Progress,
 } from "@wealthfolio/ui";
 import { useEffect, useState } from "react";
 import { useSync } from "../hooks/use-sync";
@@ -15,7 +16,7 @@ import { getConnections, getSyncState, migrateLegacyConfig } from "../hooks/use-
 import type { SyncResult } from "../types";
 
 export default function DashboardPage({ ctx }: { ctx: AddonContext }) {
-  const { isSyncing, results, error, syncAll } = useSync(ctx);
+  const { isSyncing, results, error, progress, syncAll } = useSync(ctx);
   const [migrated, setMigrated] = useState(false);
 
   useEffect(() => {
@@ -89,11 +90,32 @@ export default function DashboardPage({ ctx }: { ctx: AddonContext }) {
       )}
 
       {isSyncing && (
-        <p className="text-sm text-muted-foreground animate-pulse">
-          Syncing activity… A first full-history sync walks back year by year and
-          can take a few minutes — Trading 212 is rate-limited, so this is normal.
-          You can leave this open; it'll finish on its own.
-        </p>
+        <div className="space-y-2">
+          <div className="flex items-center justify-between gap-3 text-sm">
+            <span className="font-medium">
+              {progress?.accountName ? `${progress.accountName}: ` : ""}
+              {progress?.message ?? "Starting sync…"}
+            </span>
+            {progress?.total ? (
+              <span className="text-muted-foreground tabular-nums">
+                {Math.min(progress.current ?? 0, progress.total)}/{progress.total}
+              </span>
+            ) : null}
+          </div>
+          <Progress
+            value={
+              progress?.total
+                ? Math.min(100, Math.round(((progress.current ?? 0) / progress.total) * 100))
+                : undefined
+            }
+            className={progress?.total ? "" : "animate-pulse"}
+          />
+          <p className="text-xs text-muted-foreground">
+            A first full-history sync walks back year by year and can take a few
+            minutes — Trading 212 is rate-limited, so this is normal. You can leave
+            this open; it'll finish on its own.
+          </p>
+        </div>
       )}
 
       {connections?.map((conn) => {

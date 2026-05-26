@@ -6,6 +6,7 @@ import type {
   HistoricalOrder,
   MultiSyncResult,
   Paginated,
+  SyncProgress,
   SyncResult,
   T212Connection,
   T212Settings,
@@ -35,7 +36,11 @@ interface SyncState {
   isSyncing: boolean;
   results: MultiSyncResult | null;
   error: string | null;
+  progress: SyncProgress | null;
 }
+
+/** Callback used to stream step-by-step progress out of a running sync. */
+type ProgressFn = (p: Omit<SyncProgress, "accountName">) => void;
 
 const PAGE_GUARD = 500; // hard cap on pages per endpoint
 
@@ -159,6 +164,7 @@ async function syncOne(
   settings: T212Settings,
   conn: T212Connection,
   resolver: SymbolResolver,
+  onProgress: ProgressFn,
 ): Promise<SyncResult> {
   const log: string[] = [];
   const base = { connectionId: conn.id, accountId: conn.accountId, accountName: conn.name, log };
@@ -172,6 +178,7 @@ async function syncOne(
 
     if (since === null) {
       log.push("Full backfill (no previous sync) via CSV export.");
+      onProgress({ phase: "export", message: "Preparing full-history export…" });
       // ── CSV backfill (full history) ──────────────────────────────────────
       // Trading 212 caps each export at ~1 year, so request (or reuse) one-year
       // windows back from now and stop after two consecutive empty windows.
@@ -208,6 +215,13 @@ async function syncOne(
         const windowLabel = `${windowStart.toISOString().slice(0, 10)}→${windowEnd
           .toISOString()
           .slice(0, 10)}`;
+
+        onProgress({
+          phase: "export",
+          message: `Fetching history ${windowLabel} (window ${w + 1})…`,
+          current: w,
+          total: MAX_EXPORT_WINDOWS,
+        });
 
         let csv: string;
         try {
@@ -279,6 +293,7 @@ async function syncOne(
     } else {
       // ── JSON incremental (since last watermark) ──────────────────────────
       log.push(`Incremental sync since ${since}.`);
+      onProgress({ phase: "export", message: "Fetching recent activity…" });
       ({ activities, unresolved } = await collectJsonActivities(
         client,
         since,
@@ -300,6 +315,7 @@ async function syncOne(
         .join(", ") || "none";
     log.push(`Mapped ${activities.length} activities: ${breakdown}.`);
     if (unresolved > 0) log.push(`${unresolved} rows skipped (symbol not matched).`);
+    onProgress({ phase: "map", message: `Validating ${activities.length} activities…` });
 
     // ── Common import tail ───────────────────────────────────────────────
     // Wealthfolio's checkImport/import rejects oversized batches with a 422. The
@@ -360,7 +376,14 @@ async function syncOne(
     };
 
     for (let i = 0; i < activities.length; i += IMPORT_CHUNK_SIZE) {
-      await process(activities.slice(i, i + IMPORT_CHUNK_SIZE));
+      const chunk = activities.slice(i, i + IMPORT_CHUNK_SIZE);
+      onProgress({
+        phase: "import",
+        message: `Importing activities… ${Math.min(i + chunk.length, activities.length)}/${activities.length}`,
+        current: i + chunk.length,
+        total: activities.length,
+      });
+      await process(chunk);
     }
 
     if (accounted.length > 0) await addImportedRefs(ctx, conn.id, accounted);
@@ -415,10 +438,11 @@ export function useSync(ctx: AddonContext) {
     isSyncing: false,
     results: null,
     error: null,
+    progress: null,
   });
 
   async function syncAll() {
-    setState((s) => ({ ...s, isSyncing: true, error: null }));
+    setState((s) => ({ ...s, isSyncing: true, error: null, progress: null }));
     try {
       const settings = await getSettings(ctx);
       if (!settings) throw new Error("Not connected. Open Settings to add your API key.");
@@ -435,7 +459,9 @@ export function useSync(ctx: AddonContext) {
 
       const perAccount: SyncResult[] = [];
       for (const conn of connections) {
-        perAccount.push(await syncOne(ctx, settings, conn, resolver));
+        const report: ProgressFn = (p) =>
+          setState((s) => ({ ...s, progress: { accountName: conn.name, ...p } }));
+        perAccount.push(await syncOne(ctx, settings, conn, resolver, report));
       }
 
       if (resolver.isDirty) await setSymbolMap(ctx, resolver.snapshot());
@@ -449,9 +475,9 @@ export function useSync(ctx: AddonContext) {
         { imported: 0, duplicates: 0, unresolved: 0 },
       );
 
-      setState({ isSyncing: false, results: { perAccount, totals }, error: null });
+      setState({ isSyncing: false, results: { perAccount, totals }, error: null, progress: null });
     } catch (err) {
-      setState((s) => ({ ...s, isSyncing: false, error: (err as Error).message }));
+      setState((s) => ({ ...s, isSyncing: false, progress: null, error: (err as Error).message }));
     }
   }
 

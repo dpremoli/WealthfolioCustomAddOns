@@ -130,6 +130,8 @@ export async function mapCsvRow(
   const ticker = row["Ticker"]?.trim() || undefined;
   const isin = row["ISIN"]?.trim() || undefined;
   const name = row["Name"]?.trim() || undefined;
+  const merchant = row["Merchant name"]?.trim() || undefined;
+  const notes = row["Notes"]?.trim() || undefined;
 
   // Total amount in account currency. Column name differs between export versions.
   const totalStr = col(row, "Total", "Result (GBP)", "Result");
@@ -215,24 +217,72 @@ export async function mapCsvRow(
 
   // ── DIVIDEND ───────────────────────────────────────────────────────────
   if (actionLower.startsWith("dividend")) {
-    if (!ticker || total <= 0) return null;
-    const symbol = await resolver.resolve(ticker, { isin, name });
-    if (!symbol) return null;
+    if (total <= 0) return null;
+    // A dividend tied to a security (has a ticker) → DIVIDEND on that symbol.
+    if (ticker) {
+      const symbol = await resolver.resolve(ticker, { isin, name });
+      if (!symbol) return null;
+      return {
+        id: `t212-div-${stableId(actionLower)}`,
+        accountId,
+        activityType: "DIVIDEND" as ActivityType,
+        date,
+        symbol,
+        amount: total,
+        currency,
+        isValid: true,
+        isDraft: false,
+      };
+    }
+    // No security (e.g. "Dividend adjustment" — a withholding-tax cash credit) → cash income.
     return {
-      id: `t212-div-${stableId(actionLower)}`,
+      id: `t212-txn-${csvId || stableId(actionLower)}`,
       accountId,
-      activityType: "DIVIDEND" as ActivityType,
+      activityType: "INTEREST" as ActivityType,
       date,
-      symbol,
+      symbol: `$CASH-${currency}`,
       amount: total,
       currency,
       isValid: true,
       isDraft: false,
+      comment: notes,
     };
   }
 
-  // ── INTEREST (Interest on cash / Lending interest) ─────────────────────
-  if (actionLower.includes("interest")) {
+  // ── CARD: debit (spend) → withdrawal, credit (refund) → deposit ─────────
+  if (actionLower === "card debit") {
+    if (total <= 0) return null;
+    return {
+      id: `t212-txn-${csvId}`,
+      accountId,
+      activityType: "WITHDRAWAL" as ActivityType,
+      date,
+      symbol: `$CASH-${currency}`,
+      amount: total,
+      currency,
+      isValid: true,
+      isDraft: false,
+      comment: merchant,
+    };
+  }
+  if (actionLower === "card credit") {
+    if (total <= 0) return null;
+    return {
+      id: `t212-txn-${csvId}`,
+      accountId,
+      activityType: "DEPOSIT" as ActivityType,
+      date,
+      symbol: `$CASH-${currency}`,
+      amount: total,
+      currency,
+      isValid: true,
+      isDraft: false,
+      comment: merchant,
+    };
+  }
+
+  // ── INTEREST (Interest on cash / Lending interest) and cashback rewards ──
+  if (actionLower.includes("interest") || actionLower.includes("cashback")) {
     if (total <= 0) return null;
     return {
       id: `t212-txn-${csvId}`,

@@ -163,15 +163,17 @@ export class Trading212ProxyClient {
    * @param pollMs     Milliseconds between status polls (default 65 s — 1/min limit).
    */
   async runExport(
-    opts: { timeFrom?: string; timeTo?: string } = {},
+    opts: { timeFrom?: string; timeTo?: string; knownReports?: ExportReport[] } = {},
     pollMs = 65_000,
   ): Promise<string> {
     const covers = (r: ExportReport) =>
       (!opts.timeFrom || r.timeFrom <= opts.timeFrom) &&
       (!opts.timeTo || r.timeTo >= opts.timeTo);
 
-    // Reuse an existing finished report if it covers the requested range.
-    const existing = await this.listExports();
+    // Reuse an existing finished report if it covers the requested range. The
+    // caller may pass a pre-fetched report list (knownReports) so a multi-window
+    // backfill doesn't hammer the heavily rate-limited /exports list endpoint.
+    const existing = opts.knownReports ?? (await this.listExports());
     const done = existing.find((r) => r.status === "Finished" && r.downloadLink && covers(r));
     if (done?.downloadLink) return this.downloadExportCsv(done.downloadLink);
 

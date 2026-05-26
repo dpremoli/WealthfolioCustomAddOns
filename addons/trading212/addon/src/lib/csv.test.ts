@@ -286,6 +286,54 @@ describe("mapCsvRow", () => {
     });
   });
 
+  describe("card and cashback (T212 spending account)", () => {
+    it("maps a card debit to a WITHDRAWAL with the merchant as comment", async () => {
+      const row = {
+        ...cashRow("Card debit", { Total: "-11.90", ID: "CD1" }),
+        "Merchant name": "UBER",
+      };
+      const act = await mapCsvRow(row, ACC, makeResolver());
+      expect(act!.activityType).toBe("WITHDRAWAL");
+      expect(act!.amount).toBe(11.9);
+      expect(act!.symbol).toBe("$CASH-GBP");
+      expect(act!.comment).toBe("UBER");
+    });
+
+    it("maps a card credit to a DEPOSIT", async () => {
+      const act = await mapCsvRow(
+        cashRow("Card credit", { Total: "8.54", ID: "CC1" }),
+        ACC,
+        makeResolver(),
+      );
+      expect(act!.activityType).toBe("DEPOSIT");
+      expect(act!.amount).toBe(8.54);
+      expect(act!.symbol).toBe("$CASH-GBP");
+    });
+
+    it("maps spending cashback to INTEREST income", async () => {
+      const act = await mapCsvRow(
+        cashRow("Spending cashback", { Total: "0.17", "Currency (Total)": "EUR", ID: "CB1" }),
+        ACC,
+        makeResolver(),
+      );
+      expect(act!.activityType).toBe("INTEREST");
+      expect(act!.amount).toBe(0.17);
+      expect(act!.symbol).toBe("$CASH-EUR");
+    });
+
+    it("maps a dividend adjustment (no ticker) to cash income", async () => {
+      const row = {
+        ...cashRow("Dividend adjustment", { Total: "1.78", "Currency (Total)": "EUR", ID: "DA1" }),
+        Notes: "2024 US dividends withholding tax adjustment",
+      };
+      const act = await mapCsvRow(row, ACC, makeResolver());
+      expect(act!.activityType).toBe("INTEREST");
+      expect(act!.amount).toBe(1.78);
+      expect(act!.symbol).toBe("$CASH-EUR");
+      expect(act!.comment).toBe("2024 US dividends withholding tax adjustment");
+    });
+  });
+
   describe("date normalisation", () => {
     it("converts T212 space-separated UTC time to ISO 8601", async () => {
       const act = await mapCsvRow(

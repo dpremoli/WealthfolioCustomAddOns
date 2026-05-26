@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { ActivityImport, AddonContext } from "@wealthfolio/addon-sdk";
 import type {
   DividendItem,
+  ExportReport,
   HistoricalOrder,
   MultiSyncResult,
   Paginated,
@@ -177,8 +178,18 @@ async function syncOne(
       // Falls back to JSON paging if even the first window's export fails.
       const mapped: ActivityImport[] = [];
       const seen = new Set<string>();
+      const skipped: Record<string, number> = {};
       let csvUnresolved = 0;
       let exportFailed = false;
+
+      // Fetch the report list once and reuse it for every window's reuse-check —
+      // the /exports list endpoint is limited to ~1/min, so a per-window check 429s.
+      let knownReports: ExportReport[] = [];
+      try {
+        knownReports = await client.listExports();
+      } catch {
+        // proceed without the cache; runExport will fetch per window if needed
+      }
 
       let windowEnd = new Date();
       let emptyStreak = 0;
@@ -203,6 +214,7 @@ async function syncOne(
           csv = await client.runExport({
             timeFrom: windowStart.toISOString(),
             timeTo: windowEnd.toISOString(),
+            knownReports,
           });
         } catch (e) {
           log.push(`Window ${windowLabel}: export failed (${errDetail(e)})`);
@@ -228,18 +240,27 @@ async function syncOne(
               mapped.push(act);
             }
           } else {
-            // Count failed symbol lookups as unresolved (not unknown actions or splits).
-            const a = (row["Action"] ?? "").toLowerCase();
+            // Count failed symbol lookups as unresolved; otherwise record the
+            // unmapped action so dropped rows are visible in the log.
+            const action = (row["Action"] ?? "").trim();
+            const a = action.toLowerCase();
             if (
               row["Ticker"]?.trim() &&
               (a.endsWith(" buy") || a.endsWith(" sell") || a.startsWith("dividend"))
             ) {
               csvUnresolved++;
+            } else if (action) {
+              skipped[action] = (skipped[action] ?? 0) + 1;
             }
           }
         }
         windowEnd = windowStart;
       }
+
+      const skippedSummary = Object.entries(skipped)
+        .map(([k, v]) => `${v} ${k}`)
+        .join(", ");
+      if (skippedSummary) log.push(`Skipped (not imported): ${skippedSummary}.`);
 
       if (exportFailed) {
         // CSV unavailable — use JSON paging for the initial full sync.

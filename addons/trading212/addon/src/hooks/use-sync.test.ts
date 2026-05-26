@@ -359,6 +359,51 @@ describe("useSync — CSV export / hybrid path", () => {
     expect(state.importedRefs).toContain("t212-txn-DEP1");
   });
 
+  it("checkpoints each window and resumes (no lastSync) when interrupted mid-backfill", async () => {
+    // Window 0 downloads data; window 1's download fails → backfill breaks after
+    // importing window 0. lastSync must stay null and a checkpoint must be saved.
+    let downloadCount = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        const u = String(url);
+        if (u.includes("/export-download")) {
+          downloadCount++;
+          if (downloadCount === 1) {
+            return {
+              ok: true,
+              status: 200,
+              text: async () => SAMPLE_CSV,
+              headers: { get: () => null },
+            } as unknown as Response;
+          }
+          return { ok: false, status: 500, text: async () => "boom", headers: { get: () => null } } as unknown as Response;
+        }
+        if (u.includes("/exports")) return jsonResponse([FINISHED_REPORT]);
+        return routeFetch(u);
+      }),
+    );
+
+    const { ctx, importFn, secrets } = makeCtx({
+      syncStates: { c1: { lastSync: null, importedRefs: [] } },
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { result } = renderHook(() => useSync(ctx as any));
+
+    await act(async () => {
+      await result.current.syncAll();
+    });
+
+    // Window 0's single activity was imported and its refs persisted.
+    expect(importFn).toHaveBeenCalledTimes(1);
+    expect(result.current.results?.totals.imported).toBe(1);
+
+    const state = JSON.parse(secrets.get("t212_sync_c1")!);
+    expect(state.lastSync).toBeNull(); // backfill incomplete → not finalized
+    expect(state.backfillCheckpoint).toBeTruthy(); // resume point saved
+    expect(state.importedRefs).toContain("t212-txn-DEP1");
+  });
+
   it("falls back to JSON paging when the export fails", async () => {
     vi.stubGlobal(
       "fetch",

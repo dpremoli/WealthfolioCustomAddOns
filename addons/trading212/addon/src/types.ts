@@ -29,6 +29,10 @@ export interface T212Connection {
 export interface ConnectionSyncState {
   lastSync: string | null;
   importedRefs: string[]; // loaded into a Set at runtime
+  // Oldest window boundary (ISO) a full backfill has imported so far. Set after
+  // each window so an interrupted backfill resumes there instead of restarting;
+  // cleared once the backfill completes.
+  backfillCheckpoint?: string | null;
 }
 
 // GET /api/v0/equity/account/summary

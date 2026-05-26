@@ -115,6 +115,16 @@ export async function setLastSync(ctx: AddonContext, id: string, iso: string): P
   await ctx.api.secrets.set(syncKey(id), JSON.stringify(state));
 }
 
+export async function setBackfillCheckpoint(
+  ctx: AddonContext,
+  id: string,
+  iso: string | null,
+): Promise<void> {
+  const state = await getSyncState(ctx, id);
+  state.backfillCheckpoint = iso;
+  await ctx.api.secrets.set(syncKey(id), JSON.stringify(state));
+}
+
 export async function getImportedRefs(ctx: AddonContext, id: string): Promise<Set<string>> {
   const state = await getSyncState(ctx, id);
   return new Set(state.importedRefs);

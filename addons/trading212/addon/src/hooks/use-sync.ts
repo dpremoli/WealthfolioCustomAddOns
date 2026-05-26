@@ -28,6 +28,7 @@ import {
   getSettings,
   getSymbolMap,
   getSyncState,
+  setBackfillCheckpoint,
   setLastSync,
   setSymbolMap,
 } from "./use-config";
@@ -170,24 +171,106 @@ async function syncOne(
   const base = { connectionId: conn.id, accountId: conn.accountId, accountName: conn.name, log };
   try {
     const client = new Trading212ProxyClient(connectionConfig(settings, conn));
-    const { lastSync: since } = await getSyncState(ctx, conn.id);
+    const { lastSync: since, backfillCheckpoint } = await getSyncState(ctx, conn.id);
     const importedRefs = await getImportedRefs(ctx, conn.id);
 
-    let activities: ActivityImport[];
-    let unresolved: number;
+    // Accumulators shared across every import batch. A backfill imports one batch
+    // per year-window (checkpointing as it goes); other paths import a single batch.
+    let imported = 0;
+    let duplicates = 0;
+    let invalidCount = 0;
+    let invalidDetail: string | null = null;
+    let totalToImport = 0;
+    let unresolved = 0;
+    const tally: Record<string, number> = {};
+
+    // Imports one batch: validates+imports in chunks (halving on backend rejection),
+    // tallies the outcome, and persists this batch's refs so an interrupted backfill
+    // doesn't re-import what already landed. Wealthfolio's checkImport/import rejects
+    // oversized batches with a 422, so we chunk and adaptively halve down to a single
+    // row, which isolates a genuinely bad row.
+    const importActivities = async (batch: ActivityImport[]): Promise<void> => {
+      if (batch.length === 0) return;
+      totalToImport += batch.length;
+      for (const a of batch) {
+        const k = String(a.activityType);
+        tally[k] = (tally[k] ?? 0) + 1;
+      }
+      const accounted: string[] = [];
+
+      const doImport = async (items: ActivityImport[]): Promise<void> => {
+        if (items.length === 0) return;
+        try {
+          const res = await ctx.api.activities.import(items);
+          imported += res.summary.imported;
+          for (const a of items) if (a.id) accounted.push(a.id);
+        } catch (e) {
+          if (items.length > 1) {
+            const mid = Math.ceil(items.length / 2);
+            await doImport(items.slice(0, mid));
+            await doImport(items.slice(mid));
+            return;
+          }
+          throw new Error(`import rejected a single activity: ${errDetail(e)} — payload=${JSON.stringify(items[0])}`);
+        }
+      };
+
+      const process = async (chunk: ActivityImport[]): Promise<void> => {
+        if (chunk.length === 0) return;
+        let checked: ActivityImport[];
+        try {
+          checked = await ctx.api.activities.checkImport(chunk);
+        } catch (e) {
+          if (chunk.length > 1) {
+            const mid = Math.ceil(chunk.length / 2);
+            await process(chunk.slice(0, mid));
+            await process(chunk.slice(mid));
+            return;
+          }
+          throw new Error(`checkImport rejected a single activity: ${errDetail(e)} — payload=${JSON.stringify(chunk[0])}`);
+        }
+
+        const invalid = checked.filter((a) => a.isValid === false);
+        const toImport = checked.filter((a) => a.isValid !== false && !a.duplicateOfId);
+        const dupes = checked.filter((a) => a.duplicateOfId);
+        duplicates += dupes.length;
+        invalidCount += invalid.length;
+        if (!invalidDetail && invalid.length > 0) {
+          const withErrors = invalid.find((a) => a.errors && Object.keys(a.errors).length > 0);
+          invalidDetail = `${withErrors?.errors ? JSON.stringify(withErrors.errors) : "no detail"} — first: ${describeActivity(invalid[0])}`;
+        }
+        for (const a of dupes) if (a.id) accounted.push(a.id);
+
+        await doImport(toImport);
+      };
+
+      for (let i = 0; i < batch.length; i += IMPORT_CHUNK_SIZE) {
+        const chunk = batch.slice(i, i + IMPORT_CHUNK_SIZE);
+        onProgress({
+          phase: "import",
+          message: `Importing activities… ${Math.min(i + chunk.length, batch.length)}/${batch.length}`,
+          current: i + chunk.length,
+          total: batch.length,
+        });
+        await process(chunk);
+      }
+
+      if (accounted.length > 0) await addImportedRefs(ctx, conn.id, accounted);
+    };
 
     if (since === null) {
       log.push("Full backfill (no previous sync) via CSV export.");
       onProgress({ phase: "export", message: "Preparing full-history export…" });
       // ── CSV backfill (full history) ──────────────────────────────────────
       // Trading 212 caps each export at ~1 year, so request (or reuse) one-year
-      // windows back from now and stop after two consecutive empty windows.
+      // windows back from now and stop after two consecutive empty windows. Each
+      // window is imported and checkpointed before moving on, so an interrupted
+      // backfill resumes from the checkpoint instead of starting over.
       // Falls back to JSON paging if even the first window's export fails.
-      const mapped: ActivityImport[] = [];
       const seen = new Set<string>();
       const skipped: Record<string, number> = {};
-      let csvUnresolved = 0;
       let exportFailed = false;
+      let backfillComplete = false;
 
       // Fetch the report list once and reuse it for every window's reuse-check —
       // the /exports list endpoint is limited to ~1/min, so a per-window check 429s.
@@ -198,9 +281,11 @@ async function syncOne(
         // proceed without the cache; runExport will fetch per window if needed
       }
 
-      let windowEnd = new Date();
+      let windowEnd = backfillCheckpoint ? new Date(backfillCheckpoint) : new Date();
+      if (backfillCheckpoint) log.push(`Resuming backfill from checkpoint ${backfillCheckpoint}.`);
       let emptyStreak = 0;
-      for (let w = 0; w < MAX_EXPORT_WINDOWS; w++) {
+      let w = 0;
+      for (; w < MAX_EXPORT_WINDOWS; w++) {
         const windowStart = new Date(
           Date.UTC(
             windowEnd.getUTCFullYear() - 1,
@@ -232,26 +317,32 @@ async function syncOne(
           });
         } catch (e) {
           log.push(`Window ${windowLabel}: export failed (${errDetail(e)})`);
-          if (w === 0) exportFailed = true; // couldn't retrieve any history
+          // Only fall back to JSON if no history has been retrieved at all. A
+          // mid-backfill failure keeps the checkpoint so a re-run resumes here.
+          if (w === 0 && !backfillCheckpoint) exportFailed = true;
           break;
         }
 
         const rows = parseCsv(csv);
         log.push(`Window ${windowLabel}: ${rows.length} rows`);
         if (rows.length === 0) {
-          if (++emptyStreak >= 2) break; // assume no older history
+          if (++emptyStreak >= 2) {
+            backfillComplete = true; // no older history → done
+            break;
+          }
           windowEnd = windowStart;
           continue;
         }
         emptyStreak = 0;
 
+        const windowActivities: ActivityImport[] = [];
         for (const row of rows) {
           const act = await mapCsvRow(row, conn.accountId, resolver);
           if (act) {
             const id = act.id ?? "";
             if (id && !seen.has(id) && !importedRefs.has(id)) {
               seen.add(id);
-              mapped.push(act);
+              windowActivities.push(act);
             }
           } else {
             // Count failed symbol lookups as unresolved; otherwise record the
@@ -262,14 +353,20 @@ async function syncOne(
               row["Ticker"]?.trim() &&
               (a.endsWith(" buy") || a.endsWith(" sell") || a.startsWith("dividend"))
             ) {
-              csvUnresolved++;
+              unresolved++;
             } else if (action) {
               skipped[action] = (skipped[action] ?? 0) + 1;
             }
           }
         }
+
+        // Import this window and checkpoint before moving on, so an interruption
+        // resumes from here rather than re-fetching everything already imported.
+        await importActivities(windowActivities);
         windowEnd = windowStart;
+        await setBackfillCheckpoint(ctx, conn.id, windowStart.toISOString());
       }
+      if (w >= MAX_EXPORT_WINDOWS) backfillComplete = true;
 
       const skippedSummary = Object.entries(skipped)
         .map(([k, v]) => `${v} ${k}`)
@@ -279,117 +376,48 @@ async function syncOne(
       if (exportFailed) {
         // CSV unavailable — use JSON paging for the initial full sync.
         log.push("CSV export unavailable → falling back to JSON paging.");
-        ({ activities, unresolved } = await collectJsonActivities(
+        const { activities: jsonActs, unresolved: u } = await collectJsonActivities(
           client,
           null,
           importedRefs,
           conn.accountId,
           resolver,
-        ));
+        );
+        unresolved += u;
+        await importActivities(jsonActs);
+        backfillComplete = true;
+      }
+
+      // Only mark the full sync complete when the backfill actually finished;
+      // otherwise keep the checkpoint so the next run resumes where this left off.
+      if (backfillComplete) {
+        await setLastSync(ctx, conn.id, new Date().toISOString());
+        await setBackfillCheckpoint(ctx, conn.id, null);
       } else {
-        activities = mapped;
-        unresolved = csvUnresolved;
+        log.push("Backfill incomplete — next sync resumes from the checkpoint.");
       }
     } else {
       // ── JSON incremental (since last watermark) ──────────────────────────
       log.push(`Incremental sync since ${since}.`);
       onProgress({ phase: "export", message: "Fetching recent activity…" });
-      ({ activities, unresolved } = await collectJsonActivities(
+      const { activities: jsonActs, unresolved: u } = await collectJsonActivities(
         client,
         since,
         importedRefs,
         conn.accountId,
         resolver,
-      ));
+      );
+      unresolved += u;
+      await importActivities(jsonActs);
+      await setLastSync(ctx, conn.id, new Date().toISOString());
     }
 
-    // Activity-type breakdown of what we're about to import.
-    const tally: Record<string, number> = {};
-    for (const a of activities) {
-      const k = String(a.activityType);
-      tally[k] = (tally[k] ?? 0) + 1;
-    }
     const breakdown =
       Object.entries(tally)
         .map(([k, v]) => `${v} ${k}`)
         .join(", ") || "none";
-    log.push(`Mapped ${activities.length} activities: ${breakdown}.`);
+    log.push(`Mapped ${totalToImport} activities: ${breakdown}.`);
     if (unresolved > 0) log.push(`${unresolved} rows skipped (symbol not matched).`);
-    onProgress({ phase: "map", message: `Validating ${activities.length} activities…` });
-
-    // ── Common import tail ───────────────────────────────────────────────
-    // Wealthfolio's checkImport/import rejects oversized batches with a 422. The
-    // exact limit is unknown, so submit in chunks and adaptively halve any chunk
-    // that's rejected — down to a single row, which isolates a genuinely bad row.
-    let imported = 0;
-    let duplicates = 0;
-    let invalidCount = 0;
-    let invalidDetail: string | null = null;
-    const accounted: string[] = [];
-
-    // Imports a set, halving and retrying if the backend rejects the batch.
-    const doImport = async (items: ActivityImport[]): Promise<void> => {
-      if (items.length === 0) return;
-      try {
-        const res = await ctx.api.activities.import(items);
-        imported += res.summary.imported;
-        for (const a of items) if (a.id) accounted.push(a.id);
-      } catch (e) {
-        if (items.length > 1) {
-          const mid = Math.ceil(items.length / 2);
-          await doImport(items.slice(0, mid));
-          await doImport(items.slice(mid));
-          return;
-        }
-        throw new Error(`import rejected a single activity: ${errDetail(e)} — payload=${JSON.stringify(items[0])}`);
-      }
-    };
-
-    // Validates a chunk, halving and retrying if the backend rejects the batch.
-    const process = async (chunk: ActivityImport[]): Promise<void> => {
-      if (chunk.length === 0) return;
-      let checked: ActivityImport[];
-      try {
-        checked = await ctx.api.activities.checkImport(chunk);
-      } catch (e) {
-        if (chunk.length > 1) {
-          const mid = Math.ceil(chunk.length / 2);
-          await process(chunk.slice(0, mid));
-          await process(chunk.slice(mid));
-          return;
-        }
-        throw new Error(`checkImport rejected a single activity: ${errDetail(e)} — payload=${JSON.stringify(chunk[0])}`);
-      }
-
-      const invalid = checked.filter((a) => a.isValid === false);
-      const toImport = checked.filter((a) => a.isValid !== false && !a.duplicateOfId);
-      const dupes = checked.filter((a) => a.duplicateOfId);
-      duplicates += dupes.length;
-      invalidCount += invalid.length;
-      if (!invalidDetail && invalid.length > 0) {
-        const withErrors = invalid.find((a) => a.errors && Object.keys(a.errors).length > 0);
-        invalidDetail = `${withErrors?.errors ? JSON.stringify(withErrors.errors) : "no detail"} — first: ${describeActivity(invalid[0])}`;
-      }
-      for (const a of dupes) if (a.id) accounted.push(a.id);
-
-      await doImport(toImport);
-    };
-
-    for (let i = 0; i < activities.length; i += IMPORT_CHUNK_SIZE) {
-      const chunk = activities.slice(i, i + IMPORT_CHUNK_SIZE);
-      onProgress({
-        phase: "import",
-        message: `Importing activities… ${Math.min(i + chunk.length, activities.length)}/${activities.length}`,
-        current: i + chunk.length,
-        total: activities.length,
-      });
-      await process(chunk);
-    }
-
-    if (accounted.length > 0) await addImportedRefs(ctx, conn.id, accounted);
-
-    await setLastSync(ctx, conn.id, new Date().toISOString());
-
     log.push(
       `Import: ${imported} imported, ${duplicates} duplicates, ${invalidCount} invalid.`,
     );
@@ -401,7 +429,7 @@ async function syncOne(
         imported,
         duplicates,
         unresolved,
-        error: `${invalidCount}/${activities.length} rows invalid: ${invalidDetail ?? "no detail"}`,
+        error: `${invalidCount}/${totalToImport} rows invalid: ${invalidDetail ?? "no detail"}`,
       };
     }
 

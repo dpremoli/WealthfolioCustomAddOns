@@ -1,7 +1,7 @@
 {
   "id": "trading212-addon",
   "name": "Trading 212 Sync",
-  "version": "1.5.9",
+  "version": "1.6.0",
   "description": "Automatically sync your Trading 212 investment account (trades, dividends, deposits, withdrawals, fees and interest) into Wealthfolio.",
   "author": "dpremoli",
   "main": "addon.js",

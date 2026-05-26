@@ -18,6 +18,11 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const MAX_429_RETRIES = 12;
 const DEFAULT_BACKOFF_MS = 15_000; // ~ one token for a 6/min limit, when no header
 
+// Transient network failures (a dropped VPN/Tailscale link, a flaky connection)
+// surface as a thrown TypeError from fetch rather than an HTTP status. Retry those
+// a few times so a brief blip doesn't abort a multi-minute sync.
+const MAX_NETWORK_RETRIES = 4;
+
 /**
  * Builds the Authorization header for the Trading 212 API.
  * Modern keys use HTTP Basic auth (API Key ID + Secret); older keys pass the
@@ -33,6 +38,19 @@ function buildAuthHeader(config: T212Config): string {
 export class Trading212ProxyClient {
   constructor(private readonly config: T212Config) {}
 
+  // Wraps fetch so a transient network error (TypeError) is retried with backoff.
+  // HTTP error statuses are returned untouched — callers handle 401/429/etc.
+  private async fetchRetry(url: string, init?: RequestInit): Promise<Response> {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await fetch(url, init);
+      } catch (e) {
+        if (!(e instanceof TypeError) || attempt >= MAX_NETWORK_RETRIES) throw e;
+        await sleep(Math.min(16_000, 2000 * 2 ** attempt));
+      }
+    }
+  }
+
   private async post<T>(endpoint: string, body: unknown): Promise<T> {
     const url = new URL(`${this.config.proxyUrl.replace(/\/$/, "")}/${endpoint}`);
     url.searchParams.set("env", this.config.env);
@@ -41,7 +59,7 @@ export class Trading212ProxyClient {
       "Content-Type": "application/json",
     };
     for (let attempt = 0; ; attempt++) {
-      const resp = await fetch(url.toString(), {
+      const resp = await this.fetchRetry(url.toString(), {
         method: "POST",
         headers,
         body: JSON.stringify(body),
@@ -75,7 +93,7 @@ export class Trading212ProxyClient {
     // Retry on rate-limit, honoring the reset/Retry-After header, until the
     // window clears — a long history needs many pages at 6 req/min.
     for (let attempt = 0; ; attempt++) {
-      const resp = await fetch(url.toString(), { headers });
+      const resp = await this.fetchRetry(url.toString(), { headers });
 
       if (resp.status === 429) {
         if (attempt >= MAX_429_RETRIES) {
@@ -147,7 +165,7 @@ export class Trading212ProxyClient {
     const url = new URL(`${this.config.proxyUrl.replace(/\/$/, "")}/export-download`);
     url.searchParams.set("url", downloadLink);
     // Deliberately no Authorization header here — signed URL, not the T212 API.
-    const resp = await fetch(url.toString());
+    const resp = await this.fetchRetry(url.toString());
     if (!resp.ok) throw new Error(`Export download failed (${resp.status})`);
     return resp.text();
   }

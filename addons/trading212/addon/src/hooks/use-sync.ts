@@ -23,14 +23,17 @@ import { SymbolResolver } from "../lib/symbol-resolver";
 import {
   addImportedRefs,
   connectionConfig,
+  ensureProviderAccount,
   getConnections,
   getImportedRefs,
   getSettings,
   getSymbolMap,
   getSyncState,
+  resetSyncState,
   setBackfillCheckpoint,
   setLastSync,
   setSymbolMap,
+  updateConnection,
 } from "./use-config";
 
 interface SyncState {
@@ -159,6 +162,29 @@ async function collectJsonActivities(
   return { activities, unresolved };
 }
 
+/**
+ * Returns the Wealthfolio account id to import into, healing a stale link. If the
+ * linked account was deleted in Wealthfolio, recreate it, re-link the connection,
+ * and reset this connection's sync state so the (now-gone) history re-imports
+ * cleanly instead of every row failing with "Record not found".
+ */
+async function resolveAccountId(
+  ctx: AddonContext,
+  conn: T212Connection,
+  client: Trading212ProxyClient,
+  log: string[],
+): Promise<string> {
+  const accounts = await ctx.api.accounts.getAll();
+  if (accounts.some((a) => a.id === conn.accountId)) return conn.accountId;
+
+  log.push("Linked Wealthfolio account not found — recreating and resetting sync state.");
+  const summary = await client.getAccountSummary();
+  const accountId = await ensureProviderAccount(ctx, conn.name, summary);
+  await updateConnection(ctx, conn.id, { accountId });
+  await resetSyncState(ctx, conn.id);
+  return accountId;
+}
+
 /** Syncs one connection into its linked Wealthfolio account. */
 async function syncOne(
   ctx: AddonContext,
@@ -171,6 +197,9 @@ async function syncOne(
   const base = { connectionId: conn.id, accountId: conn.accountId, accountName: conn.name, log };
   try {
     const client = new Trading212ProxyClient(connectionConfig(settings, conn));
+    // Heal a stale account link (account deleted in Wealthfolio) before doing anything.
+    const accountId = await resolveAccountId(ctx, conn, client, log);
+    base.accountId = accountId;
     const { lastSync: since, backfillCheckpoint } = await getSyncState(ctx, conn.id);
     const importedRefs = await getImportedRefs(ctx, conn.id);
 
@@ -337,7 +366,7 @@ async function syncOne(
 
         const windowActivities: ActivityImport[] = [];
         for (const row of rows) {
-          const act = await mapCsvRow(row, conn.accountId, resolver);
+          const act = await mapCsvRow(row, accountId, resolver);
           if (act) {
             const id = act.id ?? "";
             if (id && !seen.has(id) && !importedRefs.has(id)) {
@@ -380,7 +409,7 @@ async function syncOne(
           client,
           null,
           importedRefs,
-          conn.accountId,
+          accountId,
           resolver,
         );
         unresolved += u;
@@ -404,7 +433,7 @@ async function syncOne(
         client,
         since,
         importedRefs,
-        conn.accountId,
+        accountId,
         resolver,
       );
       unresolved += u;

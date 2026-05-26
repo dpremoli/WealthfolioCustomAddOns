@@ -45,6 +45,7 @@ function makeCtx(opts: {
   checkImport?: (a: ActivityImport[]) => Promise<ActivityImport[]>;
   searchTicker?: () => Promise<unknown[]>;
   syncStates?: SyncStateMap;
+  existingAccounts?: { id: string; providerAccountId?: string }[];
 }) {
   const connections = opts.connections ?? [
     { id: "c1", name: "Trading 212 (Invest)", apiKey: "k", apiSecret: "s", accountId: "acc-1" },
@@ -71,6 +72,12 @@ function makeCtx(opts: {
   }));
   const searchTicker = vi.fn(opts.searchTicker ?? (async () => [{ symbol: "AAPL", score: 1 }]));
 
+  // Linked Wealthfolio accounts exist (ids match the connections), unless a test
+  // overrides existingAccounts to simulate a deleted/stale link.
+  const existingAccounts =
+    opts.existingAccounts ?? connections.map((c) => ({ id: c.accountId, providerAccountId: "" }));
+  const accountsCreate = vi.fn(async () => ({ id: "acc-new" }));
+
   return {
     ctx: {
       api: {
@@ -80,6 +87,10 @@ function makeCtx(opts: {
           delete: async (k: string) => void secrets.delete(k),
         },
         market: { searchTicker },
+        accounts: {
+          getAll: async () => existingAccounts,
+          create: accountsCreate,
+        },
         activities: {
           checkImport: opts.checkImport ?? (async (a: ActivityImport[]) => a),
           import: importFn,
@@ -89,6 +100,7 @@ function makeCtx(opts: {
     secrets,
     importFn,
     searchTicker,
+    accountsCreate,
   };
 }
 
@@ -402,6 +414,50 @@ describe("useSync — CSV export / hybrid path", () => {
     expect(state.lastSync).toBeNull(); // backfill incomplete → not finalized
     expect(state.backfillCheckpoint).toBeTruthy(); // resume point saved
     expect(state.importedRefs).toContain("t212-txn-DEP1");
+  });
+
+  it("recreates a deleted Wealthfolio account, re-links, and imports into the new id", async () => {
+    let downloadCount = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        const u = String(url);
+        if (u.includes("account/summary")) return jsonResponse({ id: 99, currency: "GBP" });
+        if (u.includes("/export-download")) {
+          downloadCount++;
+          return {
+            ok: true,
+            status: 200,
+            text: async () => (downloadCount === 1 ? SAMPLE_CSV : CSV_HDR),
+            headers: { get: () => null },
+          } as unknown as Response;
+        }
+        if (u.includes("/exports")) return jsonResponse([FINISHED_REPORT]);
+        return routeFetch(u);
+      }),
+    );
+
+    // The linked account "acc-1" no longer exists in Wealthfolio.
+    const { ctx, importFn, accountsCreate, secrets } = makeCtx({
+      existingAccounts: [],
+      syncStates: { c1: { lastSync: "2026-01-01T00:00:00.000Z", importedRefs: [] } },
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { result } = renderHook(() => useSync(ctx as any));
+
+    await act(async () => {
+      await result.current.syncAll();
+    });
+
+    expect(result.current.error).toBeNull();
+    expect(accountsCreate).toHaveBeenCalledTimes(1);
+    // Imported into the freshly created account id, not the stale one.
+    expect(importFn).toHaveBeenCalledTimes(1);
+    expect(importFn.mock.calls[0][0][0].accountId).toBe("acc-new");
+    // Connection was re-linked to the new account id.
+    expect(JSON.parse(secrets.get("t212_connections")!)[0].accountId).toBe("acc-new");
+    const lg = result.current.results!.perAccount[0].log.join("\n");
+    expect(lg).toContain("Linked Wealthfolio account not found");
   });
 
   it("falls back to JSON paging when the export fails", async () => {

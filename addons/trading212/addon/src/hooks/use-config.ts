@@ -1,10 +1,14 @@
 import type { AddonContext } from "@wealthfolio/addon-sdk";
 import type {
+  AccountSummary,
   ConnectionSyncState,
   T212Config,
   T212Connection,
   T212Settings,
 } from "../types";
+
+/** Wealthfolio account `provider` tag for accounts this addon creates. */
+export const PROVIDER = "trading212-addon";
 
 export const KEYS = {
   settings: "t212_settings",
@@ -85,6 +89,33 @@ export async function removeConnection(ctx: AddonContext, id: string): Promise<v
   const conns = await getConnections(ctx);
   await saveConnections(ctx, conns.filter((c) => c.id !== id));
   await ctx.api.secrets.delete(syncKey(id));
+}
+
+/** Finds the Wealthfolio account previously created for this Trading 212 account
+ *  (matched by providerAccountId), or creates one. Returns its Wealthfolio id. */
+export async function ensureProviderAccount(
+  ctx: AddonContext,
+  name: string,
+  summary: AccountSummary,
+): Promise<string> {
+  const accounts = await ctx.api.accounts.getAll();
+  const providerId = String(summary.id);
+  const match = accounts.find(
+    (a) => (a as { providerAccountId?: string }).providerAccountId === providerId,
+  );
+  if (match) return match.id;
+
+  const created = await ctx.api.accounts.create({
+    name,
+    accountType: "SECURITIES",
+    currency: summary.currency || "GBP",
+    isDefault: false,
+    isActive: true,
+    trackingMode: "TRANSACTIONS",
+    provider: PROVIDER,
+    providerAccountId: providerId,
+  });
+  return created.id;
 }
 
 /** Builds the proxy-client config for one connection from the shared settings. */

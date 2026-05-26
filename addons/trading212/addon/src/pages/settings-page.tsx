@@ -12,10 +12,11 @@ import {
 } from "@wealthfolio/ui";
 import { useEffect, useState } from "react";
 import { Trading212ProxyClient } from "../lib/proxy-client";
-import type { AccountSummary, T212Connection, T212Env, T212Settings } from "../types";
+import type { T212Connection, T212Env, T212Settings } from "../types";
 import {
   addConnection,
   connectionConfig,
+  ensureProviderAccount,
   getConnections,
   getSettings,
   migrateLegacyConfig,
@@ -24,35 +25,6 @@ import {
   resetSyncState,
   setSettings,
 } from "../hooks/use-config";
-
-const PROVIDER = "trading212-addon";
-
-/** Creates (or reuses) a Wealthfolio securities account for a Trading 212 account. */
-async function ensureAccount(
-  ctx: AddonContext,
-  name: string,
-  summary: AccountSummary,
-): Promise<string> {
-  const accounts = await ctx.api.accounts.getAll();
-  const providerId = String(summary.id);
-  // Reuse an existing account with the same Trading 212 id (remove-then-re-add).
-  const match = accounts.find(
-    (a) => (a as { providerAccountId?: string }).providerAccountId === providerId,
-  );
-  if (match) return match.id;
-
-  const created = await ctx.api.accounts.create({
-    name,
-    accountType: "SECURITIES",
-    currency: summary.currency || "GBP",
-    isDefault: false,
-    isActive: true,
-    trackingMode: "TRANSACTIONS",
-    provider: PROVIDER,
-    providerAccountId: providerId,
-  });
-  return created.id;
-}
 
 function maskKey(key: string): string {
   return key.length <= 4 ? "••••" : `••••${key.slice(-4)}`;
@@ -213,7 +185,7 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
         apiSecret: apiSecret.trim() || undefined,
       });
       const summary = await new Trading212ProxyClient(cfg).getAccountSummary();
-      const accountId = await ensureAccount(ctx, name.trim(), summary);
+      const accountId = await ensureProviderAccount(ctx, name.trim(), summary);
 
       await addConnection(ctx, {
         id: randomId(),

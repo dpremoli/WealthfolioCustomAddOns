@@ -2,6 +2,8 @@ import { describe, it, expect, vi } from "vitest";
 import type { SymbolSearchResult } from "@wealthfolio/addon-sdk";
 import {
   SymbolResolver,
+  marketCurrency,
+  normalizeCurrency,
   parseBaseSymbol,
   pickBestSymbol,
   resolveTickerSymbol,
@@ -48,9 +50,90 @@ describe("pickBestSymbol", () => {
     ]);
     expect(best).toBe("HIGH");
   });
+
+  it("filters out wrong-currency cross-listings when currency hint matches at least one", () => {
+    // ISIN search for TSM returns the NYSE ADR (USD) and the Mexican listing (MXN).
+    // Without the currency filter the MXN result wins on score → wrong import.
+    const best = pickBestSymbol(
+      [
+        result({ symbol: "TSMN.MX", score: 9, currency: "MXN" }),
+        result({ symbol: "TSM", score: 5, currency: "USD" }),
+      ],
+      { currency: "USD" },
+    );
+    expect(best).toBe("TSM");
+  });
+
+  it("ignores the currency hint when no candidate matches", () => {
+    // Don't drop everything if Wealthfolio simply has no USD listing — fall back
+    // to the best non-currency-matched hit so the position still resolves.
+    const best = pickBestSymbol(
+      [
+        result({ symbol: "FOO.L", score: 5, currency: "GBP" }),
+        result({ symbol: "FOO.DE", score: 3, currency: "EUR" }),
+      ],
+      { currency: "USD" },
+    );
+    expect(best).toBe("FOO.L");
+  });
+
+  it("drops ISIN-shaped symbols even when isExisting boosts them", () => {
+    // A prior bad import created an asset under the ISIN; the search returns it
+    // first with isExisting:true. The real ticker must still win.
+    const best = pickBestSymbol([
+      result({ symbol: "US02079K3059", score: 9, currency: "USD", isExisting: true }),
+      result({ symbol: "GOOGL", score: 5, currency: "USD" }),
+    ]);
+    expect(best).toBe("GOOGL");
+  });
+
+  it("returns null when every candidate is ISIN-shaped (no real ticker available)", () => {
+    const best = pickBestSymbol([
+      result({ symbol: "US02079K3059", score: 9, currency: "USD" }),
+    ]);
+    expect(best).toBeNull();
+  });
+});
+
+describe("marketCurrency", () => {
+  it("maps the T212 ticker market segment to a currency", () => {
+    expect(marketCurrency("TSM_US_EQ")).toBe("USD");
+    expect(marketCurrency("RR_GB_EQ")).toBe("GBP");
+    expect(marketCurrency("BMO_CA_EQ")).toBe("CAD");
+    expect(marketCurrency("SAP_DE_EQ")).toBe("EUR");
+  });
+
+  it("returns undefined for unknown or missing segments", () => {
+    expect(marketCurrency("VUAA")).toBeUndefined();
+    expect(marketCurrency("FOO_ZZ_EQ")).toBeUndefined();
+  });
+});
+
+describe("normalizeCurrency", () => {
+  it("treats pence (GBX/GBp) and pounds (GBP) as the same", () => {
+    expect(normalizeCurrency("GBX")).toBe("GBP");
+    expect(normalizeCurrency("GBp")).toBe("GBP");
+    expect(normalizeCurrency("GBP")).toBe("GBP");
+  });
 });
 
 describe("resolveTickerSymbol", () => {
+  it("uses the ticker market segment as a currency fallback to disambiguate", async () => {
+    // No instrument currency given, but RR_GB_EQ → GBP should pick the London
+    // Rolls-Royce over the higher-scoring US Richtech (RR/USD).
+    const search = vi.fn(async (q: string) =>
+      q === "RR"
+        ? [
+            result({ symbol: "RR", score: 9, currency: "USD" }), // Richtech (US)
+            result({ symbol: "RR.L", score: 4, currency: "GBp" }), // Rolls-Royce (London)
+          ]
+        : [],
+    );
+    const sym = await resolveTickerSymbol(search, "RR_GB_EQ");
+    expect(sym).toBe("RR.L");
+  });
+
+
   it("tries ISIN first and stops on the first match", async () => {
     const search = vi.fn(async (q: string) =>
       q === "US0378331005" ? [result({ symbol: "AAPL" })] : [],

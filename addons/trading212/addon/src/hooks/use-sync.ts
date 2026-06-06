@@ -4,6 +4,7 @@ import type {
   DividendItem,
   ExportReport,
   HistoricalOrder,
+  Instrument,
   MultiSyncResult,
   Paginated,
   SyncProgress,
@@ -11,6 +12,7 @@ import type {
   T212Connection,
   T212Settings,
   T212TrackingMode,
+  TradableInstrument,
   TransactionItem,
 } from "../types";
 import { Trading212ProxyClient, cursorFromNextPage, transactionPageParams } from "../lib/proxy-client";
@@ -212,18 +214,36 @@ async function syncHoldings(
   const positions = await client.getPositions();
   const accountCurrency = summary.currency || "GBP";
 
+  // The /positions payload may carry only a bare ticker, so cross-reference the
+  // instruments metadata for each holding's ISIN/currency/name. Accurate symbol
+  // resolution depends on the instrument currency to disambiguate cross-listings
+  // (e.g. TSM/USD vs the MXN-quoted TSMN) and the ISIN to find the right listing.
+  const instrumentMeta = new Map<string, TradableInstrument>();
+  try {
+    for (const ins of await client.getInstruments()) instrumentMeta.set(ins.ticker, ins);
+  } catch {
+    log.push("Instrument metadata unavailable — resolving from ticker only.");
+  }
+
   onProgress({ phase: "map", message: "Matching symbols…" });
   const holdings: SnapshotHoldingInput[] = [];
   let unresolved = 0;
   for (const pos of positions) {
     const ticker = pos.instrument?.ticker ?? pos.ticker;
     if (!ticker) continue;
-    const symbol = await resolver.resolve(ticker, pos.instrument);
+    const meta = instrumentMeta.get(ticker);
+    const instrument: Instrument = {
+      ticker,
+      isin: pos.instrument?.isin ?? meta?.isin,
+      name: pos.instrument?.name ?? meta?.name ?? meta?.shortName,
+      currency: pos.instrument?.currency ?? meta?.currencyCode,
+    };
+    const symbol = await resolver.resolve(ticker, instrument);
     if (!symbol) {
       unresolved++;
       continue;
     }
-    holdings.push(mapPositionToHolding(pos, symbol, accountCurrency));
+    holdings.push(mapPositionToHolding({ ...pos, instrument }, symbol, accountCurrency));
   }
 
   const cashBalances: Record<string, string> = {

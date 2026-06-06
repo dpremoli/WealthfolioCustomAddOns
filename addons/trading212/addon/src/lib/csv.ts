@@ -157,9 +157,11 @@ export async function mapCsvRow(
     const qty = parseAmount(row["No. of shares"]);
     const unitPrice = parseAmount(row["Price / share"]);
     if (qty <= 0 || unitPrice <= 0) return null;
-    const symbol = await resolver.resolve(ticker, { isin, name });
-    if (!symbol) return null;
     const priceCurrency = col(row, "Currency (Price / share)") || currency;
+    // Pass the share's quote currency so cross-listings resolve to the right
+    // exchange (e.g. a USD price picks TSM over the MXN-quoted TSMN).
+    const symbol = await resolver.resolve(ticker, { isin, name, currency: priceCurrency });
+    if (!symbol) return null;
     const fxRateRaw = parseAmount(row["Exchange rate"]);
     const fxRate = fxRateRaw && fxRateRaw !== 1 ? fxRateRaw : undefined;
     const fee = round2(
@@ -189,9 +191,9 @@ export async function mapCsvRow(
     const qty = parseAmount(row["No. of shares"]);
     const unitPrice = parseAmount(row["Price / share"]);
     if (qty <= 0 || unitPrice <= 0) return null;
-    const symbol = await resolver.resolve(ticker, { isin, name });
-    if (!symbol) return null;
     const priceCurrency = col(row, "Currency (Price / share)") || currency;
+    const symbol = await resolver.resolve(ticker, { isin, name, currency: priceCurrency });
+    if (!symbol) return null;
     const fxRateRaw = parseAmount(row["Exchange rate"]);
     const fxRate = fxRateRaw && fxRateRaw !== 1 ? fxRateRaw : undefined;
     const fee = round2(

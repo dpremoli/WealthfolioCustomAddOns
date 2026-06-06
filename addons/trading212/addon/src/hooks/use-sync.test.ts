@@ -282,7 +282,7 @@ describe("useSync — JSON incremental path", () => {
 
     // Shared symbol map is resolved once (cache hit on the 2nd account).
     expect(searchTicker).toHaveBeenCalledTimes(1);
-    expect(secrets.get("t212_symbol_map")).toContain("AAPL");
+    expect(secrets.get("t212_symbol_map_v2")).toContain("AAPL");
   });
 
   it("one failing key does not abort the others", async () => {
@@ -561,6 +561,47 @@ describe("useSync — HOLDINGS mode", () => {
 
     expect(result.current.results?.totals.imported).toBe(1);
     expect(JSON.parse(secrets.get("t212_sync_c1")!).lastSync).toBeTruthy();
+  });
+
+  it("enriches a bare-ticker position from instruments metadata to pick the right currency", async () => {
+    // /positions carries only a ticker (no instrument); /instruments supplies the
+    // USD currency, which must steer the resolver away from the MXN cross-listing.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        const u = String(url);
+        if (u.includes("account/summary"))
+          return jsonResponse({ id: 1, currency: "EUR", cash: { availableToTrade: 0 } });
+        if (u.includes("/positions")) return jsonResponse([{ ticker: "TSM_US_EQ", quantity: 2 }]);
+        if (u.includes("/instruments"))
+          return jsonResponse([
+            { ticker: "TSM_US_EQ", isin: "US8740391003", name: "Taiwan Semiconductor", currencyCode: "USD" },
+          ]);
+        return jsonResponse([]);
+      }),
+    );
+
+    const { ctx, snapshotsSave } = makeCtx({
+      connections: [
+        { id: "c1", name: "Invest", apiKey: "k", accountId: "acc-1", trackingMode: "HOLDINGS" },
+      ],
+      existingAccounts: [{ id: "acc-1", trackingMode: "HOLDINGS" }],
+      syncStates: { c1: { lastSync: null, importedRefs: [] } },
+      // ISIN search returns both listings; the USD currency must win over score.
+      searchTicker: async () => [
+        { symbol: "TSMN", score: 9, currency: "MXN" },
+        { symbol: "TSM", score: 5, currency: "USD" },
+      ],
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { result } = renderHook(() => useSync(ctx as any));
+
+    await act(async () => {
+      await result.current.syncAll();
+    });
+
+    const [, holdings] = snapshotsSave.mock.calls[0];
+    expect((holdings as { symbol: string }[])[0].symbol).toBe("TSM");
   });
 });
 

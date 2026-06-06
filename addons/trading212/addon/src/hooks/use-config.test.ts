@@ -211,12 +211,13 @@ describe("migrateLegacyConfig", () => {
     const state = JSON.parse(secrets.get(`t212_sync_${conns[0].id}`)!);
     expect(state).toEqual({ lastSync: "2026-01-01T00:00:00.000Z", importedRefs: ["t212-order-9"] });
 
-    // Legacy keys deleted, symbol map untouched.
+    // Legacy keys deleted. The legacy symbol map is also dropped — its entries
+    // may point at the wrong cross-listing (pre-1.7.1 had no currency filter).
     expect(secrets.has("t212_config")).toBe(false);
     expect(secrets.has("t212_account_id")).toBe(false);
     expect(secrets.has("t212_last_sync")).toBe(false);
     expect(secrets.has("t212_imported_refs")).toBe(false);
-    expect(secrets.get("t212_symbol_map")).toBe(JSON.stringify({ AAPL_US_EQ: "AAPL" }));
+    expect(secrets.has("t212_symbol_map")).toBe(false);
   });
 
   it("is idempotent and a no-op when nothing to migrate", async () => {

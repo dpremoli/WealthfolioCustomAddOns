@@ -22,9 +22,13 @@ const PROXY_URL_KEY = "monzo_proxy_url";
 const MAPPING_KEY = "monzo_account_mapping";
 const LAST_SYNC_KEY = "monzo_last_sync";
 
-function monzoAccountName(acc: MonzoAccount): string {
-  if (acc.account_number) return `Monzo (${acc.account_number})`;
-  return `Monzo ${acc.description}`;
+function accountTypeLabel(acc: MonzoAccount): string {
+  switch (acc.account_type) {
+    case "uk_retail":       return acc.account_number ? `Monzo Current (${acc.account_number})` : "Monzo Current Account";
+    case "uk_retail_joint": return "Monzo Joint Account";
+    case "uk_monzo_flex":   return "Monzo Flex";
+    default:                return acc.description || acc.account_type;
+  }
 }
 
 export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
@@ -36,7 +40,6 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
   const [autoCreateStatus, setAutoCreateStatus] = useState<string | null>(null);
   const [resetStatus, setResetStatus] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  // Prevents the auto-create effect from running concurrently
   const autoCreatingRef = useRef(false);
 
   const { data: savedProxyUrl } = useQuery({
@@ -53,13 +56,13 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
     queryFn: () => getTokens(ctx),
   });
 
-  const { data: monzoAccountsData } = useQuery({
+  const { data: monzoAccounts = [] } = useQuery<MonzoAccount[]>({
     queryKey: ["monzo_accounts"],
     queryFn: async () => {
       const t = await getTokens(ctx);
-      if (!t) return null;
+      if (!t) return [];
       const url = await ctx.api.secrets.get(PROXY_URL_KEY);
-      if (!url) return null;
+      if (!url) return [];
       return new MonzoProxyClient(url).getAccounts(t.access_token);
     },
     enabled: !!tokens,
@@ -80,15 +83,13 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
 
   // Auto-create Wealthfolio accounts for unmapped/stale Monzo accounts
   useEffect(() => {
-    // Guard: don't run concurrently (prevents duplicate creation on rapid re-renders)
     if (autoCreatingRef.current) return;
-    if (!monzoAccountsData?.accounts?.length || !wfAccounts || savedMapping === undefined) return;
+    if (!monzoAccounts.length || !wfAccounts || savedMapping === undefined) return;
 
     const wfAccountIds = new Set(wfAccounts.map((a) => a.id));
-    // Track names already in Wealthfolio to avoid duplicates within a single run
     const wfAccountNames = new Set(wfAccounts.map((a) => a.name));
 
-    const unmapped = monzoAccountsData.accounts.filter((acc) => {
+    const unmapped = monzoAccounts.filter((acc) => {
       const mappedId = savedMapping[acc.id];
       return !mappedId || !wfAccountIds.has(mappedId);
     });
@@ -103,17 +104,15 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
         const created: string[] = [];
 
         for (const acc of unmapped) {
-          const name = monzoAccountName(acc);
+          const name = accountTypeLabel(acc);
           const currency = acc.currency || "GBP";
 
-          // Reuse existing account if name already matches
           const existing = wfAccounts.find((a) => a.name === name);
           if (existing) {
             newMapping[acc.id] = existing.id;
             continue;
           }
 
-          // Skip if this name was already created in this run
           if (wfAccountNames.has(name)) continue;
 
           try {
@@ -135,7 +134,6 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
 
         if (created.length > 0 || JSON.stringify(newMapping) !== JSON.stringify(savedMapping)) {
           await ctx.api.secrets.set(MAPPING_KEY, JSON.stringify(newMapping));
-          // Only invalidate mapping — NOT wf_accounts (that would re-trigger this effect)
           queryClient.invalidateQueries({ queryKey: ["monzo_mapping"] });
           if (created.length > 0) {
             setAutoCreateStatus(`Created: ${created.join(", ")}`);
@@ -145,7 +143,7 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
         autoCreatingRef.current = false;
       }
     })();
-  }, [monzoAccountsData, wfAccounts, savedMapping]);
+  }, [monzoAccounts, wfAccounts, savedMapping]);
 
   async function saveProxyUrl() {
     setIsSavingProxy(true);
@@ -259,7 +257,11 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
                   <Badge variant="outline" className="text-green-600 border-green-600">
                     Connected
                   </Badge>
-                  <span className="text-sm text-muted-foreground">Monzo account linked</span>
+                  {monzoAccounts.length > 0 && (
+                    <span className="text-sm text-muted-foreground">
+                      {monzoAccounts.map(accountTypeLabel).join(" · ")}
+                    </span>
+                  )}
                 </div>
                 <Button variant="outline" size="sm" onClick={disconnect}>
                   Disconnect

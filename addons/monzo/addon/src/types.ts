@@ -13,7 +13,7 @@ export interface MonzoAccount {
   account_number?: string;
   sort_code?: string;
   currency?: string;
-  type?: string;
+  account_type: string;
 }
 
 export interface MonzoMerchant {
@@ -32,8 +32,8 @@ export interface MonzoTransaction {
   settled: string; // empty string if pending, ISO timestamp if settled
   amount: number; // minor units (pence), negative = debit, positive = credit
   currency: string;
-  local_amount?: number; // amount in original currency (for foreign transactions)
-  local_currency?: string; // original currency (for foreign transactions)
+  local_amount?: number;
+  local_currency?: string;
   description: string;
   notes: string;
   category: string;

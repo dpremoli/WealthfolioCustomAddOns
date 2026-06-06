@@ -14,33 +14,15 @@ export class MonzoProxyClient {
     return resp.json();
   }
 
-  async pollTokenStatus(
-    state: string,
-    maxAttempts = 150,
-    intervalMs = 2000,
-  ): Promise<MonzoTokens | null> {
-    for (let i = 0; i < maxAttempts; i++) {
-      const resp = await fetch(
-        `${this.proxyUrl}/token-status?state=${encodeURIComponent(state)}`,
-      );
-      if (!resp.ok) throw new Error(`Token status request failed: ${resp.statusText}`);
-      const data = await resp.json();
-      if (data.ready && data.tokens) {
-        const tokens: MonzoTokens = {
-          ...data.tokens,
-          expires_at:
-            typeof data.tokens.expires_at === "number"
-              ? data.tokens.expires_at
-              : new Date(data.tokens.expires_at).getTime(),
-        };
-        return tokens;
-      }
-      await new Promise((resolve) => setTimeout(resolve, intervalMs));
-    }
-    return null;
+  async pollTokenStatus(state: string): Promise<{ ready: boolean; tokens?: MonzoTokens }> {
+    const resp = await fetch(
+      `${this.proxyUrl}/token-status?state=${encodeURIComponent(state)}`,
+    );
+    if (!resp.ok) throw new Error(`Token status request failed: ${resp.statusText}`);
+    return resp.json();
   }
 
-  async refreshToken(refreshToken: string, currentTokens?: MonzoTokens): Promise<MonzoTokens> {
+  async refreshToken(refreshToken: string): Promise<MonzoTokens> {
     const resp = await fetch(`${this.proxyUrl}/refresh`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -49,26 +31,23 @@ export class MonzoProxyClient {
     if (!resp.ok) throw new Error(`Token refresh failed: ${resp.statusText}`);
     const data = await resp.json();
     return {
-      ...(currentTokens ?? {}),
-      access_token: data.access_token,
-      refresh_token: data.refresh_token,
+      ...data,
       expires_at:
         typeof data.expires_at === "number"
           ? data.expires_at
           : Date.now() + (data.expires_in ?? 21600) * 1000,
-      token_type: data.token_type ?? "Bearer",
-      user_id: data.user_id ?? currentTokens?.user_id ?? "",
     };
   }
 
   async getAccounts(accessToken: string): Promise<MonzoAccount[]> {
-    const resp = await fetch(`${this.proxyUrl}/accounts?account_type=uk_retail`, {
+    const resp = await fetch(`${this.proxyUrl}/accounts`, {
       headers: { Authorization: `Bearer ${accessToken}` },
     });
     if (resp.status === 401) throw new Error("UNAUTHORIZED");
     if (!resp.ok) throw new Error(`Accounts request failed: ${resp.statusText}`);
     const data = await resp.json();
-    return data.accounts ?? [];
+    const accounts: MonzoAccount[] = data.accounts ?? [];
+    return accounts.filter((a) => a.account_type !== "uk_monzo_flex_backing_loan");
   }
 
   async getTransactions(

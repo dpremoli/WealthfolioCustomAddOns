@@ -50,6 +50,12 @@ export function useSync(ctx: AddonContext) {
         ? (JSON.parse(lastSyncRaw) as string)
         : undefined;
 
+      // Build account type lookup so we can skip the pending filter for Flex
+      const monzoAccounts = await client.getAccounts(tokens.access_token);
+      const flexAccountIds = new Set(
+        monzoAccounts.filter((a) => a.account_type === "uk_monzo_flex").map((a) => a.id),
+      );
+
       let totalImported = 0;
       let totalSkipped = 0;
       let totalDuplicates = 0;
@@ -62,8 +68,10 @@ export function useSync(ctx: AddonContext) {
           lastSync,
         );
 
+        const isFlex = flexAccountIds.has(monzoAccountId);
         const eligible = transactions.filter(
-          (tx) => !isPending(tx) && !isPotTransfer(tx),
+          // Flex transactions are never settled (monthly billing) — don't filter them out
+          (tx) => (isFlex || !isPending(tx)) && !isPotTransfer(tx),
         );
         if (eligible.length === 0) continue;
 

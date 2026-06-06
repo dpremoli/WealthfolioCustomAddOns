@@ -14,6 +14,7 @@ export interface MonzoAccount {
   sort_code?: string;
   currency?: string;
   account_type: string;
+  closed?: boolean;
 }
 
 export interface MonzoMerchant {

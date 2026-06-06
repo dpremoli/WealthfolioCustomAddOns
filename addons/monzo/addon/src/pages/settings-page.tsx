@@ -41,6 +41,7 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
   const [resetStatus, setResetStatus] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const autoCreatingRef = useRef(false);
+  const handledRef = useRef<Set<string>>(new Set());
 
   const { data: savedProxyUrl } = useQuery({
     queryKey: ["monzo_proxy_url"],
@@ -90,6 +91,7 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
     const wfAccountNames = new Set(wfAccounts.map((a) => a.name));
 
     const unmapped = monzoAccounts.filter((acc) => {
+      if (handledRef.current.has(acc.id)) return false;
       const mappedId = savedMapping[acc.id];
       return !mappedId || !wfAccountIds.has(mappedId);
     });
@@ -104,6 +106,7 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
         const created: string[] = [];
 
         for (const acc of unmapped) {
+          handledRef.current.add(acc.id);
           const name = accountTypeLabel(acc);
           const currency = acc.currency || "GBP";
 
@@ -135,6 +138,7 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
         if (created.length > 0 || JSON.stringify(newMapping) !== JSON.stringify(savedMapping)) {
           await ctx.api.secrets.set(MAPPING_KEY, JSON.stringify(newMapping));
           queryClient.invalidateQueries({ queryKey: ["monzo_mapping"] });
+          queryClient.invalidateQueries({ queryKey: ["wf_accounts"] });
           if (created.length > 0) {
             setAutoCreateStatus(`Created: ${created.join(", ")}`);
           }
@@ -197,6 +201,7 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
 
   async function disconnect() {
     await clearTokens(ctx);
+    handledRef.current.clear();
     refetchTokens();
     queryClient.invalidateQueries({ queryKey: ["monzo_accounts"] });
   }

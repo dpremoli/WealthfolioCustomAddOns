@@ -47,7 +47,9 @@ export class MonzoProxyClient {
     if (!resp.ok) throw new Error(`Accounts request failed: ${resp.statusText}`);
     const data = await resp.json();
     const accounts: MonzoAccount[] = data.accounts ?? [];
-    return accounts.filter((a) => a.account_type !== "uk_monzo_flex_backing_loan");
+    return accounts.filter(
+      (a) => !a.closed && a.account_type !== "uk_monzo_flex_backing_loan",
+    );
   }
 
   async getTransactions(

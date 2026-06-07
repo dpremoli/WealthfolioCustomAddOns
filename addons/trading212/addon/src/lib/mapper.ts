@@ -147,6 +147,37 @@ export function mapPositionToHolding(
   };
 }
 
+/**
+ * Merges holdings that resolved to the same Wealthfolio symbol. A snapshot keeps
+ * at most one holding per symbol, so when two Trading 212 positions collapse onto
+ * one symbol — e.g. a same-ISIN cross-listing (US `NVDA` + Xetra leg) that the
+ * resolver couldn't keep distinct — pushing both would let one silently overwrite
+ * the other and that leg's value would vanish. Summing quantity (and taking a
+ * quantity-weighted average cost) preserves the total value instead. Holdings
+ * with distinct symbols pass through untouched and keep their order.
+ */
+export function mergeHoldingsBySymbol(holdings: SnapshotHoldingInput[]): SnapshotHoldingInput[] {
+  const bySymbol = new Map<string, SnapshotHoldingInput>();
+  for (const h of holdings) {
+    const prev = bySymbol.get(h.symbol);
+    if (!prev) {
+      bySymbol.set(h.symbol, h);
+      continue;
+    }
+    const q1 = Number(prev.quantity) || 0;
+    const q2 = Number(h.quantity) || 0;
+    const total = q1 + q2;
+    let averageCost = prev.averageCost;
+    if (prev.averageCost != null && h.averageCost != null && total > 0) {
+      averageCost = String((q1 * Number(prev.averageCost) + q2 * Number(h.averageCost)) / total);
+    } else if (prev.averageCost == null || h.averageCost == null) {
+      averageCost = undefined; // can't blend a meaningful cost if either side lacks one
+    }
+    bySymbol.set(h.symbol, { ...prev, quantity: String(total), averageCost });
+  }
+  return [...bySymbol.values()];
+}
+
 function formatDividendType(type: string): string {
   return type
     .toLowerCase()

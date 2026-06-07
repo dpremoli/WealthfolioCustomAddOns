@@ -191,6 +191,8 @@ describe("migrateLegacyConfig", () => {
     ["t212_symbol_map", JSON.stringify({ AAPL_US_EQ: "AAPL" })],
     // A v2-era cache that mis-resolved a ticker collision — must be dropped too.
     ["t212_symbol_map_v2", JSON.stringify({ TSM_US_EQ: "TSMN" })],
+    // A v3-era cache that accepted a wrong first-query hit — also dropped.
+    ["t212_symbol_map_v3", JSON.stringify({ "TSM_US_EQ": "TSMN|XMEX" })],
   ];
 
   it("converts the single-account layout into one connection", async () => {
@@ -222,6 +224,7 @@ describe("migrateLegacyConfig", () => {
     expect(secrets.has("t212_imported_refs")).toBe(false);
     expect(secrets.has("t212_symbol_map")).toBe(false);
     expect(secrets.has("t212_symbol_map_v2")).toBe(false);
+    expect(secrets.has("t212_symbol_map_v3")).toBe(false);
   });
 
   it("is idempotent and a no-op when nothing to migrate", async () => {

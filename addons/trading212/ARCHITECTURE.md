@@ -146,8 +146,14 @@ Stable id scheme (drives idempotency): `t212-order-{orderId}`,
 ### Symbol resolution (`symbol-resolver.ts`)
 
 Trading 212 tickers look like `AAPL_US_EQ`. `resolveTicker` queries the host
-`market.searchTicker` in priority order — **ISIN → base ticker (`AAPL`) → instrument
-name** — and `pickBest` runs four filters before ranking by `isExisting`/score:
+`market.searchTicker` by **ISIN → base ticker (`AAPL`) → instrument name**,
+**pooling the candidates from every query** before `pickBest` chooses. It stops
+early only when a query yields a *confident* hit — symbol equals the base ticker
+(or `base.SUFFIX`) with no currency/MIC contradiction. This matters because the
+ISIN query often returns only a *wrong* listing (the MXN-quoted TSMN, BioNTech's
+Hamburg `22UA`, a Canadian bank's TSX line); pooling lets the filters below pick
+the right listing from the *union* instead of accepting whatever came back first.
+`pickBest` runs four filters before ranking by `isExisting`/score:
 
 1. **Currency** — drop results whose currency doesn't match the instrument's (or, as
    fallback, the currency implied by the `_US_`/`_GB_`/… market segment). Stops a
@@ -165,7 +171,17 @@ name** — and `pickBest` runs four filters before ranking by `isExisting`/score
 
 `resolveTicker` returns `{ symbol, exchangeMic? }`; the HOLDINGS sync forwards the
 MIC into `SnapshotHoldingInput.exchangeMic` so Wealthfolio pins the asset to the
-right listing (without it, ticker collisions resolve to Yahoo's default).
+right listing (without it, ticker collisions resolve to Yahoo's default). It also
+takes an optional `onDiag` callback: on a live lookup (cache miss) the HOLDINGS
+sync logs the raw candidate pool + chosen symbol into the sync report's Details
+panel, so cross-listing resolution can be verified against real search output.
+
+When two positions still resolve to the **same** symbol — a same-ISIN
+cross-listing the search couldn't keep distinct (e.g. US `NVDA` + its Xetra leg)
+— `mergeHoldingsBySymbol` sums their quantity and quantity-weights the average
+cost before the snapshot is saved. A snapshot keeps one holding per symbol, so
+without this the second leg would silently overwrite the first and its value
+would vanish; merging preserves the total.
 
 `SymbolResolver` caches each lookup (including known misses, stored as `""`) for
 the duration of a sync and persists the map to the keyring. Values are encoded
@@ -208,7 +224,7 @@ so this is a documented, low-risk limitation rather than an observed problem.
 | `t212_settings` | `{ proxyUrl, env }` — shared by all connections |
 | `t212_connections` | `T212Connection[]` = `{ id, name, apiKey, apiSecret?, accountId }` |
 | `t212_sync_{id}` | Per-connection `{ lastSync, importedRefs[] }` |
-| `t212_symbol_map_v3` | Shared `{ ticker: "SYMBOL\|MIC" }` cache (`""` = known miss; bare `"SYMBOL"` = MIC unknown). v1/v2 are deleted by migration. |
+| `t212_symbol_map_v4` | Shared `{ ticker: "SYMBOL\|MIC" }` cache (`""` = known miss; bare `"SYMBOL"` = MIC unknown). v1/v2/v3 are deleted by migration. |
 
 ### Migration from the single-account layout
 
@@ -217,7 +233,8 @@ keys `t212_config` + `t212_account_id` exist and no `t212_connections`/`t212_set
 do, it writes `t212_settings`, creates one connection named `"Trading 212 (Invest)"`
 linked to the legacy account, copies `t212_last_sync`/`t212_imported_refs` into
 `t212_sync_{id}`, deletes the four legacy keys, and drops any prior symbol
-caches (`t212_symbol_map`, `t212_symbol_map_v2`) so v3 starts fresh. It is idempotent.
+caches (`t212_symbol_map`, `t212_symbol_map_v2`, `t212_symbol_map_v3`) so v4
+starts fresh. It is idempotent.
 
 ## Build, test, release
 

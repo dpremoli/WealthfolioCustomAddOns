@@ -21,9 +21,10 @@ import {
   mapOrderToActivity,
   mapPositionToHolding,
   mapTransactionToActivity,
+  mergeHoldingsBySymbol,
 } from "../lib/mapper";
 import { parseCsv, mapCsvRow } from "../lib/csv";
-import { SymbolResolver } from "../lib/symbol-resolver";
+import { SymbolResolver, type ResolveDiag } from "../lib/symbol-resolver";
 import {
   addImportedRefs,
   clearAccountData,
@@ -197,6 +198,24 @@ async function resolveAccountId(
   return { accountId, account: null };
 }
 
+/** One-line, human-readable dump of a resolution: chosen symbol + the raw
+ *  search candidates (symbol/currency/MIC/score, ✓ = already in Wealthfolio).
+ *  Surfaces in the sync report's Details panel for verifying cross-listings. */
+function formatResolveDiag(d: ResolveDiag): string {
+  const chosen = d.chosen
+    ? `${d.chosen.symbol}${d.chosen.exchangeMic ? `@${d.chosen.exchangeMic}` : ""}`
+    : "—";
+  const cands = d.candidates
+    .slice(0, 8)
+    .map(
+      (c) =>
+        `${c.symbol}/${c.currency ?? "?"}/${c.exchangeMic ?? "?"}/s${c.score ?? 0}${c.isExisting ? "✓" : ""}`,
+    )
+    .join(", ");
+  const more = d.candidates.length > 8 ? ` +${d.candidates.length - 8} more` : "";
+  return `[resolve] ${d.ticker} → ${chosen} | ${cands || "no candidates"}${more}`;
+}
+
 /** HOLDINGS-mode sync: writes a current positions + cash snapshot (no history). */
 async function syncHoldings(
   ctx: AddonContext,
@@ -226,8 +245,11 @@ async function syncHoldings(
   }
 
   onProgress({ phase: "map", message: "Matching symbols…" });
-  const holdings: SnapshotHoldingInput[] = [];
+  const mapped: SnapshotHoldingInput[] = [];
   let unresolved = 0;
+  // Diagnostic: log what market.searchTicker returned per ticker and what we
+  // chose, so cross-listing resolution can be verified from the sync report.
+  const diag = (d: ResolveDiag) => log.push(formatResolveDiag(d));
   for (const pos of positions) {
     const ticker = pos.instrument?.ticker ?? pos.ticker;
     if (!ticker) continue;
@@ -238,12 +260,12 @@ async function syncHoldings(
       name: pos.instrument?.name ?? meta?.name ?? meta?.shortName,
       currency: pos.instrument?.currency ?? meta?.currencyCode,
     };
-    const resolved = await resolver.resolveDetailed(ticker, instrument);
+    const resolved = await resolver.resolveDetailed(ticker, instrument, diag);
     if (!resolved) {
       unresolved++;
       continue;
     }
-    holdings.push(
+    mapped.push(
       mapPositionToHolding(
         { ...pos, instrument },
         resolved.symbol,
@@ -251,6 +273,14 @@ async function syncHoldings(
         resolved.exchangeMic,
       ),
     );
+  }
+
+  // Two positions can resolve to one symbol (a same-ISIN cross-listing the
+  // resolver couldn't keep distinct). A snapshot keeps one holding per symbol, so
+  // merge rather than let a leg get silently dropped — preserving total value.
+  const holdings = mergeHoldingsBySymbol(mapped);
+  if (holdings.length < mapped.length) {
+    log.push(`Merged ${mapped.length - holdings.length} position(s) that resolved to a shared symbol (cross-listing collapse).`);
   }
 
   const cashBalances: Record<string, string> = {

@@ -170,30 +170,91 @@ export function pickBestSymbol(
   return pickBest(results, hints)?.symbol ?? null;
 }
 
+/** Hints passed to `pickBest` / `isConfident`. */
+type Hints = { currency?: string; expectedMics?: string[]; baseTicker?: string };
+
+/** Diagnostic record emitted per live resolution (cache miss) for sync logging. */
+export interface ResolveDiag {
+  ticker: string;
+  chosen: Resolution | null;
+  candidates: SymbolSearchResult[];
+}
+export type DiagFn = (d: ResolveDiag) => void;
+
 /**
- * Resolves a Trading 212 ticker to a Wealthfolio symbol + (when known) exchange MIC
- * using Wealthfolio's own market-data search. Tries ISIN, then the base ticker,
- * then the instrument name. The instrument's currency and the T212 ticker's
- * market segment both steer the resolver toward the right listing.
+ * True when `r` is a confident enough match to stop querying early: its symbol
+ * IS the base ticker (or `baseTicker.SUFFIX`) and nothing about it contradicts
+ * the expected currency / exchange. Anything weaker — a wrong-currency cross-
+ * listing (`BMO.TO`/CAD for a `_US_EQ` ticker), a same-name different company —
+ * keeps the search going so a later query can surface the right listing before
+ * we commit. Without this, a wrong first hit would be accepted prematurely.
+ */
+function isConfident(r: SymbolSearchResult, hints: Hints): boolean {
+  const base = hints.baseTicker?.toUpperCase();
+  if (!base || !r.symbol) return false;
+  const s = r.symbol.toUpperCase();
+  if (s !== base && !s.startsWith(base + ".")) return false;
+  const wantCcy = normalizeCurrency(hints.currency);
+  const haveCcy = normalizeCurrency(r.currency);
+  if (wantCcy && haveCcy && wantCcy !== haveCcy) return false;
+  if (hints.expectedMics?.length && r.exchangeMic && !hints.expectedMics.includes(r.exchangeMic))
+    return false;
+  return true;
+}
+
+/**
+ * Resolves a Trading 212 ticker to a Wealthfolio symbol + (when known) exchange
+ * MIC using Wealthfolio's own market-data search. Queries by ISIN, base ticker,
+ * then instrument name, *accumulating* the candidates from every query into one
+ * pool before picking — so a wrong-listing hit from the ISIN query (the MXN-
+ * quoted TSMN, BioNTech's Hamburg 22UA, a Canadian bank's TSX listing) can't win
+ * just because it came back first. The search short-circuits as soon as a query
+ * yields a confident match (right base ticker, no currency/MIC contradiction);
+ * otherwise it pools all queries and lets the currency + MIC filters choose. The
+ * instrument's currency and the T212 ticker's market segment steer the pick.
+ * `onDiag`, when supplied, receives the candidate pool + chosen result.
  */
 export async function resolveTicker(
   search: SearchFn,
   ticker: string,
   instrument?: SymbolHints,
+  onDiag?: DiagFn,
 ): Promise<Resolution | null> {
   const queries = [instrument?.isin, parseBaseSymbol(ticker), instrument?.name].filter(
     (q): q is string => !!q,
   );
-  const hints = {
+  const hints: Hints = {
     currency: instrument?.currency ?? marketCurrency(ticker),
     expectedMics: marketMics(ticker),
     baseTicker: parseBaseSymbol(ticker),
   };
+
+  const seen = new Set<string>();
+  const pool: SymbolSearchResult[] = [];
+  let chosen: Resolution | null = null;
+
   for (const q of queries) {
-    const best = pickBest(await search(q), hints);
-    if (best?.symbol) return { symbol: best.symbol, exchangeMic: best.exchangeMic };
+    for (const r of await search(q)) {
+      const key = `${(r.symbol ?? "").toUpperCase()}|${r.exchangeMic ?? ""}`;
+      if (r.symbol && !seen.has(key)) {
+        seen.add(key);
+        pool.push(r);
+      }
+    }
+    const best = pickBest(pool, hints);
+    if (best && isConfident(best, hints)) {
+      chosen = { symbol: best.symbol, exchangeMic: best.exchangeMic };
+      break;
+    }
   }
-  return null;
+
+  if (!chosen) {
+    const best = pickBest(pool, hints);
+    chosen = best?.symbol ? { symbol: best.symbol, exchangeMic: best.exchangeMic } : null;
+  }
+
+  onDiag?.({ ticker, chosen, candidates: pool });
+  return chosen;
 }
 
 /** Back-compat wrapper returning just the symbol. */
@@ -222,15 +283,20 @@ export class SymbolResolver {
     private readonly cache: Record<string, string> = {},
   ) {}
 
-  /** Returns `{ symbol, exchangeMic? }` so the caller can record the MIC too. */
+  /**
+   * Returns `{ symbol, exchangeMic? }` so the caller can record the MIC too.
+   * `onDiag` (only fired on a cache miss, i.e. a real query) lets the caller log
+   * the raw search candidates — useful for verifying cross-listing resolution.
+   */
   async resolveDetailed(
     ticker: string,
     instrument?: SymbolHints,
+    onDiag?: DiagFn,
   ): Promise<Resolution | null> {
     if (Object.prototype.hasOwnProperty.call(this.cache, ticker)) {
       return parseCacheValue(this.cache[ticker]);
     }
-    const resolved = await resolveTicker(this.search, ticker, instrument);
+    const resolved = await resolveTicker(this.search, ticker, instrument, onDiag);
     this.cache[ticker] = formatCacheValue(resolved);
     this.dirty = true;
     return resolved;

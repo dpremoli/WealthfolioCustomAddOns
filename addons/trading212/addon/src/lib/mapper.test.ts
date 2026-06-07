@@ -4,6 +4,7 @@ import {
   mapOrderToActivity,
   mapPositionToHolding,
   mapTransactionToActivity,
+  mergeHoldingsBySymbol,
 } from "./mapper";
 import type { DividendItem, HistoricalOrder, Position, TransactionItem } from "../types";
 
@@ -155,5 +156,37 @@ describe("mapPositionToHolding", () => {
   it("leaves exchangeMic undefined when none was resolved", () => {
     const h = mapPositionToHolding(base, "AAPL", "GBP");
     expect(h.exchangeMic).toBeUndefined();
+  });
+});
+
+describe("mergeHoldingsBySymbol", () => {
+  it("passes distinct symbols through untouched, preserving order", () => {
+    const holdings = [
+      { symbol: "AAPL", quantity: "3", currency: "USD" },
+      { symbol: "MSFT", quantity: "1", currency: "USD" },
+    ];
+    expect(mergeHoldingsBySymbol(holdings)).toEqual(holdings);
+  });
+
+  it("sums quantity and quantity-weights the average cost on a collision", () => {
+    // Two NVIDIA legs (US + Xetra) that both collapsed onto NVDA: keep the value.
+    const merged = mergeHoldingsBySymbol([
+      { symbol: "NVDA", quantity: "5", currency: "USD", averageCost: "100" },
+      { symbol: "NVDA", quantity: "15", currency: "USD", averageCost: "140" },
+    ]);
+    expect(merged).toHaveLength(1);
+    expect(merged[0].quantity).toBe("20");
+    // (5*100 + 15*140) / 20 = 130
+    expect(merged[0].averageCost).toBe("130");
+  });
+
+  it("drops the average cost when either leg lacks one", () => {
+    const merged = mergeHoldingsBySymbol([
+      { symbol: "NVDA", quantity: "5", currency: "USD", averageCost: "100" },
+      { symbol: "NVDA", quantity: "15", currency: "USD" },
+    ]);
+    expect(merged).toHaveLength(1);
+    expect(merged[0].quantity).toBe("20");
+    expect(merged[0].averageCost).toBeUndefined();
   });
 });

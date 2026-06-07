@@ -286,6 +286,73 @@ describe("resolveTicker (detailed)", () => {
   });
 });
 
+describe("resolveTicker — pooling across queries", () => {
+  it("ignores a wrong-currency ISIN hit and picks the base-ticker query's match (TSM, not TSMN)", async () => {
+    // The bug v3 shipped: the ISIN query returned only the MXN-quoted TSMN, was
+    // accepted because it came back first, and the clean NYSE TSM was never tried.
+    const search = vi.fn(async (q: string) => {
+      if (q === "US8740391003") return [result({ symbol: "TSMN", score: 9, currency: "MXN", exchangeMic: "XMEX" })];
+      if (q === "TSM") return [result({ symbol: "TSM", score: 5, currency: "USD", exchangeMic: "XNYS" })];
+      return [];
+    });
+    const r = await resolveTicker(search, "TSM_US_EQ", { isin: "US8740391003", currency: "USD" });
+    expect(r).toEqual({ symbol: "TSM", exchangeMic: "XNYS" });
+    expect(search).toHaveBeenCalledWith("TSM");
+  });
+
+  it("drops a same-ISIN foreign listing in favour of the US listing (BioNTech 22UA → BNTX)", async () => {
+    const search = vi.fn(async (q: string) => {
+      if (q === "ISIN") return [result({ symbol: "22UA", score: 9, currency: "EUR", exchangeMic: "XHAM" })];
+      if (q === "BNTX") return [result({ symbol: "BNTX", score: 4, currency: "USD", exchangeMic: "XNAS" })];
+      return [];
+    });
+    const r = await resolveTicker(search, "BNTX_US_EQ", { isin: "ISIN" });
+    expect(r?.symbol).toBe("BNTX");
+  });
+
+  it("does not stop early on a base-exact hit whose currency contradicts the segment (BMO.TO → BMO)", async () => {
+    // BMO.TO is a base-ticker match but CAD on the TSX; a `_US_EQ` ticker wants
+    // the NYSE USD listing. The pool must keep querying and then prefer BMO/USD.
+    const search = vi.fn(async (q: string) => {
+      if (q === "CA_ISIN") return [result({ symbol: "BMO.TO", score: 9, currency: "CAD", exchangeMic: "XTSE" })];
+      if (q === "BMO") return [
+        result({ symbol: "BMO", score: 5, currency: "USD", exchangeMic: "XNYS" }),
+        result({ symbol: "BMO.TO", score: 9, currency: "CAD", exchangeMic: "XTSE" }),
+      ];
+      return [];
+    });
+    const r = await resolveTicker(search, "BMO_US_EQ", { isin: "CA_ISIN" });
+    expect(r).toEqual({ symbol: "BMO", exchangeMic: "XNYS" });
+  });
+
+  it("stops early (no extra queries) once a confident base+currency match is found", async () => {
+    const search = vi.fn(async (q: string) =>
+      q === "US0378331005" ? [result({ symbol: "AAPL", score: 9, currency: "USD", exchangeMic: "XNAS" })] : [],
+    );
+    await resolveTicker(search, "AAPL_US_EQ", { isin: "US0378331005", name: "Apple Inc" });
+    expect(search).toHaveBeenCalledTimes(1); // base + name queries skipped
+  });
+
+  it("reports the candidate pool and chosen result through onDiag", async () => {
+    const search = vi.fn(async (q: string) => {
+      if (q === "ISIN") return [result({ symbol: "TSMN", currency: "MXN", exchangeMic: "XMEX", score: 9 })];
+      if (q === "TSM") return [result({ symbol: "TSM", currency: "USD", exchangeMic: "XNYS", score: 5 })];
+      return [];
+    });
+    const diags: { ticker: string; chosen: unknown; n: number }[] = [];
+    await resolveTicker(
+      search,
+      "TSM_US_EQ",
+      { isin: "ISIN", currency: "USD" },
+      (d) => diags.push({ ticker: d.ticker, chosen: d.chosen, n: d.candidates.length }),
+    );
+    expect(diags).toHaveLength(1);
+    expect(diags[0].ticker).toBe("TSM_US_EQ");
+    expect(diags[0].chosen).toEqual({ symbol: "TSM", exchangeMic: "XNYS" });
+    expect(diags[0].n).toBe(2); // both the MXN and USD listings were pooled
+  });
+});
+
 describe("SymbolResolver caching", () => {
   it("caches positive resolutions and does not re-query", async () => {
     const search = vi.fn(async () => [result({ symbol: "AAPL" })]);
@@ -320,6 +387,15 @@ describe("SymbolResolver caching", () => {
     const r = new SymbolResolver(search);
     expect(await r.resolveDetailed("RR_GB_EQ")).toEqual({ symbol: "RR.L", exchangeMic: "XLON" });
     expect(r.snapshot()["RR_GB_EQ"]).toBe("RR.L|XLON");
+  });
+
+  it("fires onDiag on a live resolution but not on a cache hit", async () => {
+    const search = vi.fn(async () => [result({ symbol: "AAPL", currency: "USD", exchangeMic: "XNAS" })]);
+    const r = new SymbolResolver(search);
+    const diag = vi.fn();
+    await r.resolveDetailed("AAPL_US_EQ", { currency: "USD" }, diag);
+    await r.resolveDetailed("AAPL_US_EQ", { currency: "USD" }, diag); // cache hit
+    expect(diag).toHaveBeenCalledTimes(1);
   });
 
   it("reads SYMBOL|MIC encoded cache entries back into the detailed shape", async () => {

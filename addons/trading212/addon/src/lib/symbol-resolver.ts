@@ -126,17 +126,20 @@ export function isMtfMic(mic?: string): boolean {
  *  2. Exchange MIC match. When the T212 ticker tells us the market (e.g.
  *     `RR_GB_EQ` → XLON), prefer candidates listed on that exchange — this
  *     stops `RR` (Richtech, XNAS) winning over `RR.L` (Rolls-Royce, XLON).
- *  3. Cboe Europe / MTF deprioritisation. The CXE/DXE/BXE venues mirror a
- *     stock's primary listing under a mangled symbol (RRL/CXE for RR/XLON,
- *     VUAAM/DXE for VUAA/XMIL); when a non-MTF listing is also present, drop the
- *     MTF ones so the primary exchange wins. (Kept only if they're the sole
- *     option.) This catches venues the segment→MIC map in step 2 doesn't cover.
- *  4. ISIN-shaped symbols are dropped. Real tickers never look like an ISIN; an
+ *  3. ISIN-shaped symbols are dropped. Real tickers never look like an ISIN; an
  *     ISIN coming back as a `symbol` is an artefact of a prior bad import
  *     (Wealthfolio stored the asset under its ISIN, then `isExisting:true`
  *     boosts that record above the genuine ticker — e.g. GOOGL replaced with
  *     `US02079K3059`). If every surviving candidate is ISIN-shaped, treat as
  *     unresolved so the position is flagged rather than silently mis-imported.
+ *  4. Cboe Europe / MTF deprioritisation. The CXE/DXE/BXE venues mirror a
+ *     stock's primary listing under a mangled symbol (RRL/CXE for RR/XLON,
+ *     VUAAM/DXE for VUAA/XMIL); when a non-MTF listing is also present, drop the
+ *     MTF ones so the primary exchange wins. (Kept only if they're the sole
+ *     option.) This catches venues the segment→MIC map in step 2 doesn't cover.
+ *     Runs *after* the ISIN-shape drop so a position whose only real ticker is
+ *     on an MTF venue (an EUR-quoted `VUAAM`/DXE whose sole non-MTF sibling is
+ *     an ISIN-shaped hit) isn't stranded with nothing and dropped.
  *  5. Base-ticker exact match. Within the survivors, prefer one whose symbol
  *     equals the base ticker (or `baseTicker.SUFFIX`) — deterministic tiebreaker
  *     for ticker collisions on the same exchange (e.g. TSM beats TSMN at XNYS).
@@ -162,11 +165,11 @@ export function pickBest(
     if (matches.length > 0) candidates = matches;
   }
 
-  const nonMtf = candidates.filter((r) => !isMtfMic(r.exchangeMic));
-  if (nonMtf.length > 0 && nonMtf.length < candidates.length) candidates = nonMtf;
-
   candidates = candidates.filter((r) => r.symbol && !isIsinLike(r.symbol));
   if (candidates.length === 0) return null;
+
+  const nonMtf = candidates.filter((r) => !isMtfMic(r.exchangeMic));
+  if (nonMtf.length > 0 && nonMtf.length < candidates.length) candidates = nonMtf;
 
   if (hints?.baseTicker) {
     const base = hints.baseTicker.toUpperCase();

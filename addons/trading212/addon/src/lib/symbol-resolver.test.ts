@@ -304,6 +304,22 @@ describe("pickBestSymbol — Cboe Europe / MTF deprioritisation", () => {
     expect(best).toBe("VUAAM");
   });
 
+  it("keeps an MTF listing rather than stranding on an ISIN-shaped sibling (VUAA/EUR)", () => {
+    // EUR position: the currency filter keeps only the ISIN-shaped XSTU hit and
+    // the Cboe VUAAM. The ISIN-shape drop must run BEFORE the MTF filter, else
+    // VUAAM is dropped, the ISIN-shaped hit is then dropped too, and the
+    // position resolves to nothing (it was being skipped entirely).
+    const best = pickBestSymbol(
+      [
+        result({ symbol: "IE00BFMXXD54", score: 100, currency: "EUR", exchangeMic: "XSTU", isExisting: true }),
+        result({ symbol: "VUAAM", score: 100, currency: "EUR", exchangeMic: "DXE", isExisting: true }),
+        result({ symbol: "VUAA", score: 100, currency: "GBp", exchangeMic: "XLON", isExisting: true }),
+      ],
+      { currency: "EUR", baseTicker: "VUAAM" },
+    );
+    expect(best).toBe("VUAAM");
+  });
+
   it("does not deprioritise US Cboe BZX (BATS) listings", () => {
     const best = pickBestSymbol([
       result({ symbol: "AAPL", score: 9, currency: "USD", exchangeMic: "BATS" }),

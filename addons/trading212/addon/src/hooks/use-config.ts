@@ -14,11 +14,12 @@ export const PROVIDER = "trading212-addon";
 export const KEYS = {
   settings: "t212_settings",
   connections: "t212_connections",
-  // v5 invalidates pre-1.7.4 entries: v4's pooling regressed European primaries
-  // onto Cboe Europe MTF venues (RR→RRL/CXE, VUAA→VUAAM/DXE) and resolved Meta
-  // to the reassigned FB ticker. v5 treats the ISIN query as authoritative and
-  // deprioritises MTF venues, restoring the primary-exchange listing.
-  symbolMap: "t212_symbol_map_v5",
+  // v6 invalidates pre-1.7.5 entries: v5's MTF deprioritisation ran before the
+  // ISIN-shape drop, so an EUR position whose only real ticker was on a Cboe
+  // venue (VUAAM/DXE) got stranded and dropped as unresolved. v6 drops ISIN-
+  // shaped symbols first, so MTF-only listings still resolve.
+  symbolMap: "t212_symbol_map_v6",
+  legacySymbolMapV5: "t212_symbol_map_v5",
   legacySymbolMapV4: "t212_symbol_map_v4",
   legacySymbolMapV3: "t212_symbol_map_v3",
   legacySymbolMapV2: "t212_symbol_map_v2",
@@ -233,11 +234,13 @@ export async function migrateLegacyConfig(ctx: AddonContext): Promise<void> {
   // Drop earlier symbol caches regardless — their entries may point at the
   // wrong listing (v1 had no currency filter; v2 mis-picked some ticker
   // collisions; v3 accepted a wrong first-query hit; v4 regressed European
-  // primaries onto Cboe Europe MTF venues and Meta onto the reassigned FB).
+  // primaries onto Cboe Europe MTF venues and Meta onto the reassigned FB;
+  // v5 dropped MTF-only listings like VUAAM/DXE as unresolved).
   await ctx.api.secrets.delete(KEYS.legacySymbolMap);
   await ctx.api.secrets.delete(KEYS.legacySymbolMapV2);
   await ctx.api.secrets.delete(KEYS.legacySymbolMapV3);
   await ctx.api.secrets.delete(KEYS.legacySymbolMapV4);
+  await ctx.api.secrets.delete(KEYS.legacySymbolMapV5);
 
   const [settings, connections] = [await getSettings(ctx), await getConnections(ctx)];
   if (settings || connections.length > 0) return; // already migrated

@@ -195,6 +195,8 @@ describe("migrateLegacyConfig", () => {
     ["t212_symbol_map_v3", JSON.stringify({ "TSM_US_EQ": "TSMN|XMEX" })],
     // A v4-era cache that regressed a primary onto a Cboe mirror — also dropped.
     ["t212_symbol_map_v4", JSON.stringify({ "RR_GB_EQ": "RRL|CXE" })],
+    // A v5-era cache that dropped an MTF-only listing as unresolved — also dropped.
+    ["t212_symbol_map_v5", JSON.stringify({ "VUAAm_EQ": "" })],
   ];
 
   it("converts the single-account layout into one connection", async () => {
@@ -228,6 +230,7 @@ describe("migrateLegacyConfig", () => {
     expect(secrets.has("t212_symbol_map_v2")).toBe(false);
     expect(secrets.has("t212_symbol_map_v3")).toBe(false);
     expect(secrets.has("t212_symbol_map_v4")).toBe(false);
+    expect(secrets.has("t212_symbol_map_v5")).toBe(false);
   });
 
   it("is idempotent and a no-op when nothing to migrate", async () => {

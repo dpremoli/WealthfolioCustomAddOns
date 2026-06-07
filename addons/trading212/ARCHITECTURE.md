@@ -166,16 +166,19 @@ Trading 212 tickers look like `AAPL_US_EQ`. `resolveTicker` queries the host
 2. **Exchange MIC** — when the market segment maps to known MICs, prefer those
    listings. Stops `RR_GB_EQ` resolving to `RR` (Richtech, XNAS) instead of
    `RR.L` (Rolls-Royce, XLON).
-3. **Cboe Europe / MTF deprioritisation** — the CXE/DXE/BXE venues mirror a
+3. **ISIN-shaped symbols** — drop hits whose symbol *is* an ISIN (or starts with
+   one, e.g. `IE00BFMXXD54.SG`). These come from prior bad imports where
+   Wealthfolio stored the asset under its ISIN and `isExisting:true` then boosted
+   it above the genuine ticker.
+4. **Cboe Europe / MTF deprioritisation** — the CXE/DXE/BXE venues mirror a
    stock's primary listing under a mangled symbol (`RRL`/CXE for `RR`/XLON,
    `VUAAM`/DXE for `VUAA`/XMIL). When a non-MTF listing is also present, drop the
    MTF ones so the primary exchange wins (kept only if they're the sole option).
    Catches venues the segment→MIC map in step 2 doesn't cover. US `BATS` (Cboe
-   BZX) is excluded — it's a legitimate primary venue.
-4. **ISIN-shaped symbols** — drop hits whose symbol *is* an ISIN (or starts with
-   one, e.g. `IE00BFMXXD54.SG`). These come from prior bad imports where
-   Wealthfolio stored the asset under its ISIN and `isExisting:true` then boosted
-   it above the genuine ticker.
+   BZX) is excluded — it's a legitimate primary venue. Runs *after* the ISIN-shape
+   drop, so an EUR position whose only real ticker is an MTF listing (`VUAAM`/DXE,
+   its sole non-MTF sibling being an ISIN-shaped hit) still resolves instead of
+   being stranded with nothing and skipped.
 5. **Base-ticker exact match** — within survivors, prefer one whose symbol equals
    the base ticker (or `base.SUFFIX`). Deterministic tiebreaker for same-currency,
    same-exchange collisions like TSM vs TSMN at XNYS/XNAS.
@@ -235,7 +238,7 @@ so this is a documented, low-risk limitation rather than an observed problem.
 | `t212_settings` | `{ proxyUrl, env }` — shared by all connections |
 | `t212_connections` | `T212Connection[]` = `{ id, name, apiKey, apiSecret?, accountId }` |
 | `t212_sync_{id}` | Per-connection `{ lastSync, importedRefs[] }` |
-| `t212_symbol_map_v5` | Shared `{ ticker: "SYMBOL\|MIC" }` cache (`""` = known miss; bare `"SYMBOL"` = MIC unknown). v1–v4 are deleted by migration. |
+| `t212_symbol_map_v6` | Shared `{ ticker: "SYMBOL\|MIC" }` cache (`""` = known miss; bare `"SYMBOL"` = MIC unknown). v1–v5 are deleted by migration. |
 
 ### Migration from the single-account layout
 
@@ -245,7 +248,7 @@ do, it writes `t212_settings`, creates one connection named `"Trading 212 (Inves
 linked to the legacy account, copies `t212_last_sync`/`t212_imported_refs` into
 `t212_sync_{id}`, deletes the four legacy keys, and drops any prior symbol
 caches (`t212_symbol_map`, `t212_symbol_map_v2`, `t212_symbol_map_v3`,
-`t212_symbol_map_v4`) so v5 starts fresh. It is idempotent.
+`t212_symbol_map_v4`, `t212_symbol_map_v5`) so v6 starts fresh. It is idempotent.
 
 ## Build, test, release
 

@@ -103,6 +103,20 @@ export function isIsinLike(symbol: string): boolean {
   return ISIN_RE.test(head);
 }
 
+// Cboe Europe / pan-European MTF order books. These mirror a stock's primary
+// listing under a mangled symbol (RRL on CXE for Rolls-Royce's RR on XLON;
+// VUAAM on DXE for VUAA on XMIL) and should never be preferred when the primary
+// exchange's listing is also available. US "BATS" (Cboe BZX) is deliberately
+// absent — it's a legitimate primary venue for US securities.
+const CBOE_EUROPE_MICS = new Set([
+  "CXE", "DXE", "BXE", "BATE", "CHIX", "CEUX", "AQXE", "TQEX", "TRQX",
+]);
+
+/** True for a Cboe Europe / pan-European MTF venue (not a primary listing). */
+export function isMtfMic(mic?: string): boolean {
+  return !!mic && CBOE_EUROPE_MICS.has(mic.toUpperCase());
+}
+
 /**
  * Picks the best search hit. Filters run in order before scoring:
  *  1. Currency match. If the caller knows the instrument currency and at least
@@ -112,13 +126,18 @@ export function isIsinLike(symbol: string): boolean {
  *  2. Exchange MIC match. When the T212 ticker tells us the market (e.g.
  *     `RR_GB_EQ` → XLON), prefer candidates listed on that exchange — this
  *     stops `RR` (Richtech, XNAS) winning over `RR.L` (Rolls-Royce, XLON).
- *  3. ISIN-shaped symbols are dropped. Real tickers never look like an ISIN; an
+ *  3. Cboe Europe / MTF deprioritisation. The CXE/DXE/BXE venues mirror a
+ *     stock's primary listing under a mangled symbol (RRL/CXE for RR/XLON,
+ *     VUAAM/DXE for VUAA/XMIL); when a non-MTF listing is also present, drop the
+ *     MTF ones so the primary exchange wins. (Kept only if they're the sole
+ *     option.) This catches venues the segment→MIC map in step 2 doesn't cover.
+ *  4. ISIN-shaped symbols are dropped. Real tickers never look like an ISIN; an
  *     ISIN coming back as a `symbol` is an artefact of a prior bad import
  *     (Wealthfolio stored the asset under its ISIN, then `isExisting:true`
  *     boosts that record above the genuine ticker — e.g. GOOGL replaced with
  *     `US02079K3059`). If every surviving candidate is ISIN-shaped, treat as
  *     unresolved so the position is flagged rather than silently mis-imported.
- *  4. Base-ticker exact match. Within the survivors, prefer one whose symbol
+ *  5. Base-ticker exact match. Within the survivors, prefer one whose symbol
  *     equals the base ticker (or `baseTicker.SUFFIX`) — deterministic tiebreaker
  *     for ticker collisions on the same exchange (e.g. TSM beats TSMN at XNYS).
  * Final ranking: prefer one that already exists in Wealthfolio, then score.
@@ -142,6 +161,9 @@ export function pickBest(
     const matches = candidates.filter((r) => r.exchangeMic && wanted.has(r.exchangeMic));
     if (matches.length > 0) candidates = matches;
   }
+
+  const nonMtf = candidates.filter((r) => !isMtfMic(r.exchangeMic));
+  if (nonMtf.length > 0 && nonMtf.length < candidates.length) candidates = nonMtf;
 
   candidates = candidates.filter((r) => r.symbol && !isIsinLike(r.symbol));
   if (candidates.length === 0) return null;
@@ -170,7 +192,7 @@ export function pickBestSymbol(
   return pickBest(results, hints)?.symbol ?? null;
 }
 
-/** Hints passed to `pickBest` / `isConfident`. */
+/** Hints passed to `pickBest` / `isAuthoritative`. */
 type Hints = { currency?: string; expectedMics?: string[]; baseTicker?: string };
 
 /** Diagnostic record emitted per live resolution (cache miss) for sync logging. */
@@ -182,18 +204,17 @@ export interface ResolveDiag {
 export type DiagFn = (d: ResolveDiag) => void;
 
 /**
- * True when `r` is a confident enough match to stop querying early: its symbol
- * IS the base ticker (or `baseTicker.SUFFIX`) and nothing about it contradicts
- * the expected currency / exchange. Anything weaker — a wrong-currency cross-
- * listing (`BMO.TO`/CAD for a `_US_EQ` ticker), a same-name different company —
- * keeps the search going so a later query can surface the right listing before
- * we commit. Without this, a wrong first hit would be accepted prematurely.
+ * True when an **ISIN-query** hit can be trusted outright. The ISIN uniquely
+ * identifies the security, so a search *by ISIN* returns that security's
+ * listings — we just need the chosen one to not contradict the expected
+ * currency / exchange. (It need NOT equal the base ticker: a `FB_US_EQ` ticker's
+ * ISIN resolves to `META`, the correct symbol, even though the base is `FB`.)
+ * A contradicting hit — the MXN-quoted TSMN for a USD ticker, a Cboe-only
+ * listing when the segment expects XLON — is rejected so resolution falls
+ * through to the base-ticker query instead.
  */
-function isConfident(r: SymbolSearchResult, hints: Hints): boolean {
-  const base = hints.baseTicker?.toUpperCase();
-  if (!base || !r.symbol) return false;
-  const s = r.symbol.toUpperCase();
-  if (s !== base && !s.startsWith(base + ".")) return false;
+function isAuthoritative(r: SymbolSearchResult, hints: Hints): boolean {
+  if (!r.symbol || isIsinLike(r.symbol)) return false;
   const wantCcy = normalizeCurrency(hints.currency);
   const haveCcy = normalizeCurrency(r.currency);
   if (wantCcy && haveCcy && wantCcy !== haveCcy) return false;
@@ -204,14 +225,16 @@ function isConfident(r: SymbolSearchResult, hints: Hints): boolean {
 
 /**
  * Resolves a Trading 212 ticker to a Wealthfolio symbol + (when known) exchange
- * MIC using Wealthfolio's own market-data search. Queries by ISIN, base ticker,
- * then instrument name, *accumulating* the candidates from every query into one
- * pool before picking — so a wrong-listing hit from the ISIN query (the MXN-
- * quoted TSMN, BioNTech's Hamburg 22UA, a Canadian bank's TSX listing) can't win
- * just because it came back first. The search short-circuits as soon as a query
- * yields a confident match (right base ticker, no currency/MIC contradiction);
- * otherwise it pools all queries and lets the currency + MIC filters choose. The
- * instrument's currency and the T212 ticker's market segment steer the pick.
+ * MIC using Wealthfolio's own market-data search.
+ *
+ * The **ISIN query is authoritative**: searching by ISIN returns the security's
+ * own listings, so if its best hit agrees with the expected currency/exchange we
+ * trust it directly — this resolves `META` from a `FB_US_EQ` ticker (the base
+ * `FB` now belongs to a different security) and keeps a stock's primary listing
+ * over a same-name Cboe Europe mirror. When the ISIN hit *contradicts* the
+ * expectation (TSMN/MXN for a USD ticker, a Canadian bank's TSX line, BioNTech's
+ * Hamburg 22UA), resolution falls through to a **pool of the base-ticker + name
+ * queries**, where the currency / MIC / MTF filters choose the right listing.
  * `onDiag`, when supplied, receives the candidate pool + chosen result.
  */
 export async function resolveTicker(
@@ -220,35 +243,42 @@ export async function resolveTicker(
   instrument?: SymbolHints,
   onDiag?: DiagFn,
 ): Promise<Resolution | null> {
-  const queries = [instrument?.isin, parseBaseSymbol(ticker), instrument?.name].filter(
-    (q): q is string => !!q,
-  );
+  const baseTicker = parseBaseSymbol(ticker);
   const hints: Hints = {
     currency: instrument?.currency ?? marketCurrency(ticker),
     expectedMics: marketMics(ticker),
-    baseTicker: parseBaseSymbol(ticker),
+    baseTicker,
   };
 
   const seen = new Set<string>();
   const pool: SymbolSearchResult[] = [];
-  let chosen: Resolution | null = null;
-
-  for (const q of queries) {
-    for (const r of await search(q)) {
+  const addAll = (results: SymbolSearchResult[]) => {
+    for (const r of results) {
       const key = `${(r.symbol ?? "").toUpperCase()}|${r.exchangeMic ?? ""}`;
       if (r.symbol && !seen.has(key)) {
         seen.add(key);
         pool.push(r);
       }
     }
-    const best = pickBest(pool, hints);
-    if (best && isConfident(best, hints)) {
+  };
+
+  let chosen: Resolution | null = null;
+
+  // 1. ISIN is authoritative when its best hit agrees with the expected listing.
+  if (instrument?.isin) {
+    const isinResults = await search(instrument.isin);
+    addAll(isinResults);
+    const best = pickBest(isinResults, hints);
+    if (best && isAuthoritative(best, hints)) {
       chosen = { symbol: best.symbol, exchangeMic: best.exchangeMic };
-      break;
     }
   }
 
+  // 2. Otherwise pool the base-ticker + name queries and let the filters choose.
   if (!chosen) {
+    for (const q of [baseTicker, instrument?.name].filter((q): q is string => !!q)) {
+      addAll(await search(q));
+    }
     const best = pickBest(pool, hints);
     chosen = best?.symbol ? { symbol: best.symbol, exchangeMic: best.exchangeMic } : null;
   }

@@ -146,14 +146,19 @@ Stable id scheme (drives idempotency): `t212-order-{orderId}`,
 ### Symbol resolution (`symbol-resolver.ts`)
 
 Trading 212 tickers look like `AAPL_US_EQ`. `resolveTicker` queries the host
-`market.searchTicker` by **ISIN → base ticker (`AAPL`) → instrument name**,
-**pooling the candidates from every query** before `pickBest` chooses. It stops
-early only when a query yields a *confident* hit — symbol equals the base ticker
-(or `base.SUFFIX`) with no currency/MIC contradiction. This matters because the
-ISIN query often returns only a *wrong* listing (the MXN-quoted TSMN, BioNTech's
-Hamburg `22UA`, a Canadian bank's TSX line); pooling lets the filters below pick
-the right listing from the *union* instead of accepting whatever came back first.
-`pickBest` runs four filters before ranking by `isExisting`/score:
+`market.searchTicker` and resolves in two stages:
+
+1. **ISIN is authoritative.** A search *by ISIN* returns the security's own
+   listings, so if its best hit agrees with the expected currency/exchange we
+   trust it directly. This resolves `META` from a `FB_US_EQ` ticker (the base
+   `FB` now belongs to a different security) and keeps a stock's primary listing
+   over a same-name Cboe Europe mirror.
+2. **Fall through to a pooled base-ticker + name search.** When the ISIN hit
+   *contradicts* the expectation (TSMN/MXN for a USD ticker, a Canadian bank's
+   TSX line, BioNTech's Hamburg `22UA`), the candidates from the base-ticker and
+   name queries are pooled and `pickBest` picks the right listing from the union.
+
+`pickBest` runs five filters before ranking by `isExisting`/score:
 
 1. **Currency** — drop results whose currency doesn't match the instrument's (or, as
    fallback, the currency implied by the `_US_`/`_GB_`/… market segment). Stops a
@@ -161,11 +166,17 @@ the right listing from the *union* instead of accepting whatever came back first
 2. **Exchange MIC** — when the market segment maps to known MICs, prefer those
    listings. Stops `RR_GB_EQ` resolving to `RR` (Richtech, XNAS) instead of
    `RR.L` (Rolls-Royce, XLON).
-3. **ISIN-shaped symbols** — drop hits whose symbol *is* an ISIN (or starts with
+3. **Cboe Europe / MTF deprioritisation** — the CXE/DXE/BXE venues mirror a
+   stock's primary listing under a mangled symbol (`RRL`/CXE for `RR`/XLON,
+   `VUAAM`/DXE for `VUAA`/XMIL). When a non-MTF listing is also present, drop the
+   MTF ones so the primary exchange wins (kept only if they're the sole option).
+   Catches venues the segment→MIC map in step 2 doesn't cover. US `BATS` (Cboe
+   BZX) is excluded — it's a legitimate primary venue.
+4. **ISIN-shaped symbols** — drop hits whose symbol *is* an ISIN (or starts with
    one, e.g. `IE00BFMXXD54.SG`). These come from prior bad imports where
    Wealthfolio stored the asset under its ISIN and `isExisting:true` then boosted
    it above the genuine ticker.
-4. **Base-ticker exact match** — within survivors, prefer one whose symbol equals
+5. **Base-ticker exact match** — within survivors, prefer one whose symbol equals
    the base ticker (or `base.SUFFIX`). Deterministic tiebreaker for same-currency,
    same-exchange collisions like TSM vs TSMN at XNYS/XNAS.
 
@@ -224,7 +235,7 @@ so this is a documented, low-risk limitation rather than an observed problem.
 | `t212_settings` | `{ proxyUrl, env }` — shared by all connections |
 | `t212_connections` | `T212Connection[]` = `{ id, name, apiKey, apiSecret?, accountId }` |
 | `t212_sync_{id}` | Per-connection `{ lastSync, importedRefs[] }` |
-| `t212_symbol_map_v4` | Shared `{ ticker: "SYMBOL\|MIC" }` cache (`""` = known miss; bare `"SYMBOL"` = MIC unknown). v1/v2/v3 are deleted by migration. |
+| `t212_symbol_map_v5` | Shared `{ ticker: "SYMBOL\|MIC" }` cache (`""` = known miss; bare `"SYMBOL"` = MIC unknown). v1–v4 are deleted by migration. |
 
 ### Migration from the single-account layout
 
@@ -233,8 +244,8 @@ keys `t212_config` + `t212_account_id` exist and no `t212_connections`/`t212_set
 do, it writes `t212_settings`, creates one connection named `"Trading 212 (Invest)"`
 linked to the legacy account, copies `t212_last_sync`/`t212_imported_refs` into
 `t212_sync_{id}`, deletes the four legacy keys, and drops any prior symbol
-caches (`t212_symbol_map`, `t212_symbol_map_v2`, `t212_symbol_map_v3`) so v4
-starts fresh. It is idempotent.
+caches (`t212_symbol_map`, `t212_symbol_map_v2`, `t212_symbol_map_v3`,
+`t212_symbol_map_v4`) so v5 starts fresh. It is idempotent.
 
 ## Build, test, release
 

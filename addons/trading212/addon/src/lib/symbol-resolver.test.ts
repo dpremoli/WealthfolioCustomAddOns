@@ -286,6 +286,67 @@ describe("resolveTicker (detailed)", () => {
   });
 });
 
+describe("pickBestSymbol — Cboe Europe / MTF deprioritisation", () => {
+  it("prefers the primary listing over a Cboe Europe mirror (RR/XLON beats RRL/CXE)", () => {
+    // Both quote in GBP; the segment→MIC map didn't single out XLON, so without
+    // the MTF filter the higher-scoring Cboe mirror would win.
+    const best = pickBestSymbol([
+      result({ symbol: "RRL", score: 9, currency: "GBP", exchangeMic: "CXE" }),
+      result({ symbol: "RR", score: 4, currency: "GBp", exchangeMic: "XLON" }),
+    ]);
+    expect(best).toBe("RR");
+  });
+
+  it("keeps a Cboe Europe listing when it is the only option", () => {
+    const best = pickBestSymbol([
+      result({ symbol: "VUAAM", score: 9, currency: "EUR", exchangeMic: "DXE" }),
+    ]);
+    expect(best).toBe("VUAAM");
+  });
+
+  it("does not deprioritise US Cboe BZX (BATS) listings", () => {
+    const best = pickBestSymbol([
+      result({ symbol: "AAPL", score: 9, currency: "USD", exchangeMic: "BATS" }),
+    ]);
+    expect(best).toBe("AAPL");
+  });
+});
+
+describe("resolveTicker — ISIN authority", () => {
+  it("resolves the ISIN to the correct symbol even when the base ticker was reassigned (FB → META)", async () => {
+    // Trading 212 still tickers Meta as FB_US_EQ, but `FB` now belongs to a
+    // ProShares ETF. The ISIN query authoritatively returns META.
+    const search = vi.fn(async (q: string) => {
+      if (q === "US30303M1027") return [result({ symbol: "META", score: 5, currency: "USD", exchangeMic: "XNAS" })];
+      if (q === "FB") return [result({ symbol: "FB", score: 9, currency: "USD", exchangeMic: "BATS" })];
+      return [];
+    });
+    const r = await resolveTicker(search, "FB_US_EQ", { isin: "US30303M1027" });
+    expect(r?.symbol).toBe("META");
+    expect(search).not.toHaveBeenCalledWith("FB"); // ISIN hit was authoritative
+  });
+
+  it("trusts a currency/MIC-agreeing ISIN hit and stops (no base/name queries)", async () => {
+    const search = vi.fn(async (q: string) =>
+      q === "GB_ISIN" ? [result({ symbol: "RR", score: 5, currency: "GBp", exchangeMic: "XLON" })] : [],
+    );
+    const r = await resolveTicker(search, "RR_GB_EQ", { isin: "GB_ISIN", name: "Rolls-Royce" });
+    expect(r).toEqual({ symbol: "RR", exchangeMic: "XLON" });
+    expect(search).toHaveBeenCalledTimes(1);
+  });
+
+  it("falls through to the base query when the ISIN hit is a Cboe mirror (RRL/CXE → RR/XLON)", async () => {
+    const search = vi.fn(async (q: string) => {
+      if (q === "GB_ISIN") return [result({ symbol: "RRL", score: 9, currency: "GBP", exchangeMic: "CXE" })];
+      if (q === "RR") return [result({ symbol: "RR", score: 4, currency: "GBp", exchangeMic: "XLON" })];
+      return [];
+    });
+    const r = await resolveTicker(search, "RR_GB_EQ", { isin: "GB_ISIN" });
+    expect(r).toEqual({ symbol: "RR", exchangeMic: "XLON" });
+    expect(search).toHaveBeenCalledWith("RR");
+  });
+});
+
 describe("resolveTicker — pooling across queries", () => {
   it("ignores a wrong-currency ISIN hit and picks the base-ticker query's match (TSM, not TSMN)", async () => {
     // The bug v3 shipped: the ISIN query returned only the MXN-quoted TSMN, was

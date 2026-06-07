@@ -2,10 +2,13 @@ import { describe, it, expect, vi } from "vitest";
 import type { SymbolSearchResult } from "@wealthfolio/addon-sdk";
 import {
   SymbolResolver,
+  isIsinLike,
   marketCurrency,
+  marketMics,
   normalizeCurrency,
   parseBaseSymbol,
   pickBestSymbol,
+  resolveTicker,
   resolveTickerSymbol,
 } from "./symbol-resolver";
 
@@ -93,6 +96,94 @@ describe("pickBestSymbol", () => {
     ]);
     expect(best).toBeNull();
   });
+
+  it("filters by expected exchange MIC when the market segment is known", () => {
+    // RR is shared by Richtech (XNAS, USD) and Rolls-Royce (XLON, GBp). The
+    // GB market segment narrows the choice to the XLON listing even though
+    // Richtech's currency could match a missing-currency hint.
+    const best = pickBestSymbol(
+      [
+        result({ symbol: "RR", score: 9, currency: "USD", exchangeMic: "XNAS" }),
+        result({ symbol: "RR.L", score: 4, currency: "GBp", exchangeMic: "XLON" }),
+      ],
+      { expectedMics: ["XLON"] },
+    );
+    expect(best).toBe("RR.L");
+  });
+
+  it("falls back when no candidate matches the expected MIC", () => {
+    // If Wealthfolio simply hasn't indexed an XLON listing, don't drop everything.
+    const best = pickBestSymbol(
+      [
+        result({ symbol: "RR", score: 9, currency: "USD", exchangeMic: "XNAS" }),
+      ],
+      { expectedMics: ["XLON"] },
+    );
+    expect(best).toBe("RR");
+  });
+
+  it("prefers an exact base-ticker match within survivors (TSM beats TSMN)", () => {
+    // Both are USD-listed on NYSE/NASDAQ — currency and MIC filters pass both.
+    // The base-ticker tiebreaker picks the symbol that equals the T212 ticker.
+    const best = pickBestSymbol(
+      [
+        result({ symbol: "TSMN", score: 9, currency: "USD", exchangeMic: "XNAS" }),
+        result({ symbol: "TSM", score: 5, currency: "USD", exchangeMic: "XNYS" }),
+      ],
+      { currency: "USD", expectedMics: ["XNAS", "XNYS"], baseTicker: "TSM" },
+    );
+    expect(best).toBe("TSM");
+  });
+
+  it("allows baseTicker.SUFFIX as an exact match (RR.L for base RR)", () => {
+    const best = pickBestSymbol(
+      [
+        result({ symbol: "RR.L", score: 4, currency: "GBp", exchangeMic: "XLON" }),
+        result({ symbol: "RRX", score: 9, currency: "GBP" }),
+      ],
+      { baseTicker: "RR" },
+    );
+    expect(best).toBe("RR.L");
+  });
+});
+
+describe("isIsinLike", () => {
+  it("matches a bare 12-char ISIN", () => {
+    expect(isIsinLike("US0378331005")).toBe(true);
+    expect(isIsinLike("IE00BFMXXD54")).toBe(true);
+  });
+
+  it("matches a Yahoo-suffixed ISIN like IE00BFMXXD54.SG", () => {
+    // Yahoo Finance sometimes indexes a German listing's symbol as
+    // `<ISIN>.<suffix>`. The strict 12-char regex would miss it.
+    expect(isIsinLike("IE00BFMXXD54.SG")).toBe(true);
+    expect(isIsinLike("US0378331005.DU")).toBe(true);
+  });
+
+  it("is case-insensitive and trims whitespace", () => {
+    expect(isIsinLike(" ie00bfmxxd54 ")).toBe(true);
+  });
+
+  it("does not match real tickers", () => {
+    expect(isIsinLike("AAPL")).toBe(false);
+    expect(isIsinLike("RR.L")).toBe(false);
+    expect(isIsinLike("VUAA.MI")).toBe(false);
+    expect(isIsinLike("")).toBe(false);
+  });
+});
+
+describe("marketMics", () => {
+  it("maps the T212 ticker market segment to expected exchange MICs", () => {
+    expect(marketMics("TSM_US_EQ")).toContain("XNYS");
+    expect(marketMics("RR_GB_EQ")).toEqual(["XLON"]);
+    expect(marketMics("SAP_DE_EQ")).toContain("XETR");
+    expect(marketMics("VUAA_IT_EQ")).toEqual(["XMIL"]);
+  });
+
+  it("returns undefined for unknown or missing segments", () => {
+    expect(marketMics("VUAA")).toBeUndefined();
+    expect(marketMics("FOO_ZZ_EQ")).toBeUndefined();
+  });
 });
 
 describe("marketCurrency", () => {
@@ -162,6 +253,39 @@ describe("resolveTickerSymbol", () => {
   });
 });
 
+describe("resolveTicker (detailed)", () => {
+  it("returns the symbol and the resolved exchange MIC", async () => {
+    const search = vi.fn(async () => [
+      result({ symbol: "RR.L", score: 4, currency: "GBp", exchangeMic: "XLON" }),
+      result({ symbol: "RR", score: 9, currency: "USD", exchangeMic: "XNAS" }),
+    ]);
+    const r = await resolveTicker(search, "RR_GB_EQ");
+    expect(r).toEqual({ symbol: "RR.L", exchangeMic: "XLON" });
+  });
+
+  it("returns the symbol without a MIC when the search hit omits one", async () => {
+    const search = vi.fn(async () => [result({ symbol: "AAPL", score: 9, currency: "USD" })]);
+    const r = await resolveTicker(search, "AAPL_US_EQ");
+    expect(r).toEqual({ symbol: "AAPL" });
+  });
+
+  it("drops VUAA's ISIN-shaped hit (including Yahoo-suffixed variant)", async () => {
+    // The German listing of VUAA is indexed by Yahoo as `IE00BFMXXD54.SG`.
+    // The strict 12-char ISIN regex would miss the suffix, so the resolver
+    // would have picked it. The slice-12 ISIN check catches it.
+    const search = vi.fn(async (q: string) =>
+      q === "VUAA"
+        ? [
+            result({ symbol: "IE00BFMXXD54.SG", score: 9, currency: "EUR", exchangeMic: "XSTU", isExisting: true }),
+            result({ symbol: "VUAA.MI", score: 4, currency: "EUR", exchangeMic: "XMIL" }),
+          ]
+        : [],
+    );
+    const r = await resolveTicker(search, "VUAA", { currency: "EUR" });
+    expect(r?.symbol).toBe("VUAA.MI");
+  });
+});
+
 describe("SymbolResolver caching", () => {
   it("caches positive resolutions and does not re-query", async () => {
     const search = vi.fn(async () => [result({ symbol: "AAPL" })]);
@@ -187,5 +311,23 @@ describe("SymbolResolver caching", () => {
     expect(await r.resolve("AAPL_US_EQ")).toBe("AAPL");
     expect(search).not.toHaveBeenCalled();
     expect(r.isDirty).toBe(false);
+  });
+
+  it("persists the resolved exchange MIC in the cache (SYMBOL|MIC encoding)", async () => {
+    const search = vi.fn(async () => [
+      result({ symbol: "RR.L", score: 4, currency: "GBp", exchangeMic: "XLON" }),
+    ]);
+    const r = new SymbolResolver(search);
+    expect(await r.resolveDetailed("RR_GB_EQ")).toEqual({ symbol: "RR.L", exchangeMic: "XLON" });
+    expect(r.snapshot()["RR_GB_EQ"]).toBe("RR.L|XLON");
+  });
+
+  it("reads SYMBOL|MIC encoded cache entries back into the detailed shape", async () => {
+    const search = vi.fn(async () => []);
+    const r = new SymbolResolver(search, { RR_GB_EQ: "RR.L|XLON", AAPL_US_EQ: "AAPL" });
+    expect(await r.resolveDetailed("RR_GB_EQ")).toEqual({ symbol: "RR.L", exchangeMic: "XLON" });
+    // A pre-v1.7.2 entry (just the symbol) still decodes — MIC is undefined.
+    expect(await r.resolveDetailed("AAPL_US_EQ")).toEqual({ symbol: "AAPL" });
+    expect(search).not.toHaveBeenCalled();
   });
 });

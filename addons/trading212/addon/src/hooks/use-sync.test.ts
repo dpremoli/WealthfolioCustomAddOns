@@ -282,7 +282,7 @@ describe("useSync — JSON incremental path", () => {
 
     // Shared symbol map is resolved once (cache hit on the 2nd account).
     expect(searchTicker).toHaveBeenCalledTimes(1);
-    expect(secrets.get("t212_symbol_map_v2")).toContain("AAPL");
+    expect(secrets.get("t212_symbol_map_v3")).toContain("AAPL");
   });
 
   it("one failing key does not abort the others", async () => {

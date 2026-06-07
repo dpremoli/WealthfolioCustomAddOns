@@ -10,6 +10,12 @@ export interface SymbolHints {
   currency?: string;
 }
 
+/** Resolved symbol + exchange MIC (when the search hit carried one). */
+export interface Resolution {
+  symbol: string;
+  exchangeMic?: string;
+}
+
 /** Trading 212 tickers look like `AAPL_US_EQ` — the base symbol is the first segment. */
 export function parseBaseSymbol(ticker: string): string {
   return ticker.split("_")[0] || ticker;
@@ -28,10 +34,48 @@ const MARKET_CURRENCY: Record<string, string> = {
   AU: "AUD", HK: "HKD", SG: "SGD",
 };
 
+// Trading 212 market segment → expected exchange MIC(s). Used to prefer the
+// listing on the right exchange when the search returns ticker collisions —
+// e.g. RR_GB_EQ should resolve to RR.L (XLON, Rolls-Royce), not RR (XNAS,
+// Richtech Robotics). When at least one candidate matches, only those are kept;
+// otherwise the MIC filter is skipped (so unmapped markets aren't punished).
+const MARKET_MICS: Record<string, string[]> = {
+  US: ["XNAS", "XNYS", "ARCX", "BATS", "XASE", "OTCM", "IEXG"],
+  GB: ["XLON"],
+  CA: ["XTSE", "XTSX"],
+  MX: ["XMEX"],
+  JP: ["XJPX", "XTKS"],
+  DE: ["XETR", "XFRA", "XBER", "XDUS", "XHAM", "XMUN", "XSTU"],
+  FR: ["XPAR"],
+  NL: ["XAMS"],
+  IT: ["XMIL"],
+  ES: ["XMAD"],
+  IE: ["XDUB"],
+  CH: ["XSWX"],
+  DK: ["XCSE"],
+  SE: ["XSTO"],
+  NO: ["XOSL"],
+  PL: ["XWAR"],
+  AU: ["XASX"],
+  HK: ["XHKG"],
+  SG: ["XSES"],
+  BE: ["XBRU"],
+  AT: ["XWBO"],
+  FI: ["XHEL"],
+  PT: ["XLIS"],
+  LU: ["XLUX"],
+};
+
 /** Currency implied by the T212 ticker's market segment, or undefined if unknown. */
 export function marketCurrency(ticker: string): string | undefined {
   const seg = ticker.split("_")[1];
   return seg ? MARKET_CURRENCY[seg.toUpperCase()] : undefined;
+}
+
+/** Expected exchange MIC(s) for the T212 ticker's market segment, or undefined. */
+export function marketMics(ticker: string): string[] | undefined {
+  const seg = ticker.split("_")[1];
+  return seg ? MARKET_MICS[seg.toUpperCase()] : undefined;
 }
 
 /**
@@ -48,76 +92,127 @@ export function normalizeCurrency(c?: string): string | undefined {
 // ISIN format: 2 letters + 9 alphanumerics + 1 check digit.
 const ISIN_RE = /^[A-Z]{2}[A-Z0-9]{9}\d$/;
 
-/** True when `symbol` looks like an ISIN — not a real Yahoo-style ticker. */
+/**
+ * True when `symbol` is (or starts with) an ISIN — not a real Yahoo-style ticker.
+ * Matches the leading 12 chars uppercased so both bare ISINs (`IE00BFMXXD54`)
+ * and Yahoo-suffixed variants (`IE00BFMXXD54.SG`) are caught.
+ */
 export function isIsinLike(symbol: string): boolean {
-  return ISIN_RE.test(symbol);
+  if (!symbol) return false;
+  const head = symbol.trim().toUpperCase().slice(0, 12);
+  return ISIN_RE.test(head);
 }
 
 /**
- * Picks the best search hit. Two filters run before scoring:
+ * Picks the best search hit. Filters run in order before scoring:
  *  1. Currency match. If the caller knows the instrument currency and at least
  *     one hit matches, ignore all other-currency hits — this stops a NYSE ADR
  *     (`TSM`, USD) being silently replaced by a cross-listing on another
  *     exchange (`TSMN.MX`, MXN) just because the latter scored higher.
- *  2. ISIN-shaped symbols are dropped. Real tickers never look like an ISIN; an
+ *  2. Exchange MIC match. When the T212 ticker tells us the market (e.g.
+ *     `RR_GB_EQ` → XLON), prefer candidates listed on that exchange — this
+ *     stops `RR` (Richtech, XNAS) winning over `RR.L` (Rolls-Royce, XLON).
+ *  3. ISIN-shaped symbols are dropped. Real tickers never look like an ISIN; an
  *     ISIN coming back as a `symbol` is an artefact of a prior bad import
  *     (Wealthfolio stored the asset under its ISIN, then `isExisting:true`
  *     boosts that record above the genuine ticker — e.g. GOOGL replaced with
  *     `US02079K3059`). If every surviving candidate is ISIN-shaped, treat as
  *     unresolved so the position is flagged rather than silently mis-imported.
- * Within the surviving candidates, prefer one that already exists in Wealthfolio,
- * then the highest search score.
+ *  4. Base-ticker exact match. Within the survivors, prefer one whose symbol
+ *     equals the base ticker (or `baseTicker.SUFFIX`) — deterministic tiebreaker
+ *     for ticker collisions on the same exchange (e.g. TSM beats TSMN at XNYS).
+ * Final ranking: prefer one that already exists in Wealthfolio, then score.
  */
-export function pickBestSymbol(
+export function pickBest(
   results: SymbolSearchResult[],
-  hints?: { currency?: string },
-): string | null {
+  hints?: { currency?: string; expectedMics?: string[]; baseTicker?: string },
+): SymbolSearchResult | null {
   if (!results || results.length === 0) return null;
 
-  const wantCurrency = normalizeCurrency(hints?.currency);
   let candidates = results;
+
+  const wantCurrency = normalizeCurrency(hints?.currency);
   if (wantCurrency) {
-    const matches = results.filter((r) => normalizeCurrency(r.currency) === wantCurrency);
+    const matches = candidates.filter((r) => normalizeCurrency(r.currency) === wantCurrency);
+    if (matches.length > 0) candidates = matches;
+  }
+
+  if (hints?.expectedMics && hints.expectedMics.length > 0) {
+    const wanted = new Set(hints.expectedMics);
+    const matches = candidates.filter((r) => r.exchangeMic && wanted.has(r.exchangeMic));
     if (matches.length > 0) candidates = matches;
   }
 
   candidates = candidates.filter((r) => r.symbol && !isIsinLike(r.symbol));
   if (candidates.length === 0) return null;
 
+  if (hints?.baseTicker) {
+    const base = hints.baseTicker.toUpperCase();
+    const exact = candidates.filter((r) => {
+      const s = r.symbol.toUpperCase();
+      return s === base || s.startsWith(base + ".");
+    });
+    if (exact.length > 0) candidates = exact;
+  }
+
   const sorted = [...candidates].sort((a, b) => {
     if (!!b.isExisting !== !!a.isExisting) return b.isExisting ? 1 : -1;
     return (b.score ?? 0) - (a.score ?? 0);
   });
-  return sorted[0]?.symbol ?? null;
+  return sorted[0] ?? null;
+}
+
+/** Convenience: just the symbol string (or null). */
+export function pickBestSymbol(
+  results: SymbolSearchResult[],
+  hints?: { currency?: string; expectedMics?: string[]; baseTicker?: string },
+): string | null {
+  return pickBest(results, hints)?.symbol ?? null;
 }
 
 /**
- * Resolves a Trading 212 ticker to a Wealthfolio (Yahoo-style) symbol using
- * Wealthfolio's own market-data search. Tries ISIN, then the base ticker, then
- * the instrument name. When the instrument carries a currency, results in any
- * other currency are filtered out (see `pickBestSymbol`).
+ * Resolves a Trading 212 ticker to a Wealthfolio symbol + (when known) exchange MIC
+ * using Wealthfolio's own market-data search. Tries ISIN, then the base ticker,
+ * then the instrument name. The instrument's currency and the T212 ticker's
+ * market segment both steer the resolver toward the right listing.
  */
+export async function resolveTicker(
+  search: SearchFn,
+  ticker: string,
+  instrument?: SymbolHints,
+): Promise<Resolution | null> {
+  const queries = [instrument?.isin, parseBaseSymbol(ticker), instrument?.name].filter(
+    (q): q is string => !!q,
+  );
+  const hints = {
+    currency: instrument?.currency ?? marketCurrency(ticker),
+    expectedMics: marketMics(ticker),
+    baseTicker: parseBaseSymbol(ticker),
+  };
+  for (const q of queries) {
+    const best = pickBest(await search(q), hints);
+    if (best?.symbol) return { symbol: best.symbol, exchangeMic: best.exchangeMic };
+  }
+  return null;
+}
+
+/** Back-compat wrapper returning just the symbol. */
 export async function resolveTickerSymbol(
   search: SearchFn,
   ticker: string,
   instrument?: SymbolHints,
 ): Promise<string | null> {
-  const queries = [instrument?.isin, parseBaseSymbol(ticker), instrument?.name].filter(
-    (q): q is string => !!q,
-  );
-  // Prefer the instrument's own currency; fall back to the one implied by the
-  // T212 ticker's market segment when the instrument doesn't carry one.
-  const hints = { currency: instrument?.currency ?? marketCurrency(ticker) };
-  for (const q of queries) {
-    const best = pickBestSymbol(await search(q), hints);
-    if (best) return best;
-  }
-  return null;
+  return (await resolveTicker(search, ticker, instrument))?.symbol ?? null;
 }
 
 /**
- * Caches ticker -> symbol resolutions across a sync (and persists between syncs).
- * An empty-string entry records a known-unresolved ticker so we don't re-query it.
+ * Caches ticker → resolution across a sync (and persists between syncs).
+ *
+ * Persisted as a flat `Record<string,string>` so the blob stays human-inspectable.
+ * Per-ticker value encoding:
+ *  - `""`           : known-unresolved (don't re-query)
+ *  - `"SYMBOL"`     : resolved to a bare symbol, exchange MIC unknown
+ *  - `"SYMBOL|MIC"` : resolved to a symbol on a specific exchange MIC
  */
 export class SymbolResolver {
   private dirty = false;
@@ -127,17 +222,23 @@ export class SymbolResolver {
     private readonly cache: Record<string, string> = {},
   ) {}
 
-  async resolve(
+  /** Returns `{ symbol, exchangeMic? }` so the caller can record the MIC too. */
+  async resolveDetailed(
     ticker: string,
     instrument?: SymbolHints,
-  ): Promise<string | null> {
+  ): Promise<Resolution | null> {
     if (Object.prototype.hasOwnProperty.call(this.cache, ticker)) {
-      return this.cache[ticker] || null;
+      return parseCacheValue(this.cache[ticker]);
     }
-    const symbol = await resolveTickerSymbol(this.search, ticker, instrument);
-    this.cache[ticker] = symbol ?? "";
+    const resolved = await resolveTicker(this.search, ticker, instrument);
+    this.cache[ticker] = formatCacheValue(resolved);
     this.dirty = true;
-    return symbol;
+    return resolved;
+  }
+
+  /** Just the symbol (back-compat for activity-import callers). */
+  async resolve(ticker: string, instrument?: SymbolHints): Promise<string | null> {
+    return (await this.resolveDetailed(ticker, instrument))?.symbol ?? null;
   }
 
   get isDirty(): boolean {
@@ -147,4 +248,16 @@ export class SymbolResolver {
   snapshot(): Record<string, string> {
     return this.cache;
   }
+}
+
+function formatCacheValue(r: Resolution | null): string {
+  if (!r?.symbol) return "";
+  return r.exchangeMic ? `${r.symbol}|${r.exchangeMic}` : r.symbol;
+}
+
+function parseCacheValue(v: string): Resolution | null {
+  if (!v) return null;
+  const pipe = v.indexOf("|");
+  if (pipe < 0) return { symbol: v };
+  return { symbol: v.slice(0, pipe), exchangeMic: v.slice(pipe + 1) || undefined };
 }

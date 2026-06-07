@@ -127,12 +127,15 @@ export function mapTransactionToActivity(
  * Maps a Trading 212 position to a holdings-snapshot entry. `symbol` is the
  * Wealthfolio symbol already resolved from the position's ticker/ISIN. The
  * snapshot API takes string-encoded numbers; `accountCurrency` is the fallback
- * when the instrument doesn't carry its own currency.
+ * when the instrument doesn't carry its own currency. `exchangeMic` (when known)
+ * pins the asset Wealthfolio creates to the right listing — without it, ticker
+ * collisions like `RR` resolve to whichever company Yahoo defaults to.
  */
 export function mapPositionToHolding(
   pos: Position,
   symbol: string,
   accountCurrency: string,
+  exchangeMic?: string,
 ): SnapshotHoldingInput {
   return {
     symbol,
@@ -140,6 +143,7 @@ export function mapPositionToHolding(
     currency: pos.instrument?.currency || accountCurrency,
     averageCost: pos.averagePricePaid != null ? String(pos.averagePricePaid) : undefined,
     name: pos.instrument?.name,
+    exchangeMic,
   };
 }
 

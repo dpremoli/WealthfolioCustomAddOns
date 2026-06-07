@@ -145,12 +145,32 @@ Stable id scheme (drives idempotency): `t212-order-{orderId}`,
 
 ### Symbol resolution (`symbol-resolver.ts`)
 
-Trading 212 tickers look like `AAPL_US_EQ`. `resolveTickerSymbol` queries the host
+Trading 212 tickers look like `AAPL_US_EQ`. `resolveTicker` queries the host
 `market.searchTicker` in priority order — **ISIN → base ticker (`AAPL`) → instrument
-name** — and `pickBestSymbol` prefers a result that already exists in Wealthfolio,
-then the highest search score. `SymbolResolver` caches each lookup (including known
-misses, stored as `""`) for the duration of a sync and persists the map to the
-keyring, so repeated syncs don't re-query. "Reset sync history" clears it.
+name** — and `pickBest` runs four filters before ranking by `isExisting`/score:
+
+1. **Currency** — drop results whose currency doesn't match the instrument's (or, as
+   fallback, the currency implied by the `_US_`/`_GB_`/… market segment). Stops a
+   NYSE ADR being silently replaced by a Mexican cross-listing (TSM vs TSMN.MX).
+2. **Exchange MIC** — when the market segment maps to known MICs, prefer those
+   listings. Stops `RR_GB_EQ` resolving to `RR` (Richtech, XNAS) instead of
+   `RR.L` (Rolls-Royce, XLON).
+3. **ISIN-shaped symbols** — drop hits whose symbol *is* an ISIN (or starts with
+   one, e.g. `IE00BFMXXD54.SG`). These come from prior bad imports where
+   Wealthfolio stored the asset under its ISIN and `isExisting:true` then boosted
+   it above the genuine ticker.
+4. **Base-ticker exact match** — within survivors, prefer one whose symbol equals
+   the base ticker (or `base.SUFFIX`). Deterministic tiebreaker for same-currency,
+   same-exchange collisions like TSM vs TSMN at XNYS/XNAS.
+
+`resolveTicker` returns `{ symbol, exchangeMic? }`; the HOLDINGS sync forwards the
+MIC into `SnapshotHoldingInput.exchangeMic` so Wealthfolio pins the asset to the
+right listing (without it, ticker collisions resolve to Yahoo's default).
+
+`SymbolResolver` caches each lookup (including known misses, stored as `""`) for
+the duration of a sync and persists the map to the keyring. Values are encoded
+`"SYMBOL"` (no MIC) or `"SYMBOL|MIC"`; back-compat read-only for pre-v1.7.2
+entries. "Reset sync history" clears it.
 
 ## Idempotency model (defence in depth)
 
@@ -188,7 +208,7 @@ so this is a documented, low-risk limitation rather than an observed problem.
 | `t212_settings` | `{ proxyUrl, env }` — shared by all connections |
 | `t212_connections` | `T212Connection[]` = `{ id, name, apiKey, apiSecret?, accountId }` |
 | `t212_sync_{id}` | Per-connection `{ lastSync, importedRefs[] }` |
-| `t212_symbol_map` | Shared `{ ticker: resolvedSymbol }` cache (`""` = known miss) |
+| `t212_symbol_map_v3` | Shared `{ ticker: "SYMBOL\|MIC" }` cache (`""` = known miss; bare `"SYMBOL"` = MIC unknown). v1/v2 are deleted by migration. |
 
 ### Migration from the single-account layout
 
@@ -196,8 +216,8 @@ so this is a documented, low-risk limitation rather than an observed problem.
 keys `t212_config` + `t212_account_id` exist and no `t212_connections`/`t212_settings`
 do, it writes `t212_settings`, creates one connection named `"Trading 212 (Invest)"`
 linked to the legacy account, copies `t212_last_sync`/`t212_imported_refs` into
-`t212_sync_{id}`, deletes the four legacy keys, and leaves `t212_symbol_map` untouched.
-It is idempotent.
+`t212_sync_{id}`, deletes the four legacy keys, and drops any prior symbol
+caches (`t212_symbol_map`, `t212_symbol_map_v2`) so v3 starts fresh. It is idempotent.
 
 ## Build, test, release
 

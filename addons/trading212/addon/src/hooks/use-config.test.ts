@@ -189,6 +189,8 @@ describe("migrateLegacyConfig", () => {
     ["t212_last_sync", JSON.stringify("2026-01-01T00:00:00.000Z")],
     ["t212_imported_refs", JSON.stringify(["t212-order-9"])],
     ["t212_symbol_map", JSON.stringify({ AAPL_US_EQ: "AAPL" })],
+    // A v2-era cache that mis-resolved a ticker collision — must be dropped too.
+    ["t212_symbol_map_v2", JSON.stringify({ TSM_US_EQ: "TSMN" })],
   ];
 
   it("converts the single-account layout into one connection", async () => {
@@ -211,13 +213,15 @@ describe("migrateLegacyConfig", () => {
     const state = JSON.parse(secrets.get(`t212_sync_${conns[0].id}`)!);
     expect(state).toEqual({ lastSync: "2026-01-01T00:00:00.000Z", importedRefs: ["t212-order-9"] });
 
-    // Legacy keys deleted. The legacy symbol map is also dropped — its entries
-    // may point at the wrong cross-listing (pre-1.7.1 had no currency filter).
+    // Legacy keys deleted. Both prior symbol caches are dropped — their entries
+    // may point at the wrong listing (v1 had no currency filter; v2 still
+    // mis-picked some ticker collisions).
     expect(secrets.has("t212_config")).toBe(false);
     expect(secrets.has("t212_account_id")).toBe(false);
     expect(secrets.has("t212_last_sync")).toBe(false);
     expect(secrets.has("t212_imported_refs")).toBe(false);
     expect(secrets.has("t212_symbol_map")).toBe(false);
+    expect(secrets.has("t212_symbol_map_v2")).toBe(false);
   });
 
   it("is idempotent and a no-op when nothing to migrate", async () => {

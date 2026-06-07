@@ -14,9 +14,11 @@ export const PROVIDER = "trading212-addon";
 export const KEYS = {
   settings: "t212_settings",
   connections: "t212_connections",
-  // v2 invalidates pre-1.7.1 entries that picked the wrong cross-listing (e.g.
-  // TSM_US_EQ → TSMN.MX) before currency-aware resolution.
-  symbolMap: "t212_symbol_map_v2",
+  // v3 invalidates pre-1.7.2 entries: v2 still resolved some ticker collisions
+  // wrong (TSM→TSMN, RR→Richtech) and never carried an exchange MIC. v3 picks
+  // by market segment + base ticker and stores the MIC alongside the symbol.
+  symbolMap: "t212_symbol_map_v3",
+  legacySymbolMapV2: "t212_symbol_map_v2",
   legacySymbolMap: "t212_symbol_map",
   // Legacy single-account keys — read once during migration, then deleted.
   legacyConfig: "t212_config",
@@ -225,9 +227,11 @@ export async function setSymbolMap(
 
 /** Converts the legacy single-key layout into one connection. Idempotent. */
 export async function migrateLegacyConfig(ctx: AddonContext): Promise<void> {
-  // Drop the pre-1.7.1 symbol cache regardless — its entries may point at the
-  // wrong cross-listing (resolved before the currency filter existed).
+  // Drop earlier symbol caches regardless — their entries may point at the
+  // wrong listing (v1 had no currency filter; v2 still mis-picked some ticker
+  // collisions and never carried an exchange MIC).
   await ctx.api.secrets.delete(KEYS.legacySymbolMap);
+  await ctx.api.secrets.delete(KEYS.legacySymbolMapV2);
 
   const [settings, connections] = [await getSettings(ctx), await getConnections(ctx)];
   if (settings || connections.length > 0) return; // already migrated

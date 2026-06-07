@@ -238,12 +238,19 @@ async function syncHoldings(
       name: pos.instrument?.name ?? meta?.name ?? meta?.shortName,
       currency: pos.instrument?.currency ?? meta?.currencyCode,
     };
-    const symbol = await resolver.resolve(ticker, instrument);
-    if (!symbol) {
+    const resolved = await resolver.resolveDetailed(ticker, instrument);
+    if (!resolved) {
       unresolved++;
       continue;
     }
-    holdings.push(mapPositionToHolding({ ...pos, instrument }, symbol, accountCurrency));
+    holdings.push(
+      mapPositionToHolding(
+        { ...pos, instrument },
+        resolved.symbol,
+        accountCurrency,
+        resolved.exchangeMic,
+      ),
+    );
   }
 
   const cashBalances: Record<string, string> = {

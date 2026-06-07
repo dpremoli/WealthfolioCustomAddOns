@@ -144,4 +144,16 @@ describe("mapPositionToHolding", () => {
     const pos: Position = { instrument: { ticker: "X" }, quantity: 1 };
     expect(mapPositionToHolding(pos, "X", "GBP").averageCost).toBeUndefined();
   });
+
+  it("includes the exchange MIC when the resolver returned one", () => {
+    // Without this, Wealthfolio creates an exchangeless asset and ticker
+    // collisions like RR resolve to whichever company Yahoo defaults to.
+    const h = mapPositionToHolding(base, "RR.L", "GBP", "XLON");
+    expect(h.exchangeMic).toBe("XLON");
+  });
+
+  it("leaves exchangeMic undefined when none was resolved", () => {
+    const h = mapPositionToHolding(base, "AAPL", "GBP");
+    expect(h.exchangeMic).toBeUndefined();
+  });
 });

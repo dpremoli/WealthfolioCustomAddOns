@@ -13,6 +13,14 @@ export function isPotTransfer(tx: MonzoTransaction): boolean {
   return tx.metadata?.provider_category === "uk_retail_pot";
 }
 
+export function isFlexRepayment(tx: MonzoTransaction): boolean {
+  // The monthly Flex repayment debited from the current account is an internal
+  // transfer paying down the Flex balance, not new spending. The matching spend
+  // is already imported on the Flex account, so importing this too double-counts.
+  const name = (tx.merchant?.name || tx.description || "").toLowerCase();
+  return tx.category === "transfers" && name.includes("flex");
+}
+
 function buildComment(
   tx: MonzoTransaction,
   categoryLabels: Record<string, string>,

@@ -2,7 +2,12 @@ import { useState } from "react";
 import type { AddonContext } from "@wealthfolio/addon-sdk";
 import type { AccountMapping, SyncResult } from "../types";
 import { MonzoProxyClient } from "../lib/proxy-client";
-import { isPending, isPotTransfer, mapTransactionToActivity } from "../lib/mapper";
+import {
+  isPending,
+  isPotTransfer,
+  isFlexRepayment,
+  mapTransactionToActivity,
+} from "../lib/mapper";
 import { getTokens, isTokenExpired, setTokens } from "./use-tokens";
 
 const PROXY_URL_KEY = "monzo_proxy_url";
@@ -77,7 +82,10 @@ export function useSync(ctx: AddonContext) {
         const isFlex = flexAccountIds.has(monzoAccountId);
         const eligible = transactions.filter(
           // Flex transactions are never settled (monthly billing) — don't filter them out
-          (tx) => (isFlex || !isPending(tx)) && !isPotTransfer(tx),
+          (tx) =>
+            (isFlex || !isPending(tx)) &&
+            !isPotTransfer(tx) &&
+            !isFlexRepayment(tx),
         );
         if (eligible.length === 0) continue;
 

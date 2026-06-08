@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { mapTransactionToActivity } from './mapper';
+import { mapTransactionToActivity, isFlexRepayment } from './mapper';
 import type { MonzoTransaction } from '../types';
 
 describe('mapTransactionToActivity', () => {
@@ -119,5 +119,48 @@ describe('mapTransactionToActivity', () => {
 
     expect(activity.currency).toBe('GBP');
     expect(activity.symbol).toBe('GBP');
+  });
+});
+
+describe('isFlexRepayment', () => {
+  const base: MonzoTransaction = {
+    id: 'tx_flex',
+    created: '2026-05-06T10:00:00.000Z',
+    settled: '2026-05-06T10:00:00.000Z',
+    amount: -5000,
+    currency: 'GBP',
+    description: 'Flex',
+    notes: '',
+    category: 'transfers',
+    is_load: false,
+    metadata: {},
+  };
+
+  it('flags the monthly Flex repayment on the current account', () => {
+    expect(isFlexRepayment(base)).toBe(true);
+  });
+
+  it('matches when the name comes from the merchant field', () => {
+    const tx: MonzoTransaction = {
+      ...base,
+      description: '',
+      merchant: { name: 'Monzo Flex' },
+    };
+    expect(isFlexRepayment(tx)).toBe(true);
+  });
+
+  it('does not flag a normal transfer', () => {
+    const tx: MonzoTransaction = { ...base, description: 'Bank transfer' };
+    expect(isFlexRepayment(tx)).toBe(false);
+  });
+
+  it('does not flag a Flex purchase (real merchant, not a transfer)', () => {
+    const tx: MonzoTransaction = {
+      ...base,
+      category: 'groceries',
+      description: 'Tesco',
+      merchant: { name: 'Tesco' },
+    };
+    expect(isFlexRepayment(tx)).toBe(false);
   });
 });

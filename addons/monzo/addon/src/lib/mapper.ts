@@ -69,7 +69,6 @@ export function mapTransactionToActivity(
     amount: amountInMajorUnits,
     currency,
     symbol: currency,
-    providerId: "monzo",
     isValid: true,
     isDraft: false,
     comment: buildComment(tx, categoryLabels) || undefined,

@@ -36,6 +36,10 @@ export default function DashboardPage({ ctx }: { ctx: AddonContext }) {
     ctx.api.navigation.navigate("/addons/monzo/settings");
   }
 
+  function openImport() {
+    ctx.api.navigation.navigate("/addons/monzo/import");
+  }
+
   const canSync = !!tokens && !isSyncing;
 
   return (
@@ -46,6 +50,9 @@ export default function DashboardPage({ ctx }: { ctx: AddonContext }) {
           <p className="text-muted-foreground mt-1">Sync Monzo transactions into Wealthfolio.</p>
         </div>
         <div className="flex gap-2">
+          <Button variant="outline" size="lg" onClick={openImport}>
+            Import CSV
+          </Button>
           <Button variant="outline" size="lg" onClick={openSettings}>
             Settings
           </Button>

@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { AddonContext, AddonEnableFunction } from "@wealthfolio/addon-sdk";
 import React from "react";
+import CsvImportPage from "./pages/csv-import-page";
 import DashboardPage from "./pages/dashboard-page";
 import SettingsPage from "./pages/settings-page";
 
@@ -42,6 +43,11 @@ const enable: AddonEnableFunction = (context) => {
     context.router.add({
       path: "/addons/monzo/settings",
       component: React.lazy(() => Promise.resolve({ default: wrap(SettingsPage) })),
+    });
+
+    context.router.add({
+      path: "/addons/monzo/import",
+      component: React.lazy(() => Promise.resolve({ default: wrap(CsvImportPage) })),
     });
 
     context.api.logger.info("Monzo addon enabled");

@@ -8,6 +8,7 @@ import { getTokens, isTokenExpired, setTokens } from "./use-tokens";
 const PROXY_URL_KEY = "monzo_proxy_url";
 const MAPPING_KEY = "monzo_account_mapping";
 const LAST_SYNC_KEY = "monzo_last_sync";
+const CATEGORY_LABELS_KEY = "monzo_category_labels";
 
 interface SyncState {
   isSyncing: boolean;
@@ -50,6 +51,11 @@ export function useSync(ctx: AddonContext) {
         ? (JSON.parse(lastSyncRaw) as string)
         : undefined;
 
+      const categoryLabelsRaw = await ctx.api.secrets.get(CATEGORY_LABELS_KEY);
+      const categoryLabels: Record<string, string> = categoryLabelsRaw
+        ? (JSON.parse(categoryLabelsRaw) as Record<string, string>)
+        : {};
+
       // Build account type lookup so we can skip the pending filter for Flex
       const monzoAccounts = await client.getAccounts(tokens.access_token);
       const flexAccountIds = new Set(
@@ -76,7 +82,7 @@ export function useSync(ctx: AddonContext) {
         if (eligible.length === 0) continue;
 
         const activities = eligible.map((tx) =>
-          mapTransactionToActivity(tx, wealthfolioAccountId),
+          mapTransactionToActivity(tx, wealthfolioAccountId, categoryLabels),
         );
 
         const checked = await ctx.api.activities.checkImport(activities);

@@ -15,12 +15,14 @@ import {
 } from "@wealthfolio/ui";
 import { useEffect, useRef, useState } from "react";
 import { clearTokens, getTokens, setTokens } from "../hooks/use-tokens";
+import { MONZO_CATEGORIES, DEFAULT_CATEGORY_LABELS } from "../lib/category-map";
 import { MonzoProxyClient } from "../lib/proxy-client";
 import type { AccountMapping, MonzoAccount } from "../types";
 
 const PROXY_URL_KEY = "monzo_proxy_url";
 const MAPPING_KEY = "monzo_account_mapping";
 const LAST_SYNC_KEY = "monzo_last_sync";
+const CATEGORY_LABELS_KEY = "monzo_category_labels";
 
 function accountTypeLabel(acc: MonzoAccount): string {
   switch (acc.account_type) {
@@ -39,6 +41,8 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
   const [connectError, setConnectError] = useState<string | null>(null);
   const [autoCreateStatus, setAutoCreateStatus] = useState<string | null>(null);
   const [resetStatus, setResetStatus] = useState<string | null>(null);
+  const [categoryOverrides, setCategoryOverrides] = useState<Record<string, string>>({});
+  const [isSavingCategories, setIsSavingCategories] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const autoCreatingRef = useRef(false);
   const handledRef = useRef<Set<string>>(new Set());
@@ -81,6 +85,18 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
       return raw ? (JSON.parse(raw) as AccountMapping) : ({} as AccountMapping);
     },
   });
+
+  const { data: savedCategoryLabels } = useQuery({
+    queryKey: ["monzo_category_labels"],
+    queryFn: async () => {
+      const raw = await ctx.api.secrets.get(CATEGORY_LABELS_KEY);
+      return raw ? (JSON.parse(raw) as Record<string, string>) : ({} as Record<string, string>);
+    },
+  });
+
+  useEffect(() => {
+    if (savedCategoryLabels) setCategoryOverrides(savedCategoryLabels);
+  }, [savedCategoryLabels]);
 
   // Auto-create Wealthfolio accounts for unmapped/stale Monzo accounts
   useEffect(() => {
@@ -148,6 +164,30 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
       }
     })();
   }, [monzoAccounts, wfAccounts, savedMapping]);
+
+  async function saveCategoryLabels() {
+    setIsSavingCategories(true);
+    try {
+      await ctx.api.secrets.set(CATEGORY_LABELS_KEY, JSON.stringify(categoryOverrides));
+      queryClient.invalidateQueries({ queryKey: ["monzo_category_labels"] });
+    } finally {
+      setIsSavingCategories(false);
+    }
+  }
+
+  function handleCategoryChange(cat: string, value: string) {
+    setCategoryOverrides((prev) => {
+      const next = { ...prev };
+      const trimmed = value.trim();
+      // Only store non-empty values that differ from the default
+      if (!trimmed || trimmed === DEFAULT_CATEGORY_LABELS[cat]) {
+        delete next[cat];
+      } else {
+        next[cat] = trimmed;
+      }
+      return next;
+    });
+  }
 
   async function saveProxyUrl() {
     setIsSavingProxy(true);
@@ -289,6 +329,36 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
               )}
             </div>
           )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Category Labels</CardTitle>
+          <CardDescription>
+            Customise how Monzo spending categories appear in transaction comments.
+            Leave blank to use the default label.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="grid grid-cols-2 gap-x-6 gap-y-2">
+            {MONZO_CATEGORIES.map((cat) => (
+              <div key={cat} className="flex items-center gap-2">
+                <span className="text-xs text-muted-foreground w-28 shrink-0 truncate" title={cat}>
+                  {cat}
+                </span>
+                <Input
+                  className="h-7 text-sm"
+                  value={categoryOverrides[cat] ?? ""}
+                  onChange={(e) => handleCategoryChange(cat, e.target.value)}
+                  placeholder={DEFAULT_CATEGORY_LABELS[cat] ?? cat}
+                />
+              </div>
+            ))}
+          </div>
+          <Button size="sm" onClick={saveCategoryLabels} disabled={isSavingCategories}>
+            {isSavingCategories ? "Saving…" : "Save Labels"}
+          </Button>
         </CardContent>
       </Card>
 

@@ -1,5 +1,6 @@
 import type { ActivityImport } from "@wealthfolio/addon-sdk";
 import type { MonzoTransaction } from "../types";
+import { resolveCategory } from "./category-map";
 
 const DEPOSIT = "DEPOSIT" as ActivityImport["activityType"];
 const WITHDRAWAL = "WITHDRAWAL" as ActivityImport["activityType"];
@@ -12,23 +13,20 @@ export function isPotTransfer(tx: MonzoTransaction): boolean {
   return tx.metadata?.provider_category === "uk_retail_pot";
 }
 
-function formatCategory(category: string): string {
-  return category
-    .split("_")
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(" ");
-}
-
-function buildComment(tx: MonzoTransaction): string {
+function buildComment(
+  tx: MonzoTransaction,
+  categoryLabels: Record<string, string>,
+): string {
   const parts: string[] = [];
 
   // Primary description: prefer merchant name, fall back to description
   const name = tx.merchant?.name || tx.description;
   if (name) parts.push(name);
 
-  // Category (skip generic ones)
-  if (tx.category && tx.category !== "general") {
-    parts.push(formatCategory(tx.category));
+  // Category label (skip "General" as it's noise)
+  if (tx.category) {
+    const label = resolveCategory(tx.category, categoryLabels);
+    if (label !== "General") parts.push(label);
   }
 
   // Merchant location
@@ -58,20 +56,22 @@ function buildComment(tx: MonzoTransaction): string {
 export function mapTransactionToActivity(
   tx: MonzoTransaction,
   wealthfolioAccountId: string,
+  categoryLabels: Record<string, string> = {},
 ): ActivityImport {
   const currency = tx.currency || "GBP";
-  const amountInMajorUnits = Math.round(Math.abs(tx.amount) / 100 * 100) / 100;
+  const amountInMajorUnits = Math.round((Math.abs(tx.amount) / 100) * 100) / 100;
 
   return {
     id: tx.id,
     accountId: wealthfolioAccountId,
     activityType: tx.amount >= 0 ? DEPOSIT : WITHDRAWAL,
-    date: tx.created, // full ISO timestamp — preserves actual transaction time
+    date: tx.created,
     amount: amountInMajorUnits,
     currency,
     symbol: currency,
+    providerId: "monzo",
     isValid: true,
     isDraft: false,
-    comment: buildComment(tx) || undefined,
+    comment: buildComment(tx, categoryLabels) || undefined,
   };
 }

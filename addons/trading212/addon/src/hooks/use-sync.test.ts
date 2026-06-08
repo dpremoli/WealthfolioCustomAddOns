@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
 import type { ActivityImport } from "@wealthfolio/addon-sdk";
-import { useSync } from "./use-sync";
+import { useSync, runSyncAll } from "./use-sync";
 
 // --- helpers -------------------------------------------------------------
 
@@ -654,5 +654,29 @@ describe("useSync — tracking-mode drift", () => {
     expect(snapshotsSave).toHaveBeenCalledTimes(1);
     // Connection's recorded mode updated to the new mode.
     expect(JSON.parse(secrets.get("t212_connections")!)[0].trackingMode).toBe("HOLDINGS");
+  });
+});
+
+describe("runSyncAll — onlyConnectionIds filter (background scheduler)", () => {
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => routeFetch(String(url))));
+  });
+
+  it("syncs only the requested connections, leaving the rest untouched", async () => {
+    const { ctx, secrets } = makeCtx({
+      connections: [
+        { id: "c1", name: "Invest", apiKey: "k1", accountId: "acc-1" },
+        { id: "c2", name: "ISA", apiKey: "k2", accountId: "acc-2" },
+      ],
+    });
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await runSyncAll(ctx as any, { onlyConnectionIds: new Set(["c1"]) });
+
+    expect(result.perAccount.map((r) => r.connectionId)).toEqual(["c1"]);
+    // c2 was skipped entirely — its watermark is unchanged from the seeded default.
+    expect(JSON.parse(secrets.get("t212_sync_c2")!).lastSync).toBe("2026-01-01T00:00:00.000Z");
+    // c1 synced — its watermark advanced.
+    expect(JSON.parse(secrets.get("t212_sync_c1")!).lastSync).not.toBe("2026-01-01T00:00:00.000Z");
   });
 });

@@ -3,6 +3,7 @@ import type { AddonContext, AddonEnableFunction } from "@wealthfolio/addon-sdk";
 import React from "react";
 import DashboardPage from "./pages/dashboard-page";
 import SettingsPage from "./pages/settings-page";
+import { startAutoSync } from "./lib/auto-sync";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -17,6 +18,7 @@ const enable: AddonEnableFunction = (context) => {
   context.api.logger.info("Trading 212 addon enabling");
 
   const addedItems: { remove: () => void }[] = [];
+  let autoSync: { stop: () => void } | undefined;
 
   try {
     const sidebarItem = context.sidebar.addItem({
@@ -44,6 +46,10 @@ const enable: AddonEnableFunction = (context) => {
       component: React.lazy(() => Promise.resolve({ default: wrap(SettingsPage) })),
     });
 
+    // Refresh already-synced accounts in the background (≈ daily + on portfolio
+    // refresh) so HOLDINGS snapshots build a history without a manual click.
+    autoSync = startAutoSync(context);
+
     context.api.logger.info("Trading 212 addon enabled");
   } catch (error) {
     context.api.logger.error(
@@ -54,6 +60,7 @@ const enable: AddonEnableFunction = (context) => {
 
   context.onDisable(() => {
     context.api.logger.info("Trading 212 addon disabling");
+    autoSync?.stop();
     addedItems.forEach((item) => {
       try {
         item.remove();

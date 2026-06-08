@@ -636,6 +636,66 @@ function describeActivity(a: ActivityImport | undefined): string {
   return `${a.activityType} ${a.symbol ?? "-"} ${String(a.date ?? "")} amt=${a.amount ?? "-"} qty=${a.quantity ?? "-"} px=${a.unitPrice ?? "-"} fee=${a.fee ?? "-"} ccy=${a.currency ?? "-"} fx=${a.fxRate ?? "-"}`;
 }
 
+/** Options for {@link runSyncAll}. */
+export interface RunSyncOptions {
+  /** Connection ids the user confirmed clearing+re-syncing after a mode drift. */
+  confirmedModeSwitches?: Set<string>;
+  /** Restrict the sync to these connection ids (used by the background scheduler to
+   *  sync only the accounts that are due). Absent ⇒ all connections. */
+  onlyConnectionIds?: Set<string>;
+  /** Receives live per-account progress (the React hook maps this to UI state). */
+  onProgress?: (p: SyncProgress) => void;
+}
+
+/**
+ * Runs a full sync across connections. Framework-agnostic (no React) so it can be
+ * driven both by the dashboard's "Sync All" button and by the background auto-sync
+ * scheduler. Throws if there are no settings / no connections; individual account
+ * failures are captured per-account and don't abort the others.
+ */
+export async function runSyncAll(
+  ctx: AddonContext,
+  opts: RunSyncOptions = {},
+): Promise<MultiSyncResult> {
+  const confirmedModeSwitches = opts.confirmedModeSwitches ?? new Set<string>();
+
+  const settings = await getSettings(ctx);
+  if (!settings) throw new Error("Not connected. Open Settings to add your API key.");
+
+  let connections = await getConnections(ctx);
+  if (connections.length === 0)
+    throw new Error("No accounts connected. Open Settings to add one.");
+
+  if (opts.onlyConnectionIds) {
+    connections = connections.filter((c) => opts.onlyConnectionIds!.has(c.id));
+  }
+
+  // One shared resolver: ticker→symbol mapping is account-independent.
+  const resolver = new SymbolResolver(
+    (q) => ctx.api.market.searchTicker(q),
+    await getSymbolMap(ctx),
+  );
+
+  const perAccount: SyncResult[] = [];
+  for (const conn of connections) {
+    const report: ProgressFn = (p) => opts.onProgress?.({ accountName: conn.name, ...p });
+    perAccount.push(await syncOne(ctx, settings, conn, resolver, report, confirmedModeSwitches));
+  }
+
+  if (resolver.isDirty) await setSymbolMap(ctx, resolver.snapshot());
+
+  const totals = perAccount.reduce(
+    (acc, r) => ({
+      imported: acc.imported + r.imported,
+      duplicates: acc.duplicates + r.duplicates,
+      unresolved: acc.unresolved + r.unresolved,
+    }),
+    { imported: 0, duplicates: 0, unresolved: 0 },
+  );
+
+  return { perAccount, totals };
+}
+
 export function useSync(ctx: AddonContext) {
   const [state, setState] = useState<SyncState>({
     isSyncing: false,
@@ -647,40 +707,11 @@ export function useSync(ctx: AddonContext) {
   async function syncAll(confirmedModeSwitches: Set<string> = new Set()) {
     setState((s) => ({ ...s, isSyncing: true, error: null, progress: null }));
     try {
-      const settings = await getSettings(ctx);
-      if (!settings) throw new Error("Not connected. Open Settings to add your API key.");
-
-      const connections = await getConnections(ctx);
-      if (connections.length === 0)
-        throw new Error("No accounts connected. Open Settings to add one.");
-
-      // One shared resolver: ticker→symbol mapping is account-independent.
-      const resolver = new SymbolResolver(
-        (q) => ctx.api.market.searchTicker(q),
-        await getSymbolMap(ctx),
-      );
-
-      const perAccount: SyncResult[] = [];
-      for (const conn of connections) {
-        const report: ProgressFn = (p) =>
-          setState((s) => ({ ...s, progress: { accountName: conn.name, ...p } }));
-        perAccount.push(
-          await syncOne(ctx, settings, conn, resolver, report, confirmedModeSwitches),
-        );
-      }
-
-      if (resolver.isDirty) await setSymbolMap(ctx, resolver.snapshot());
-
-      const totals = perAccount.reduce(
-        (acc, r) => ({
-          imported: acc.imported + r.imported,
-          duplicates: acc.duplicates + r.duplicates,
-          unresolved: acc.unresolved + r.unresolved,
-        }),
-        { imported: 0, duplicates: 0, unresolved: 0 },
-      );
-
-      setState({ isSyncing: false, results: { perAccount, totals }, error: null, progress: null });
+      const results = await runSyncAll(ctx, {
+        confirmedModeSwitches,
+        onProgress: (progress) => setState((s) => ({ ...s, progress })),
+      });
+      setState({ isSyncing: false, results, error: null, progress: null });
     } catch (err) {
       setState((s) => ({ ...s, isSyncing: false, progress: null, error: (err as Error).message }));
     }

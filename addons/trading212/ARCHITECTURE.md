@@ -127,6 +127,32 @@ the confirmed connections (passed to `syncAll(confirmedModeSwitches)`) are clear
 `clearAccountData` (`activities.saveMany({deleteIds})` for TRANSACTIONS, `snapshots.delete`
 per date for HOLDINGS) and re-synced; unconfirmed drifted connections are skipped.
 
+### Background auto-sync (`auto-sync.ts`)
+
+HOLDINGS snapshots are **keyed by calendar date** (`snapshots.save` stamps the day when no
+date is passed), so a daily cadence builds a position history; only a *same-day* re-sync
+overwrites the day's snapshot. To make that history accrue without a manual click, the
+add-on runs a small background scheduler.
+
+`startAutoSync(ctx)` is started from `enable()` (so it runs regardless of which page is
+open) and torn down in `onDisable`. It fires on three triggers — shortly after load, hourly
+while the app stays open (to cross midnight), and on `events.portfolio.onUpdateComplete` —
+and on each one syncs only the connections that are **due**. `isDueForBackgroundSync` deems a
+connection due when it has a prior `lastSync` *and* that sync was on an earlier calendar day:
+
+- Requiring a prior sync keeps the **first** sync (a multi-minute backfill for TRANSACTIONS)
+  a deliberate manual action — the scheduler only *refreshes* already-synced accounts.
+- The calendar-day gate yields at most one background sync per day and makes the
+  portfolio-update trigger self-limiting (once today's sync lands, the account isn't due
+  again, so the snapshot it writes can't loop back through `onUpdateComplete`).
+
+Both modes participate (HOLDINGS gets a fresh daily snapshot; TRANSACTIONS a cheap JSON
+incremental). The core sync was lifted out of the React hook into the framework-agnostic
+`runSyncAll(ctx, { onlyConnectionIds })` so both the dashboard button and the scheduler share
+it. Background runs pass an empty `confirmedModeSwitches`, so a drifted account is **skipped**
+(never cleared) until the user confirms in the dashboard. A re-entrancy guard and the
+`autoSync` setting (opt-out, default on, toggled in Settings) gate the whole thing.
+
 ### Activity mapping (`mapper.ts`)
 
 | Trading 212 source | `activityType` | Notes |

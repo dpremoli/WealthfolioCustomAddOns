@@ -100,6 +100,14 @@ In Wealthfolio: **Settings → Add-ons → Install from ZIP**.
 > To switch, change the account's tracking mode in Wealthfolio, then **Sync All**: the
 > add-on detects the change and asks before clearing the old data and re-syncing.
 
+> **Automatic sync (on by default):** once an account has been synced once, the add-on
+> refreshes it on its own — about once a day, and whenever Wealthfolio refreshes its
+> portfolio — while the app is open. For **Holdings** accounts this writes one snapshot per
+> day, so your position history builds up without clicking **Sync All**. Snapshots are keyed
+> by date, so only a *same-day* re-sync overwrites the day's snapshot. The very first sync of
+> a new account stays manual (a Transactions backfill can take a few minutes). Turn it off
+> under **Settings → Connection settings → Automatic sync**.
+
 > **Renaming / removing:** rename or delete the accounts in Wealthfolio's own **Accounts**
 > page. Removing an account in the add-on only forgets the API key — the Wealthfolio
 > account and its imported activity stay.

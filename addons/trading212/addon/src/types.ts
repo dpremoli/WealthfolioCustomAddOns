@@ -19,6 +19,10 @@ export interface T212Config {
 export interface T212Settings {
   proxyUrl: string;
   env: T212Env;
+  // Auto-refresh already-synced accounts in the background (≈ once a day, and when
+  // Wealthfolio refreshes its portfolio) so HOLDINGS snapshots build a daily history
+  // without a manual click. Absent ⇒ enabled (opt-out).
+  autoSync?: boolean;
 }
 
 // One Trading 212 API key linked to one Wealthfolio account.

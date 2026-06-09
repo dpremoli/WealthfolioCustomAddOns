@@ -9,6 +9,7 @@ import type {
   Paginated,
   SyncProgress,
   SyncResult,
+  SyncStep,
   T212Connection,
   T212Settings,
   T212TrackingMode,
@@ -54,6 +55,9 @@ interface SyncState {
   results: MultiSyncResult | null;
   error: string | null;
   progress: SyncProgress | null;
+  // Live timeline of every `onProgress` step the sync emits. Resets each `syncAll`,
+  // appended to as phases land. Drives the activity feed in the dashboard.
+  steps: SyncStep[];
 }
 
 /** Callback used to stream step-by-step progress out of a running sync. */
@@ -523,11 +527,14 @@ async function syncOne(
 
     if (mode === "HOLDINGS") {
       const res = await syncHoldings(ctx, client, conn, accountId, resolver, onProgress, log, base);
+      const out: SyncResult = { ...res, finishedAt: new Date().toISOString() };
       if (cardAccountId) {
         const card = await syncCardAccount(ctx, client, conn, accountId, cardAccountId, resolver, log, onProgress);
-        return { ...res, imported: res.imported + card.imported, duplicates: res.duplicates + card.duplicates };
+        out.imported += card.imported;
+        out.duplicates += card.duplicates;
+        out.card = card;
       }
-      return res;
+      return out;
     }
 
     const { lastSync: since, backfillCheckpoint } = await getSyncState(ctx, conn.id);
@@ -542,6 +549,7 @@ async function syncOne(
     let totalToImport = 0;
     let unresolved = 0;
     const tally: Record<string, number> = {};
+    let cardResult: { imported: number; duplicates: number } | null = null;
 
     // Imports one batch: validates+imports in chunks (halving on backend rejection),
     // tallies the outcome, and persists this batch's refs so an interrupted backfill
@@ -777,21 +785,25 @@ async function syncOne(
       // via its own watermark: a one-time backfill the first time extraction is on, then a
       // recent top-up window thereafter.
       if (cardAccountId) {
-        const card = await syncCardAccount(ctx, client, conn, accountId, cardAccountId, resolver, log, onProgress);
-        imported += card.imported;
-        duplicates += card.duplicates;
+        cardResult = await syncCardAccount(ctx, client, conn, accountId, cardAccountId, resolver, log, onProgress);
+        imported += cardResult.imported;
+        duplicates += cardResult.duplicates;
       }
     }
 
-    const breakdown =
+    if (cardResult) tally.Card = (tally.Card ?? 0) + cardResult.imported;
+
+    const breakdownLine =
       Object.entries(tally)
         .map(([k, v]) => `${v} ${k}`)
         .join(", ") || "none";
-    log.push(`Mapped ${totalToImport} activities: ${breakdown}.`);
+    log.push(`Mapped ${totalToImport} activities: ${breakdownLine}.`);
     if (unresolved > 0) log.push(`${unresolved} rows skipped (symbol not matched).`);
     log.push(
       `Import: ${imported} imported, ${duplicates} duplicates, ${invalidCount} invalid.`,
     );
+
+    const finishedAt = new Date().toISOString();
 
     // Nothing imported but some rows were flagged invalid — surface why.
     if (imported === 0 && invalidCount > 0) {
@@ -800,18 +812,21 @@ async function syncOne(
         imported,
         duplicates,
         unresolved,
+        breakdown: tally,
+        card: cardResult ?? undefined,
+        finishedAt,
         error: `${invalidCount}/${totalToImport} rows invalid: ${invalidDetail ?? "no detail"}`,
       };
     }
 
-    return { ...base, imported, duplicates, unresolved };
+    return { ...base, imported, duplicates, unresolved, breakdown: tally, card: cardResult ?? undefined, finishedAt };
   } catch (err) {
     const message =
       (err as Error).message === "UNAUTHORIZED"
         ? "Trading 212 rejected this API key. Check it in Settings."
         : (err as Error).message;
     log.push(`Error: ${message}`);
-    return { ...base, imported: 0, duplicates: 0, unresolved: 0, error: message };
+    return { ...base, imported: 0, duplicates: 0, unresolved: 0, finishedAt: new Date().toISOString(), error: message };
   }
 }
 
@@ -898,20 +913,54 @@ export function useSync(ctx: AddonContext) {
     results: null,
     error: null,
     progress: null,
+    steps: [],
   });
 
   async function syncAll(confirmedModeSwitches: Set<string> = new Set()) {
-    setState((s) => ({ ...s, isSyncing: true, error: null, progress: null }));
+    setState((s) => ({ ...s, isSyncing: true, error: null, progress: null, steps: [] }));
     try {
       const results = await runSyncAll(ctx, {
         confirmedModeSwitches,
-        onProgress: (progress) => setState((s) => ({ ...s, progress })),
+        onProgress: (progress) =>
+          setState((s) => ({
+            ...s,
+            progress,
+            steps: appendStep(s.steps, progress),
+          })),
       });
-      setState({ isSyncing: false, results, error: null, progress: null });
+      // Mark the last step as done so the timeline shows a final check on every node.
+      setState((s) => ({
+        ...s,
+        isSyncing: false,
+        results,
+        error: null,
+        progress: null,
+        steps: s.steps.length
+          ? [...s.steps.slice(0, -1), { ...s.steps[s.steps.length - 1], status: "done" }]
+          : s.steps,
+      }));
     } catch (err) {
       setState((s) => ({ ...s, isSyncing: false, progress: null, error: (err as Error).message }));
     }
   }
 
   return { ...state, syncAll };
+}
+
+/**
+ * Appends a progress event to the live timeline. Coalesces consecutive duplicates
+ * (same phase + message + accountName) so import chunk updates land as one row that
+ * just updates its `current/total`. Marks the previous step as `done`.
+ */
+function appendStep(prev: SyncStep[], progress: SyncProgress): SyncStep[] {
+  const last = prev[prev.length - 1];
+  const same =
+    last &&
+    last.phase === progress.phase &&
+    last.accountName === progress.accountName &&
+    last.message === progress.message;
+  const incoming: SyncStep = { ...progress, ts: new Date().toISOString(), status: "active" };
+  if (same) return [...prev.slice(0, -1), { ...last, ...incoming }];
+  if (last) return [...prev.slice(0, -1), { ...last, status: "done" }, incoming];
+  return [incoming];
 }

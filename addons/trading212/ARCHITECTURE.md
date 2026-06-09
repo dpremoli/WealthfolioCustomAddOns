@@ -153,6 +153,30 @@ it. Background runs pass an empty `confirmedModeSwitches`, so a drifted account 
 (never cleared) until the user confirms in the dashboard. A re-entrancy guard and the
 `autoSync` setting (opt-out, default on, toggled in Settings) gate the whole thing.
 
+### UI (`pages/`, `components/`)
+
+The two pages render through a shared `PageShell` (Phosphor icon + heading + actions slot) and
+use `@wealthfolio/ui` primitives (`Switch`, `ToggleGroup`, `Tabs`, `Tooltip`, `ScrollArea`,
+`EmptyPlaceholder`, `AlertFeedback`, `ActionConfirm`, semantic `Badge` variants) to match the
+first-party look.
+
+- **`SyncActivity`** (`components/sync-activity.tsx`) renders the live sync view: a 4-node phase
+  stepper (Export → Match → Import → Done) driven by the current `SyncProgress.phase`, the
+  determinate/indeterminate `Progress` bar, and a scrolling **activity feed** of every step the
+  sync emitted. The feed is built from `useSync`'s `steps: SyncStep[]`, populated by appending
+  each `onProgress` event (consecutive duplicates coalesced so chunked imports show as one row
+  with a live `current/total`).
+- **`ConnectionCard`** shows per-account results with `StatTiles` (Imported / Duplicates /
+  Unmatched / Card) on top and a **Summary / Symbols / Log** tab block. *Summary* is the per-
+  type activity breakdown (`SyncResult.breakdown`, populated from the existing `tally`).
+  *Symbols* renders the persisted **symbol map** (account-independent; from `getSymbolMap`) as
+  matched ticker → symbol@exchange rows plus the known unresolved set, so the user can see what
+  resolved and what didn't without reading the raw log. *Log* keeps the raw verbose lines.
+- **`ConnectionHealth`** runs the existing `getAccountSummary` probe and surfaces `ok`/`auth`/
+  `err` as semantic Badge variants (`success`/`destructive`/`warning`) with a coloured dot.
+- Relative timestamps (`relativeTime`, `lib/format.ts`) are used everywhere a last-sync time is
+  shown, with the absolute time on a `Tooltip`.
+
 ### Activity mapping (`mapper.ts`)
 
 | Trading 212 source | `activityType` | Notes |

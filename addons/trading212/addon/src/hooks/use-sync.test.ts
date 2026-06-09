@@ -157,6 +157,14 @@ describe("useSync — JSON incremental path", () => {
     expect(lg).toContain("Incremental sync");
     expect(lg).toContain("Mapped 1 activities");
     expect(lg).toContain("1 imported");
+
+    // Structured fields the new UI consumes: per-type breakdown, finishedAt timestamp.
+    const r = result.current.results!.perAccount[0];
+    expect(r.breakdown).toEqual({ BUY: 1 });
+    expect(r.finishedAt).toBeTruthy();
+    // Live step timeline is accumulated and the last step marked done.
+    expect(result.current.steps.length).toBeGreaterThan(0);
+    expect(result.current.steps[result.current.steps.length - 1].status).toBe("done");
   });
 
   it("adaptively halves batches the backend rejects, importing everything", async () => {

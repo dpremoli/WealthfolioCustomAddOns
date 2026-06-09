@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { AddonContext, AddonEnableFunction } from "@wealthfolio/addon-sdk";
+import { Icons } from "@wealthfolio/ui";
 import React from "react";
 import DashboardPage from "./pages/dashboard-page";
 import SettingsPage from "./pages/settings-page";
@@ -24,7 +25,7 @@ const enable: AddonEnableFunction = (context) => {
     const sidebarItem = context.sidebar.addItem({
       id: "trading212",
       label: "Trading 212",
-      icon: <span style={{ fontSize: "16px" }}>&#128200;</span>,
+      icon: <Icons.TrendingUp size={16} weight="duotone" />,
       route: "/addons/trading212",
       order: 161,
     });

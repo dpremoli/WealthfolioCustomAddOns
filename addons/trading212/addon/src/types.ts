@@ -201,6 +201,13 @@ export interface SyncResult {
   unresolved: number; // activities skipped because no symbol match was found
   error?: string; // set if this connection failed; others still sync
   log: string[]; // verbose diagnostic lines, surfaced in the UI
+  // Per-activity-type counts (BUY/SELL/DIVIDEND/INTEREST/DEPOSIT/WITHDRAWAL/FEE/…),
+  // derived from the import tally. Populated for the activity-import paths.
+  breakdown?: Record<string, number>;
+  // Card-account import summary when extractCard is on for this connection.
+  card?: { imported: number; duplicates: number };
+  // ISO timestamp the sync finished at (set whether it succeeded or errored).
+  finishedAt?: string;
 }
 
 export interface MultiSyncResult {
@@ -216,4 +223,10 @@ export interface SyncProgress {
   // When both are set the UI can show a determinate bar; otherwise indeterminate.
   current?: number;
   total?: number;
+}
+
+/** One entry in the live sync timeline (every `onProgress` becomes a step). */
+export interface SyncStep extends SyncProgress {
+  ts: string; // ISO timestamp the step landed
+  status: "active" | "done";
 }

@@ -1,6 +1,8 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { AddonContext } from "@wealthfolio/addon-sdk";
 import {
+  ActionConfirm,
+  AlertFeedback,
   Badge,
   Button,
   Card,
@@ -8,7 +10,17 @@ import {
   CardDescription,
   CardHeader,
   CardTitle,
+  Icons,
   Input,
+  Label,
+  Separator,
+  Switch,
+  ToggleGroup,
+  ToggleGroupItem,
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
 } from "@wealthfolio/ui";
 import { useEffect, useState } from "react";
 import { Trading212ProxyClient } from "../lib/proxy-client";
@@ -19,16 +31,16 @@ import {
   ensureProviderAccount,
   getConnections,
   getSettings,
+  getSyncState,
   migrateLegacyConfig,
   randomId,
   removeConnection,
   resetSyncState,
   setSettings,
 } from "../hooks/use-config";
-
-function maskKey(key: string): string {
-  return key.length <= 4 ? "••••" : `••••${key.slice(-4)}`;
-}
+import { PageShell } from "../components/page-shell";
+import { ConnectionHealth } from "../components/connection-status";
+import { maskKey, relativeTime } from "../lib/format";
 
 function ConnectionRow({
   ctx,
@@ -41,34 +53,12 @@ function ConnectionRow({
   conn: T212Connection;
   onChanged: () => void;
 }) {
-  const { data: status } = useQuery({
-    queryKey: ["t212_status", conn.id],
-    queryFn: async () => {
-      try {
-        await new Trading212ProxyClient(connectionConfig(settings, conn)).getAccountSummary();
-        return "ok" as const;
-      } catch (err) {
-        return (err as Error).message === "UNAUTHORIZED" ? ("auth" as const) : ("err" as const);
-      }
-    },
+  const { data: syncState } = useQuery({
+    queryKey: ["t212_sync_state_row", conn.id],
+    queryFn: () => getSyncState(ctx, conn.id),
   });
-
-  const badge =
-    status === "ok" ? (
-      <Badge variant="outline" className="text-green-600 border-green-600">
-        Connected
-      </Badge>
-    ) : status === "auth" ? (
-      <Badge variant="outline" className="text-destructive border-destructive">
-        Auth failed
-      </Badge>
-    ) : status === "err" ? (
-      <Badge variant="outline" className="text-amber-600 border-amber-600">
-        Unreachable
-      </Badge>
-    ) : (
-      <Badge variant="outline">Checking…</Badge>
-    );
+  const last = syncState?.lastSync ?? null;
+  const mode = conn.trackingMode ?? "TRANSACTIONS";
 
   async function remove() {
     await removeConnection(ctx, conn.id);
@@ -81,26 +71,73 @@ function ConnectionRow({
   }
 
   return (
-    <div className="flex items-center justify-between border rounded-md p-3">
-      <div className="space-y-1">
-        <div className="flex items-center gap-2">
-          <span className="font-medium">{conn.name}</span>
-          {badge}
+    <div className="flex flex-col gap-3 rounded-lg border bg-card p-3 sm:flex-row sm:items-center sm:justify-between">
+      <div className="min-w-0 space-y-1.5">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="font-medium truncate">{conn.name}</span>
+          <ConnectionHealth ctx={ctx} settings={settings} conn={conn} />
         </div>
-        <p className="text-xs text-muted-foreground">
-          {settings.env === "live" ? "Live" : "Demo"} · key {maskKey(conn.apiKey)} ·{" "}
-          {(conn.trackingMode ?? "TRANSACTIONS") === "HOLDINGS" ? "Holdings" : "Transactions"}
-        </p>
+        <div className="text-muted-foreground flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+          <Badge variant="outline" className="gap-1">
+            <Icons.Globe size={10} weight="duotone" />
+            {settings.env === "live" ? "Live" : "Demo"}
+          </Badge>
+          <Badge variant={mode === "HOLDINGS" ? "info" : "secondary"} className="gap-1">
+            <Icons.Activity size={10} weight="duotone" />
+            {mode === "HOLDINGS" ? "Holdings" : "Transactions"}
+          </Badge>
+          {conn.cardAccountId && (
+            <Badge variant="outline" className="gap-1">
+              <Icons.CreditCard size={10} weight="duotone" />
+              Card
+            </Badge>
+          )}
+          <span className="font-mono">{maskKey(conn.apiKey)}</span>
+          <span className="flex items-center gap-1">
+            <Icons.Clock size={10} weight="duotone" />
+            {last ? <RelativeWithTooltip iso={last} /> : "Never synced"}
+          </span>
+        </div>
       </div>
-      <div className="flex gap-2">
+      <div className="flex shrink-0 gap-2">
         <Button variant="outline" size="sm" onClick={reset}>
-          Reset sync
+          <Icons.RefreshCw size={14} className="mr-1" weight="bold" />
+          Reset
         </Button>
-        <Button variant="outline" size="sm" onClick={remove}>
-          Remove
-        </Button>
+        <ActionConfirm
+          confirmTitle="Remove this connection?"
+          confirmMessage={
+            <span>
+              This forgets the API key and resets sync state. The Wealthfolio account itself
+              stays intact — delete it in Wealthfolio's Accounts page if you want it gone.
+            </span>
+          }
+          confirmButtonText="Remove"
+          confirmButtonVariant="destructive"
+          isPending={false}
+          handleConfirm={remove}
+          button={
+            <Button variant="outline" size="sm">
+              <Icons.Trash size={14} className="mr-1" weight="bold" />
+              Remove
+            </Button>
+          }
+        />
       </div>
     </div>
+  );
+}
+
+function RelativeWithTooltip({ iso }: { iso: string }) {
+  return (
+    <TooltipProvider>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span className="cursor-default">{relativeTime(iso)}</span>
+        </TooltipTrigger>
+        <TooltipContent side="bottom">{new Date(iso).toLocaleString()}</TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
   );
 }
 
@@ -224,132 +261,153 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
     queryClient.invalidateQueries({ queryKey: ["t212_connections"] });
   }
 
+  function openDashboard() {
+    ctx.api.navigation.navigate("/addons/trading212");
+  }
+
+  const hasConnections = (connections?.length ?? 0) > 0;
+  const isFirstRun = migrated && !settings && !hasConnections;
+
   return (
-    <div className="space-y-6 p-6 max-w-2xl">
-      <div>
-        <h1 className="text-2xl font-semibold">Trading 212 Settings</h1>
-        <p className="text-muted-foreground mt-1">
-          Connect one or more Trading 212 accounts (Invest / ISA) via the public API.
-        </p>
-      </div>
+    <PageShell
+      iconName="Settings"
+      heading="Trading 212 Settings"
+      description="Connect one or more Trading 212 accounts (Invest / ISA) via the public API."
+      actions={
+        <Button variant="outline" size="lg" onClick={openDashboard}>
+          <Icons.ArrowLeft size={16} className="mr-1" weight="bold" />
+          Dashboard
+        </Button>
+      }
+    >
+      {/* Onboarding banner for true first-time users */}
+      {isFirstRun && (
+        <AlertFeedback variant="success" title="Welcome 👋">
+          <div className="space-y-2 text-sm">
+            <p>To connect Trading 212 you'll need three things:</p>
+            <ol className="ml-4 list-decimal space-y-1">
+              <li>A running proxy server (Trading 212 blocks direct browser calls).</li>
+              <li>A Trading 212 API key (with the read scopes listed below).</li>
+              <li>Pick a sync mode — <strong>Holdings</strong> for an instant positions snapshot, or <strong>Transactions</strong> for full history.</li>
+            </ol>
+            <p className="text-muted-foreground">
+              Configure the proxy below, then add your account at the bottom.
+            </p>
+          </div>
+        </AlertFeedback>
+      )}
 
       <Card>
         <CardHeader>
-          <CardTitle>How to get an API key</CardTitle>
+          <CardTitle className="flex items-center gap-2">
+            <Icons.HelpCircle size={18} weight="duotone" />
+            How to get an API key
+          </CardTitle>
         </CardHeader>
-        <CardContent className="text-sm text-muted-foreground space-y-1">
-          <p>
-            1. In the Trading 212 app or web, open <strong>Settings → API</strong> (separately
-            for each account — Invest and Stocks ISA have their own keys).
-          </p>
-          <p>
-            2. Generate a key with these <strong>read</strong> scopes:{" "}
-            <code>metadata</code>, <code>account</code>, <code>portfolio</code>,{" "}
-            <code>history:orders</code>, <code>history:dividends</code>,{" "}
-            <code>history:transactions</code>.
-          </p>
-          <p>
-            3. Copy the <strong>API Key (ID)</strong> and <strong>API Secret</strong>. A Live key
-            only works in Live; a Demo key only in Demo.
-          </p>
+        <CardContent className="space-y-2 text-sm text-muted-foreground">
+          <Step n={1}>
+            In the Trading 212 app or web, open <strong>Settings → API</strong>{" "}
+            (separately for each account — Invest and Stocks ISA have their own keys).
+          </Step>
+          <Step n={2}>
+            Generate a key with these <strong>read</strong> scopes:{" "}
+            <code className="text-foreground">metadata</code>,{" "}
+            <code className="text-foreground">account</code>,{" "}
+            <code className="text-foreground">portfolio</code>,{" "}
+            <code className="text-foreground">history:orders</code>,{" "}
+            <code className="text-foreground">history:dividends</code>,{" "}
+            <code className="text-foreground">history:transactions</code>.
+          </Step>
+          <Step n={3}>
+            Copy the <strong>API Key (ID)</strong> and <strong>API Secret</strong>. A Live
+            key only works in Live; a Demo key only in Demo.
+          </Step>
         </CardContent>
       </Card>
 
       <Card>
         <CardHeader>
-          <CardTitle>Connection settings</CardTitle>
+          <CardTitle className="flex items-center gap-2">
+            <Icons.Globe size={18} weight="duotone" />
+            Connection
+          </CardTitle>
           <CardDescription>
-            Shared by all accounts. The proxy forwards requests to Trading 212 (required —
-            Trading 212 blocks direct browser calls). Keys are stored encrypted in Wealthfolio's
+            Shared by all accounts. The proxy forwards requests to Trading 212 — required, since
+            Trading 212 blocks direct browser calls. Keys are stored encrypted in Wealthfolio's
             keyring and sent only to Trading 212.
           </CardDescription>
         </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="space-y-1">
-            <label className="text-sm font-medium">Proxy URL</label>
+        <CardContent className="space-y-5">
+          <div className="space-y-1.5">
+            <Label className="flex items-center gap-1.5">
+              <Icons.Link size={13} weight="duotone" />
+              Proxy URL
+            </Label>
             <Input
               value={proxyUrl}
               onChange={(e) => setProxyUrl(e.target.value)}
               placeholder="http://YOUR_SERVER_IP:8000"
             />
           </div>
-          <div className="space-y-1">
-            <label className="text-sm font-medium">Environment</label>
-            <div className="flex gap-2">
-              {(["live", "demo"] as T212Env[]).map((e) => (
-                <Button
-                  key={e}
-                  variant={env === e ? "default" : "outline"}
-                  size="sm"
-                  onClick={() => setEnv(e)}
-                >
-                  {e === "live" ? "Live" : "Demo / Practice"}
-                </Button>
-              ))}
-            </div>
+          <div className="space-y-1.5">
+            <Label>Environment</Label>
+            <ToggleGroup
+              type="single"
+              value={env}
+              onValueChange={(v) => v && setEnv(v as T212Env)}
+              variant="outline"
+              className="w-fit"
+            >
+              <ToggleGroupItem value="live">Live</ToggleGroupItem>
+              <ToggleGroupItem value="demo">Demo / Practice</ToggleGroupItem>
+            </ToggleGroup>
           </div>
-          <div className="space-y-1">
-            <label className="text-sm font-medium">Automatic sync</label>
-            <div className="flex gap-2">
-              {([true, false] as const).map((on) => (
-                <Button
-                  key={String(on)}
-                  variant={autoSync === on ? "default" : "outline"}
-                  size="sm"
-                  onClick={() => setAutoSync(on)}
-                >
-                  {on ? "On" : "Off"}
-                </Button>
-              ))}
-            </div>
-            <p className="text-xs text-muted-foreground">
-              When on, already-synced accounts refresh on their own about once a day (and when
-              Wealthfolio refreshes its portfolio) while the app is open — so Holdings snapshots
-              build a daily history without a manual sync. The first sync of a new account is
-              always manual.
-            </p>
-          </div>
-          <div className="space-y-1">
-            <label className="text-sm font-medium">Card transactions</label>
-            <div className="flex gap-2">
-              {([true, false] as const).map((on) => (
-                <Button
-                  key={String(on)}
-                  variant={extractCard === on ? "default" : "outline"}
-                  size="sm"
-                  onClick={() => setExtractCard(on)}
-                >
-                  {on ? "Separate account" : "Keep in investing"}
-                </Button>
-              ))}
-            </div>
-            <p className="text-xs text-muted-foreground">
-              When on, Trading 212 card spending is routed into a dedicated “&lt;name&gt; Card” cash
-              account (created automatically) instead of the investing account, with the merchant
-              category mapped to a Wealthfolio spending label — so Wealthfolio’s Spending module can
-              categorise it. Works whether the account is in Holdings or Transactions mode.
-            </p>
-          </div>
-          <div className="flex items-center gap-3">
-            <Button onClick={saveSettings} size="sm">
+
+          <Separator />
+
+          <SwitchRow
+            icon="CloudSync"
+            title="Automatic sync"
+            description="Refresh already-synced accounts about once a day (and when Wealthfolio refreshes its portfolio) while the app is open. The first sync of a new account is always manual."
+            checked={autoSync}
+            onChange={setAutoSync}
+          />
+          <SwitchRow
+            icon="CreditCard"
+            title="Extract card transactions"
+            description="Route Trading 212 card spending into a dedicated “<name> Card” cash account, with the merchant category mapped to a Wealthfolio spending label — so the Spending module can categorise it. Works in both Holdings and Transactions modes."
+            checked={extractCard}
+            onChange={setExtractCard}
+          />
+
+          <div className="flex flex-wrap items-center gap-3 pt-1">
+            <Button onClick={saveSettings}>
+              <Icons.Save size={16} className="mr-1" weight="bold" />
               Save settings
             </Button>
-            {settingsSaved && <p className="text-sm text-green-600">{settingsSaved}</p>}
+            {settingsSaved && (
+              <span className="text-green-600 dark:text-green-500 flex items-center gap-1 text-sm">
+                <Icons.CheckCircle size={14} weight="duotone" /> {settingsSaved}
+              </span>
+            )}
           </div>
         </CardContent>
       </Card>
 
       <Card>
         <CardHeader>
-          <CardTitle>Connected accounts</CardTitle>
+          <CardTitle className="flex items-center gap-2">
+            <Icons.Users size={18} weight="duotone" />
+            Connected accounts
+          </CardTitle>
           <CardDescription>
             Each API key maps to one Wealthfolio account. Rename or delete accounts in
             Wealthfolio's own Accounts page — removing one here only forgets the key.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
-          {connections && connections.length > 0 ? (
-            connections.map((conn) => (
+          {hasConnections ? (
+            connections!.map((conn) => (
               <ConnectionRow
                 key={conn.id}
                 ctx={ctx}
@@ -359,58 +417,59 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
               />
             ))
           ) : (
-            <p className="text-sm text-muted-foreground">No accounts added yet.</p>
+            <p className="text-muted-foreground flex items-center gap-1.5 text-sm">
+              <Icons.Info size={14} weight="duotone" />
+              No accounts added yet. Add one below.
+            </p>
           )}
         </CardContent>
       </Card>
 
       <Card>
         <CardHeader>
-          <CardTitle>Add account</CardTitle>
+          <CardTitle className="flex items-center gap-2">
+            <Icons.PlusCircle size={18} weight="duotone" />
+            Add account
+          </CardTitle>
           <CardDescription>
             Pick the account type (sets the name), then paste that account's API key.
           </CardDescription>
         </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="space-y-1">
-            <label className="text-sm font-medium">Account type</label>
-            <div className="flex gap-2">
-              {(["invest", "isa"] as const).map((t) => (
-                <Button
-                  key={t}
-                  variant={accountType === t ? "default" : "outline"}
-                  size="sm"
-                  onClick={() => pickType(t)}
-                >
-                  {t === "invest" ? "Invest" : "Stocks ISA"}
-                </Button>
-              ))}
-            </div>
+        <CardContent className="space-y-5">
+          <div className="space-y-1.5">
+            <Label>Account type</Label>
+            <ToggleGroup
+              type="single"
+              value={accountType}
+              onValueChange={(v) => v && pickType(v as "invest" | "isa")}
+              variant="outline"
+              className="w-fit"
+            >
+              <ToggleGroupItem value="invest">Invest</ToggleGroupItem>
+              <ToggleGroupItem value="isa">Stocks ISA</ToggleGroupItem>
+            </ToggleGroup>
           </div>
-          <div className="space-y-1">
-            <label className="text-sm font-medium">Sync mode</label>
-            <div className="flex gap-2">
-              {(["HOLDINGS", "TRANSACTIONS"] as T212TrackingMode[]).map((m) => (
-                <Button
-                  key={m}
-                  variant={trackingMode === m ? "default" : "outline"}
-                  size="sm"
-                  onClick={() => setTrackingMode(m)}
-                >
-                  {m === "HOLDINGS" ? "Holdings" : "Transactions"}
-                </Button>
-              ))}
-            </div>
+          <div className="space-y-1.5">
+            <Label>Sync mode</Label>
+            <ToggleGroup
+              type="single"
+              value={trackingMode}
+              onValueChange={(v) => v && setTrackingMode(v as T212TrackingMode)}
+              variant="outline"
+              className="w-fit"
+            >
+              <ToggleGroupItem value="HOLDINGS">Holdings</ToggleGroupItem>
+              <ToggleGroupItem value="TRANSACTIONS">Transactions</ToggleGroupItem>
+            </ToggleGroup>
             <p className="text-xs text-muted-foreground">
               {trackingMode === "HOLDINGS"
-                ? "Holdings: sync only your current positions and cash as a snapshot — instant, no history."
+                ? "Holdings: sync your current positions and cash as a snapshot — instant, no history."
                 : "Transactions: import full trade/dividend/cash history. The first sync can take a few minutes."}{" "}
-              The mode is fixed when the account is created; to change it later, switch the account's
-              tracking mode in Wealthfolio and re-sync.
+              The mode is fixed at creation; to change it, switch the account's tracking mode in Wealthfolio and re-sync.
             </p>
           </div>
-          <div className="space-y-1">
-            <label className="text-sm font-medium">Account name</label>
+          <div className="space-y-1.5">
+            <Label>Account name</Label>
             <Input
               value={name}
               onChange={(e) => {
@@ -420,33 +479,86 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
               placeholder="Trading 212 (Invest)"
             />
           </div>
-          <div className="space-y-1">
-            <label className="text-sm font-medium">API Key</label>
-            <Input
-              type="password"
-              value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
-              placeholder="API Key (ID)"
-            />
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="space-y-1.5">
+              <Label>API Key</Label>
+              <Input
+                type="password"
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+                placeholder="API Key (ID)"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label>API Secret</Label>
+              <Input
+                type="password"
+                value={apiSecret}
+                onChange={(e) => setApiSecret(e.target.value)}
+                placeholder="Optional (legacy single-key access)"
+              />
+            </div>
           </div>
-          <div className="space-y-1">
-            <label className="text-sm font-medium">API Secret</label>
-            <Input
-              type="password"
-              value={apiSecret}
-              onChange={(e) => setApiSecret(e.target.value)}
-              placeholder="API Secret (leave blank for legacy single-key access)"
-            />
-          </div>
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-3 pt-1">
             <Button onClick={connectAndCreate} disabled={isConnecting}>
-              {isConnecting ? "Connecting…" : "Add account"}
+              {isConnecting ? (
+                <>
+                  <Icons.Spinner size={14} className="mr-1 animate-spin" />
+                  Connecting…
+                </>
+              ) : (
+                <>
+                  <Icons.Plus size={14} className="mr-1" weight="bold" />
+                  Add account
+                </>
+              )}
             </Button>
           </div>
-          {status && <p className="text-sm text-green-600">{status}</p>}
-          {error && <p className="text-sm text-destructive">{error}</p>}
+          {status && <AlertFeedback variant="success" title="Added">{status}</AlertFeedback>}
+          {error && <AlertFeedback variant="error" title="Couldn't add the account">{error}</AlertFeedback>}
         </CardContent>
       </Card>
+    </PageShell>
+  );
+}
+
+function SwitchRow({
+  icon,
+  title,
+  description,
+  checked,
+  onChange,
+}: {
+  icon: keyof typeof Icons;
+  title: string;
+  description: string;
+  checked: boolean;
+  onChange: (v: boolean) => void;
+}) {
+  const Icon = Icons[icon];
+  return (
+    <div className="flex items-start justify-between gap-4">
+      <div className="flex items-start gap-3">
+        <div className="text-muted-foreground mt-0.5 rounded-md bg-muted p-1.5">
+          <Icon size={15} weight="duotone" />
+        </div>
+        <div>
+          <div className="text-sm font-medium">{title}</div>
+          <p className="text-muted-foreground mt-0.5 text-xs">{description}</p>
+        </div>
+      </div>
+      <Switch checked={checked} onCheckedChange={onChange} className="mt-0.5 shrink-0" />
+    </div>
+  );
+}
+
+function Step({ n, children }: { n: number; children: React.ReactNode }) {
+  return (
+    <div className="flex items-start gap-2.5">
+      <span className="bg-muted text-foreground flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[11px] font-medium tabular-nums">
+        {n}
+      </span>
+      <span>{children}</span>
     </div>
   );
 }

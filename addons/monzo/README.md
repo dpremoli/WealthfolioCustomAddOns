@@ -208,6 +208,15 @@ This was a bug in versions before v1.0.10. If you have many empty accounts:
 
 ---
 
+## User interface
+
+The dashboard and settings use Wealthfolio's first-party `@wealthfolio/ui` design system
+(Phosphor icons, `Tabs`, `Tooltip`, `EmptyPlaceholder`, `AlertFeedback`, `ActionConfirm`). A
+sync shows a **live step timeline** (Fetch → Import → Done) with an activity feed; afterwards the
+status card shows stat tiles (Imported / Duplicates / Skipped), a **Spending** tab breaking
+transactions down by category (honouring your custom category labels), and a **Log** tab.
+Last-sync times are shown relative ("2 hours ago") with the absolute time on hover.
+
 ## Architecture
 
 ### Token Flow

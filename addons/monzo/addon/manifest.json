@@ -1,7 +1,7 @@
 {
   "id": "monzo-addon",
   "name": "Monzo Bank Sync",
-  "version": "1.1.5",
+  "version": "1.2.0",
   "description": "Automatically sync Monzo Bank transactions into your Wealthfolio cash accounts.",
   "author": "dpremoli",
   "main": "addon.js",

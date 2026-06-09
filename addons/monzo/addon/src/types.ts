@@ -52,4 +52,25 @@ export interface SyncResult {
   imported: number;
   skipped: number;
   duplicates: number;
+  // Spending count by resolved category label (e.g. "Eating Out": 12), for the UI breakdown.
+  breakdown?: Record<string, number>;
+  // Verbose diagnostic lines surfaced in the UI's Log tab.
+  log?: string[];
+  // ISO timestamp the sync finished at.
+  finishedAt?: string;
+}
+
+/** Live progress emitted during a sync so the UI can show the current step. */
+export interface SyncProgress {
+  phase: "fetch" | "import" | "done";
+  message: string;
+  // When both are set the UI can show a determinate bar; otherwise indeterminate.
+  current?: number;
+  total?: number;
+}
+
+/** One entry in the live sync timeline (every progress event becomes a step). */
+export interface SyncStep extends SyncProgress {
+  ts: string;
+  status: "active" | "done";
 }

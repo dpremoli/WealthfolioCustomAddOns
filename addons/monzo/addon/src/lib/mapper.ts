@@ -21,6 +21,25 @@ export function isFlexRepayment(tx: MonzoTransaction): boolean {
   return tx.category === "transfers" && name.includes("flex");
 }
 
+/**
+ * Tallies spending transactions (debits) by their resolved category label, for the
+ * dashboard breakdown. Credits (income/refunds) are ignored. Reuses the same
+ * `resolveCategory` + user overrides as the comment, so labels match. Pure + testable;
+ * the sync passes its eligible (non-pending, non-pot, non-Flex-repayment) transactions in.
+ */
+export function tallyByCategory(
+  txs: MonzoTransaction[],
+  categoryLabels: Record<string, string> = {},
+): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const tx of txs) {
+    if (tx.amount >= 0) continue; // spending only
+    const label = resolveCategory(tx.category || "general", categoryLabels);
+    out[label] = (out[label] ?? 0) + 1;
+  }
+  return out;
+}
+
 function buildComment(
   tx: MonzoTransaction,
   categoryLabels: Record<string, string>,

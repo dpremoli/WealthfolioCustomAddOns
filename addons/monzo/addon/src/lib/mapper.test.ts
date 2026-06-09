@@ -1,6 +1,42 @@
 import { describe, it, expect } from 'vitest';
-import { mapTransactionToActivity, isFlexRepayment } from './mapper';
+import { mapTransactionToActivity, isFlexRepayment, tallyByCategory } from './mapper';
 import type { MonzoTransaction } from '../types';
+
+function catTx(amount: number, category: string): MonzoTransaction {
+  return {
+    id: `t_${Math.random()}`,
+    created: '2026-05-01T00:00:00.000Z',
+    settled: '2026-05-01T00:00:00.000Z',
+    amount,
+    currency: 'GBP',
+    description: '',
+    notes: '',
+    category,
+    is_load: false,
+    metadata: {},
+  };
+}
+
+describe('tallyByCategory', () => {
+  it('counts spending (debits) by resolved label and ignores credits', () => {
+    const out = tallyByCategory([
+      catTx(-500, 'eating_out'),
+      catTx(-300, 'eating_out'),
+      catTx(-1200, 'groceries'),
+      catTx(2000, 'income'), // credit — ignored
+    ]);
+    expect(out).toEqual({ 'Eating Out': 2, Groceries: 1 });
+  });
+
+  it('applies user category-label overrides', () => {
+    const out = tallyByCategory([catTx(-500, 'eating_out')], { eating_out: 'Dining' });
+    expect(out).toEqual({ Dining: 1 });
+  });
+
+  it('returns an empty object when there is no spending', () => {
+    expect(tallyByCategory([catTx(1000, 'income')])).toEqual({});
+  });
+});
 
 describe('mapTransactionToActivity', () => {
   it('should map a withdrawal transaction correctly', () => {

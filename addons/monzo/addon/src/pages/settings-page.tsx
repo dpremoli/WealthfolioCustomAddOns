@@ -1,9 +1,8 @@
-import {
-  useQuery,
-  useQueryClient,
-} from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { AddonContext } from "@wealthfolio/addon-sdk";
 import {
+  ActionConfirm,
+  AlertFeedback,
   Badge,
   Button,
   Card,
@@ -11,13 +10,16 @@ import {
   CardDescription,
   CardHeader,
   CardTitle,
+  Icons,
   Input,
+  Label,
 } from "@wealthfolio/ui";
 import { useEffect, useRef, useState } from "react";
 import { clearTokens, getTokens, setTokens } from "../hooks/use-tokens";
 import { MONZO_CATEGORIES, DEFAULT_CATEGORY_LABELS } from "../lib/category-map";
 import { MonzoProxyClient } from "../lib/proxy-client";
 import type { AccountMapping, MonzoAccount } from "../types";
+import { PageShell } from "../components/page-shell";
 
 const PROXY_URL_KEY = "monzo_proxy_url";
 const MAPPING_KEY = "monzo_account_mapping";
@@ -37,12 +39,14 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
   const queryClient = useQueryClient();
   const [proxyUrl, setProxyUrl] = useState("");
   const [isSavingProxy, setIsSavingProxy] = useState(false);
+  const [proxySaved, setProxySaved] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
   const [connectError, setConnectError] = useState<string | null>(null);
   const [autoCreateStatus, setAutoCreateStatus] = useState<string | null>(null);
   const [resetStatus, setResetStatus] = useState<string | null>(null);
   const [categoryOverrides, setCategoryOverrides] = useState<Record<string, string>>({});
   const [isSavingCategories, setIsSavingCategories] = useState(false);
+  const [categoriesSaved, setCategoriesSaved] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const autoCreatingRef = useRef(false);
   const handledRef = useRef<Set<string>>(new Set());
@@ -155,9 +159,7 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
           await ctx.api.secrets.set(MAPPING_KEY, JSON.stringify(newMapping));
           queryClient.invalidateQueries({ queryKey: ["monzo_mapping"] });
           queryClient.invalidateQueries({ queryKey: ["wf_accounts"] });
-          if (created.length > 0) {
-            setAutoCreateStatus(`Created: ${created.join(", ")}`);
-          }
+          if (created.length > 0) setAutoCreateStatus(`Created: ${created.join(", ")}`);
         }
       } finally {
         autoCreatingRef.current = false;
@@ -167,19 +169,21 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
 
   async function saveCategoryLabels() {
     setIsSavingCategories(true);
+    setCategoriesSaved(false);
     try {
       await ctx.api.secrets.set(CATEGORY_LABELS_KEY, JSON.stringify(categoryOverrides));
       queryClient.invalidateQueries({ queryKey: ["monzo_category_labels"] });
+      setCategoriesSaved(true);
     } finally {
       setIsSavingCategories(false);
     }
   }
 
   function handleCategoryChange(cat: string, value: string) {
+    setCategoriesSaved(false);
     setCategoryOverrides((prev) => {
       const next = { ...prev };
       const trimmed = value.trim();
-      // Only store non-empty values that differ from the default
       if (!trimmed || trimmed === DEFAULT_CATEGORY_LABELS[cat]) {
         delete next[cat];
       } else {
@@ -191,9 +195,11 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
 
   async function saveProxyUrl() {
     setIsSavingProxy(true);
+    setProxySaved(false);
     try {
       await ctx.api.secrets.set(PROXY_URL_KEY, proxyUrl.trim());
       queryClient.invalidateQueries({ queryKey: ["monzo_proxy_url"] });
+      setProxySaved(true);
     } finally {
       setIsSavingProxy(false);
     }
@@ -258,48 +264,86 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
     };
   }, []);
 
+  const isFirstRun = !savedProxyUrl && !tokens;
+
   return (
-    <div className="space-y-6 p-6 max-w-2xl">
-      <div>
-        <h1 className="text-2xl font-semibold">Monzo Sync Settings</h1>
-        <p className="text-muted-foreground mt-1">Configure your Monzo Bank connection.</p>
-      </div>
+    <PageShell
+      iconName="Settings"
+      heading="Monzo Settings"
+      description="Configure your Monzo Bank connection."
+      actions={
+        <Button variant="outline" size="lg" onClick={() => ctx.api.navigation.navigate("/addons/monzo")}>
+          <Icons.ArrowLeft size={16} className="mr-1" weight="bold" />
+          Dashboard
+        </Button>
+      }
+    >
+      {isFirstRun && (
+        <AlertFeedback variant="success" title="Welcome 👋">
+          <div className="space-y-2 text-sm">
+            <p>Two steps to start syncing Monzo:</p>
+            <ol className="ml-4 list-decimal space-y-1">
+              <li>Run the proxy server and paste its URL below (it handles Monzo OAuth).</li>
+              <li>Click <strong>Connect Monzo</strong> and authorise in the browser, then approve in the Monzo app. Accounts are created automatically.</li>
+            </ol>
+          </div>
+        </AlertFeedback>
+      )}
 
       <Card>
         <CardHeader>
-          <CardTitle>Proxy Server</CardTitle>
+          <CardTitle className="flex items-center gap-2">
+            <Icons.Link size={18} weight="duotone" />
+            Proxy server
+          </CardTitle>
           <CardDescription>
             The local FastAPI proxy that handles Monzo OAuth and API requests.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
-          <div className="flex gap-2">
-            <Input
-              value={proxyUrl}
-              onChange={(e) => setProxyUrl(e.target.value)}
-              placeholder="http://YOUR_SERVER_IP:8001"
-              className="flex-1"
-            />
-            <Button onClick={saveProxyUrl} disabled={isSavingProxy || !proxyUrl.trim()}>
-              {isSavingProxy ? "Saving…" : "Save"}
-            </Button>
+          <div className="space-y-1.5">
+            <Label>Proxy URL</Label>
+            <div className="flex gap-2">
+              <Input
+                value={proxyUrl}
+                onChange={(e) => {
+                  setProxyUrl(e.target.value);
+                  setProxySaved(false);
+                }}
+                placeholder="http://YOUR_SERVER_IP:8001"
+                className="flex-1"
+              />
+              <Button onClick={saveProxyUrl} disabled={isSavingProxy || !proxyUrl.trim()}>
+                <Icons.Save size={16} className="mr-1" weight="bold" />
+                {isSavingProxy ? "Saving…" : "Save"}
+              </Button>
+            </div>
           </div>
+          {proxySaved && (
+            <span className="text-green-600 dark:text-green-500 flex items-center gap-1 text-sm">
+              <Icons.CheckCircle size={14} weight="duotone" /> Saved.
+            </span>
+          )}
         </CardContent>
       </Card>
 
       <Card>
         <CardHeader>
-          <CardTitle>Monzo Connection</CardTitle>
+          <CardTitle className="flex items-center gap-2">
+            <Icons.Wallet size={18} weight="duotone" />
+            Monzo connection
+          </CardTitle>
           <CardDescription>
-            Connect your Monzo account. Accounts will be created automatically.
+            Connect your Monzo account. Wealthfolio accounts are created automatically.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
           {tokens ? (
-            <div>
-              <div className="flex items-center justify-between mb-3">
-                <div className="flex items-center gap-2">
-                  <Badge variant="outline" className="text-green-600 border-green-600">
+            <>
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge variant="success" className="gap-1.5">
+                    <span className="h-1.5 w-1.5 rounded-full bg-green-500" />
                     Connected
                   </Badge>
                   {monzoAccounts.length > 0 && (
@@ -308,25 +352,47 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
                     </span>
                   )}
                 </div>
-                <Button variant="outline" size="sm" onClick={disconnect}>
-                  Disconnect
-                </Button>
+                <ActionConfirm
+                  confirmTitle="Disconnect Monzo?"
+                  confirmMessage="This forgets your Monzo access tokens. Your Wealthfolio accounts and already-imported transactions stay intact. You can reconnect any time."
+                  confirmButtonText="Disconnect"
+                  confirmButtonVariant="destructive"
+                  isPending={false}
+                  handleConfirm={disconnect}
+                  button={
+                    <Button variant="outline" size="sm">
+                      <Icons.Unlink size={14} className="mr-1" weight="bold" />
+                      Disconnect
+                    </Button>
+                  }
+                />
               </div>
               {autoCreateStatus && (
-                <p className="text-sm text-green-600">{autoCreateStatus}</p>
+                <AlertFeedback variant="success" title="Accounts created">{autoCreateStatus}</AlertFeedback>
               )}
-            </div>
+            </>
           ) : (
             <div className="space-y-2">
               <Button onClick={connectMonzo} disabled={isConnecting || !savedProxyUrl}>
-                {isConnecting ? "Waiting for authentication…" : "Connect Monzo"}
+                {isConnecting ? (
+                  <>
+                    <Icons.Spinner size={14} className="mr-1 animate-spin" />
+                    Waiting for authentication…
+                  </>
+                ) : (
+                  <>
+                    <Icons.Link size={14} className="mr-1" weight="bold" />
+                    Connect Monzo
+                  </>
+                )}
               </Button>
               {!savedProxyUrl && (
-                <p className="text-sm text-muted-foreground">Save a proxy URL above first.</p>
+                <p className="text-muted-foreground flex items-center gap-1.5 text-sm">
+                  <Icons.Info size={14} weight="duotone" />
+                  Save a proxy URL above first.
+                </p>
               )}
-              {connectError && (
-                <p className="text-sm text-destructive">{connectError}</p>
-              )}
+              {connectError && <AlertFeedback variant="error" title="Connection failed">{connectError}</AlertFeedback>}
             </div>
           )}
         </CardContent>
@@ -334,14 +400,17 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
 
       <Card>
         <CardHeader>
-          <CardTitle>Category Labels</CardTitle>
+          <CardTitle className="flex items-center gap-2">
+            <Icons.Tag size={18} weight="duotone" />
+            Category labels
+          </CardTitle>
           <CardDescription>
-            Customise how Monzo spending categories appear in transaction comments.
-            Leave blank to use the default label.
+            Customise how Monzo spending categories appear in transaction comments and the
+            dashboard breakdown. Leave blank to use the default label.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
-          <div className="grid grid-cols-2 gap-x-6 gap-y-2">
+          <div className="grid grid-cols-1 gap-x-6 gap-y-2 sm:grid-cols-2">
             {MONZO_CATEGORIES.map((cat) => (
               <div key={cat} className="flex items-center gap-2">
                 <span className="text-xs text-muted-foreground w-28 shrink-0 truncate" title={cat}>
@@ -356,34 +425,53 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
               </div>
             ))}
           </div>
-          <Button size="sm" onClick={saveCategoryLabels} disabled={isSavingCategories}>
-            {isSavingCategories ? "Saving…" : "Save Labels"}
-          </Button>
+          <div className="flex items-center gap-3">
+            <Button size="sm" onClick={saveCategoryLabels} disabled={isSavingCategories}>
+              <Icons.Save size={14} className="mr-1" weight="bold" />
+              {isSavingCategories ? "Saving…" : "Save labels"}
+            </Button>
+            {categoriesSaved && (
+              <span className="text-green-600 dark:text-green-500 flex items-center gap-1 text-sm">
+                <Icons.CheckCircle size={14} weight="duotone" /> Saved.
+              </span>
+            )}
+          </div>
         </CardContent>
       </Card>
 
       <Card>
         <CardHeader>
-          <CardTitle>Advanced</CardTitle>
+          <CardTitle className="flex items-center gap-2">
+            <Icons.Settings2 size={18} weight="duotone" />
+            Advanced
+          </CardTitle>
           <CardDescription>Sync management and troubleshooting.</CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between gap-3">
             <div>
-              <p className="text-sm font-medium">Reset Sync History</p>
+              <p className="text-sm font-medium">Reset sync history</p>
               <p className="text-xs text-muted-foreground">
                 Forces the next sync to re-import all 90 days of transactions.
               </p>
             </div>
-            <Button variant="outline" size="sm" onClick={resetSyncHistory}>
-              Reset
-            </Button>
+            <ActionConfirm
+              confirmTitle="Reset sync history?"
+              confirmMessage="The next sync will re-fetch and re-check the last 90 days. Duplicates are skipped automatically, so this is safe — it just takes a little longer."
+              confirmButtonText="Reset"
+              isPending={false}
+              handleConfirm={resetSyncHistory}
+              button={
+                <Button variant="outline" size="sm">
+                  <Icons.RefreshCw size={14} className="mr-1" weight="bold" />
+                  Reset
+                </Button>
+              }
+            />
           </div>
-          {resetStatus && (
-            <p className="text-sm text-green-600">{resetStatus}</p>
-          )}
+          {resetStatus && <AlertFeedback variant="success" title="Done">{resetStatus}</AlertFeedback>}
         </CardContent>
       </Card>
-    </div>
+    </PageShell>
   );
 }

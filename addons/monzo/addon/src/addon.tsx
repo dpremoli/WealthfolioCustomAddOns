@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { AddonContext, AddonEnableFunction } from "@wealthfolio/addon-sdk";
+import { Icons } from "@wealthfolio/ui";
 import React from "react";
 import CsvImportPage from "./pages/csv-import-page";
 import DashboardPage from "./pages/dashboard-page";
@@ -23,7 +24,7 @@ const enable: AddonEnableFunction = (context) => {
     const sidebarItem = context.sidebar.addItem({
       id: "monzo",
       label: "Monzo Sync",
-      icon: <span style={{ fontSize: "16px" }}>&#127974;</span>,
+      icon: <Icons.Wallet size={16} weight="duotone" />,
       route: "/addons/monzo",
       order: 160,
     });

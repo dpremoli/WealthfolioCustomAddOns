@@ -522,7 +522,7 @@ async function syncOne(
     // in TRANSACTIONS the full backfill routes card rows inline; in HOLDINGS (and incremental
     // TRANSACTIONS) `syncCardAccount` imports them via its own CSV window. `undefined` ⇒ off.
     const cardAccountId = settings.extractCard
-      ? await ensureCardAccount(ctx, conn, await client.getAccountSummary())
+      ? await ensureCardAccount(ctx, conn, await client.getAccountSummary(), settings.cardAccountType ?? "CASH")
       : undefined;
 
     if (mode === "HOLDINGS") {

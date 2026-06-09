@@ -151,6 +151,16 @@ describe("ensureCardAccount", () => {
     expect((await getConnections(ctx))[0].cardAccountId).toBe("card-1");
   });
 
+  it("creates the card account as the requested type (Credit Card)", async () => {
+    const { ctx, getCreated } = makeCardCtx();
+    const conn = { id: "c1", name: "Trading 212 (Invest)", apiKey: "k", accountId: "acc-1" };
+    await addConnection(ctx, conn);
+
+    await ensureCardAccount(ctx, conn, { id: 42, currency: "GBP" }, "CREDIT_CARD");
+
+    expect(getCreated()!.accountType).toBe("CREDIT_CARD");
+  });
+
   it("dedupes on a second run (no new account created)", async () => {
     const { ctx, getCreated, setCreated } = makeCardCtx();
     const conn = { id: "c1", name: "Trading 212 (Invest)", apiKey: "k", accountId: "acc-1" };

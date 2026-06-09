@@ -129,13 +129,17 @@ export async function ensureProviderAccount(
   return created.id;
 }
 
-/** Finds (or creates) the dedicated CASH "<name> Card" account that receives this
- *  connection's card spending, and records its id on the connection. Deduped by a
- *  `${summary.id}-card` providerAccountId so it never collides with the investing account. */
+/** Finds (or creates) the dedicated "<name> Card" account that receives this connection's
+ *  card spending, and records its id on the connection. Deduped by a `${summary.id}-card`
+ *  providerAccountId so it never collides with the investing account. `accountType` defaults
+ *  to CASH (debit-card accurate); CREDIT models it as a credit-card liability. The type is
+ *  only applied at creation — there's no accounts.update, so changing the setting later won't
+ *  retype an existing card account (do that in Wealthfolio's Update Account dialog). */
 export async function ensureCardAccount(
   ctx: AddonContext,
   conn: T212Connection,
   summary: AccountSummary,
+  accountType: "CASH" | "CREDIT_CARD" = "CASH",
 ): Promise<string> {
   const providerId = `${summary.id}-card`;
   const accounts = await ctx.api.accounts.getAll();
@@ -149,7 +153,8 @@ export async function ensureCardAccount(
 
   const created = await ctx.api.accounts.create({
     name: `${conn.name} Card`,
-    accountType: "CASH",
+    // CREDIT_CARD isn't in the bundled SDK 3.3.0 AccountType union (added in 3.5.x); cast.
+    accountType: accountType as "CASH",
     currency: summary.currency || "GBP",
     isDefault: false,
     isActive: true,

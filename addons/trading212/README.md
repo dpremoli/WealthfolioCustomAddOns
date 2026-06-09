@@ -116,6 +116,12 @@ In Wealthfolio: **Settings → Add-ons → Install from ZIP**.
 > (`"SAINSBURYS · Shopping"`) so Wealthfolio's Spending module can categorise it. Works in both
 > Holdings and Transactions modes. (The add-on can't set a structured category via the API yet,
 > so the label rides in the comment; Wealthfolio's own categorisation stays in charge.)
+>
+> You can also choose the **card account type** (Cash or Credit Card) right below the toggle.
+> *Cash* is accurate for the debit card; *Credit Card* models it as a liability so Wealthfolio
+> can link payments from a tracked cash account as transfers (avoiding double-counted spending).
+> The type is applied when the card account is first created — to retype an existing one, use
+> Wealthfolio's **Update Account** dialog.
 
 > **Renaming / removing:** rename or delete the accounts in Wealthfolio's own **Accounts**
 > page. Removing an account in the add-on only forgets the API key — the Wealthfolio

@@ -27,6 +27,10 @@ export interface T212Settings {
   // on the fly) so Wealthfolio's Spending module can categorise it, instead of mixing it
   // into the investing account. Absent ⇒ off (opt-in; existing users unaffected).
   extractCard?: boolean;
+  // Wealthfolio account type for the card account when extraction is on. CASH (default) is
+  // accurate for a debit card; CREDIT_CARD treats it as a credit-card liability so Wealthfolio can
+  // link cash→card payments as transfers (avoids double-counting). Absent ⇒ "CASH".
+  cardAccountType?: "CASH" | "CREDIT_CARD";
 }
 
 // One Trading 212 API key linked to one Wealthfolio account.

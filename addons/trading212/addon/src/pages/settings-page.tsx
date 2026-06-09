@@ -149,6 +149,7 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
   const [env, setEnv] = useState<T212Env>("live");
   const [autoSync, setAutoSync] = useState(true);
   const [extractCard, setExtractCard] = useState(false);
+  const [cardAccountType, setCardAccountType] = useState<"CASH" | "CREDIT_CARD">("CASH");
   const [settingsSaved, setSettingsSaved] = useState<string | null>(null);
 
   const [accountType, setAccountType] = useState<"invest" | "isa">("invest");
@@ -183,6 +184,7 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
       setEnv(settings.env);
       setAutoSync(settings.autoSync !== false);
       setExtractCard(settings.extractCard === true);
+      setCardAccountType(settings.cardAccountType === "CREDIT_CARD" ? "CREDIT_CARD" : "CASH");
     }
   }, [settings]);
 
@@ -192,7 +194,7 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
   }
 
   async function saveSettings() {
-    const s: T212Settings = { proxyUrl: proxyUrl.trim(), env, autoSync, extractCard };
+    const s: T212Settings = { proxyUrl: proxyUrl.trim(), env, autoSync, extractCard, cardAccountType };
     if (!s.proxyUrl) {
       setError("Enter the proxy URL.");
       return;
@@ -209,7 +211,7 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
     setError(null);
     setStatus(null);
     try {
-      const s: T212Settings = { proxyUrl: proxyUrl.trim(), env, autoSync, extractCard };
+      const s: T212Settings = { proxyUrl: proxyUrl.trim(), env, autoSync, extractCard, cardAccountType };
       if (!s.proxyUrl) throw new Error("Enter and save the proxy URL first.");
       if (!apiKey.trim()) throw new Error("Enter your Trading 212 API key.");
       if (!name.trim()) throw new Error("Enter an account name.");
@@ -379,6 +381,28 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
             checked={extractCard}
             onChange={setExtractCard}
           />
+          {extractCard && (
+            <div className="ml-10 space-y-1.5">
+              <Label>Card account type</Label>
+              <ToggleGroup
+                type="single"
+                value={cardAccountType}
+                onValueChange={(v) => v && setCardAccountType(v as "CASH" | "CREDIT_CARD")}
+                variant="outline"
+                className="w-fit"
+              >
+                <ToggleGroupItem value="CASH">Cash</ToggleGroupItem>
+                <ToggleGroupItem value="CREDIT_CARD">Credit Card</ToggleGroupItem>
+              </ToggleGroup>
+              <p className="text-xs text-muted-foreground">
+                {cardAccountType === "CREDIT_CARD"
+                  ? "Credit Card: treats the card account as a liability, so Wealthfolio can link payments from a tracked cash account as transfers (avoids counting the spend twice)."
+                  : "Cash: accurate for a debit card that spends directly from your balance."}{" "}
+                Applied when the card account is first created — change an existing one in
+                Wealthfolio's Update Account dialog.
+              </p>
+            </div>
+          )}
 
           <div className="flex flex-wrap items-center gap-3 pt-1">
             <Button onClick={saveSettings}>

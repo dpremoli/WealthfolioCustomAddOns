@@ -260,6 +260,90 @@ async function fetchCardActivities(
 }
 
 /**
+ * Self-contained card pipeline: fetches the connection's card rows ({@link fetchCardActivities})
+ * and imports them into the dedicated card account, advancing the card watermark. Used by the
+ * HOLDINGS path (whose main account has no activity import) and by incremental TRANSACTIONS
+ * syncs (where card data isn't in the JSON feed). The TRANSACTIONS *full backfill* doesn't use
+ * this — it routes card rows inline through the shared CSV loop. Import uses the same
+ * checkImport → adaptive-halve → import pattern as the main path; card volume is low.
+ */
+async function syncCardAccount(
+  ctx: AddonContext,
+  client: Trading212ProxyClient,
+  conn: T212Connection,
+  mainAccountId: string,
+  cardAccountId: string,
+  resolver: SymbolResolver,
+  log: string[],
+  onProgress: ProgressFn,
+): Promise<{ imported: number; duplicates: number }> {
+  const { cardLastSync } = await getSyncState(ctx, conn.id);
+  const importedRefs = await getImportedRefs(ctx, conn.id);
+  const acts = await fetchCardActivities(
+    client,
+    resolver,
+    mainAccountId,
+    cardAccountId,
+    cardLastSync ?? null,
+    importedRefs,
+    log,
+    onProgress,
+  );
+
+  let imported = 0;
+  let duplicates = 0;
+  const accounted: string[] = [];
+
+  const doImport = async (items: ActivityImport[]): Promise<void> => {
+    if (items.length === 0) return;
+    try {
+      const res = await ctx.api.activities.import(items);
+      imported += res.summary.imported;
+      for (const a of items) if (a.id) accounted.push(a.id);
+    } catch (e) {
+      if (items.length > 1) {
+        const mid = Math.ceil(items.length / 2);
+        await doImport(items.slice(0, mid));
+        await doImport(items.slice(mid));
+        return;
+      }
+      throw new Error(`card import rejected a single activity: ${errDetail(e)} — payload=${JSON.stringify(items[0])}`);
+    }
+  };
+
+  const process = async (chunk: ActivityImport[]): Promise<void> => {
+    if (chunk.length === 0) return;
+    let checked: ActivityImport[];
+    try {
+      checked = await ctx.api.activities.checkImport(chunk);
+    } catch (e) {
+      if (chunk.length > 1) {
+        const mid = Math.ceil(chunk.length / 2);
+        await process(chunk.slice(0, mid));
+        await process(chunk.slice(mid));
+        return;
+      }
+      throw new Error(`card checkImport rejected a single activity: ${errDetail(e)} — payload=${JSON.stringify(chunk[0])}`);
+    }
+    const dupes = checked.filter((a) => a.duplicateOfId);
+    const toImport = checked.filter((a) => a.isValid !== false && !a.duplicateOfId);
+    duplicates += dupes.length;
+    for (const a of dupes) if (a.id) accounted.push(a.id);
+    await doImport(toImport);
+  };
+
+  if (acts.length > 0) onProgress({ phase: "import", message: `Importing ${acts.length} card activities…` });
+  for (let i = 0; i < acts.length; i += IMPORT_CHUNK_SIZE) {
+    await process(acts.slice(i, i + IMPORT_CHUNK_SIZE));
+  }
+
+  if (accounted.length > 0) await addImportedRefs(ctx, conn.id, accounted);
+  await setCardLastSync(ctx, conn.id, new Date().toISOString());
+  if (imported > 0 || duplicates > 0) log.push(`Card account: ${imported} imported, ${duplicates} duplicates.`);
+  return { imported, duplicates };
+}
+
+/**
  * Returns the Wealthfolio account to sync into, healing a stale link. If the
  * linked account was deleted in Wealthfolio, recreate it (in the connection's
  * tracking mode), re-link the connection, and reset this connection's sync state
@@ -428,23 +512,26 @@ async function syncOne(
       mode = liveMode;
     }
 
-    if (mode === "HOLDINGS") {
-      if (settings.extractCard) {
-        log.push("Card extraction runs in Transactions mode — this account is in Holdings mode, so card rows are skipped.");
-      }
-      return await syncHoldings(ctx, client, conn, accountId, resolver, onProgress, log, base);
-    }
-
-    const { lastSync: since, backfillCheckpoint, cardLastSync } = await getSyncState(ctx, conn.id);
-    const importedRefs = await getImportedRefs(ctx, conn.id);
-
     // Card extraction (opt-in): ensure the dedicated "<name> Card" cash account exists so
-    // card spend/refund/cashback rows can be routed to it. Card data is CSV-only, so the
-    // full backfill routes card rows inline (below) and incremental syncs top it up via a
-    // separate card-only export. `undefined` ⇒ extraction off (card rows stay in investing).
+    // card spend/refund/cashback rows go there instead of the investing account. It's an
+    // independent CASH activity account, so it works regardless of the main account's mode —
+    // in TRANSACTIONS the full backfill routes card rows inline; in HOLDINGS (and incremental
+    // TRANSACTIONS) `syncCardAccount` imports them via its own CSV window. `undefined` ⇒ off.
     const cardAccountId = settings.extractCard
       ? await ensureCardAccount(ctx, conn, await client.getAccountSummary())
       : undefined;
+
+    if (mode === "HOLDINGS") {
+      const res = await syncHoldings(ctx, client, conn, accountId, resolver, onProgress, log, base);
+      if (cardAccountId) {
+        const card = await syncCardAccount(ctx, client, conn, accountId, cardAccountId, resolver, log, onProgress);
+        return { ...res, imported: res.imported + card.imported, duplicates: res.duplicates + card.duplicates };
+      }
+      return res;
+    }
+
+    const { lastSync: since, backfillCheckpoint } = await getSyncState(ctx, conn.id);
+    const importedRefs = await getImportedRefs(ctx, conn.id);
 
     // Accumulators shared across every import batch. A backfill imports one batch
     // per year-window (checkpointing as it goes); other paths import a single batch.
@@ -686,22 +773,13 @@ async function syncOne(
       await importActivities(jsonActs);
       await setLastSync(ctx, conn.id, new Date().toISOString());
 
-      // Card data is CSV-only (the JSON feed has no card type), so refresh it separately:
-      // a one-time full backfill the first time extraction is on (cardLastSync absent),
-      // then a recent top-up window thereafter. Card rows are deduped via importedRefs.
+      // Card data is CSV-only (the JSON feed has no card type), so refresh it separately
+      // via its own watermark: a one-time backfill the first time extraction is on, then a
+      // recent top-up window thereafter.
       if (cardAccountId) {
-        const cardActs = await fetchCardActivities(
-          client,
-          resolver,
-          accountId,
-          cardAccountId,
-          cardLastSync ?? null,
-          importedRefs,
-          log,
-          onProgress,
-        );
-        await importActivities(cardActs);
-        await setCardLastSync(ctx, conn.id, new Date().toISOString());
+        const card = await syncCardAccount(ctx, client, conn, accountId, cardAccountId, resolver, log, onProgress);
+        imported += card.imported;
+        duplicates += card.duplicates;
       }
     }
 

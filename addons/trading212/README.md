@@ -113,9 +113,9 @@ In Wealthfolio: **Settings → Add-ons → Install from ZIP**.
 > creates a dedicated **"&lt;name&gt; Card"** cash account and routes your card spending,
 > refunds and cashback there (instead of mixing them into the investing account), tagging each
 > with the Trading 212 merchant category mapped to a Wealthfolio spending label
-> (`"SAINSBURYS · Shopping"`) so Wealthfolio's Spending module can categorise it. Applies to
-> Transactions-mode accounts. (The add-on can't set a structured category via the API yet, so
-> the label rides in the comment; Wealthfolio's own categorisation stays in charge.)
+> (`"SAINSBURYS · Shopping"`) so Wealthfolio's Spending module can categorise it. Works in both
+> Holdings and Transactions modes. (The add-on can't set a structured category via the API yet,
+> so the label rides in the comment; Wealthfolio's own categorisation stays in charge.)
 
 > **Renaming / removing:** rename or delete the accounts in Wealthfolio's own **Accounts**
 > page. Removing an account in the add-on only forgets the API key — the Wealthfolio

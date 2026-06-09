@@ -660,6 +660,61 @@ describe("useSync — HOLDINGS mode", () => {
     const [, holdings] = snapshotsSave.mock.calls[0];
     expect((holdings as { symbol: string }[])[0].symbol).toBe("TSM");
   });
+
+  it("also extracts card transactions in HOLDINGS mode when enabled", async () => {
+    const CARD_HDR = "Action,Time,Total,Currency (Total),Merchant name,Merchant category,ID";
+    const CARD_ROW = "Card debit,2025-06-01T10:00:00.000Z,-12.34,GBP,SAINSBURYS,RETAIL_STORES,CARD1";
+    let downloadCount = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        const u = String(url);
+        if (u.includes("account/summary"))
+          return jsonResponse({ id: 1, currency: "GBP", cash: { availableToTrade: 250 } });
+        if (u.includes("/positions")) return jsonResponse([POSITION]);
+        if (u.includes("/export-download")) {
+          downloadCount++;
+          return {
+            ok: true,
+            status: 200,
+            text: async () => (downloadCount === 1 ? `${CARD_HDR}\n${CARD_ROW}` : CARD_HDR),
+            headers: { get: () => null },
+          } as unknown as Response;
+        }
+        if (u.includes("/exports")) return jsonResponse([FINISHED_REPORT]);
+        return jsonResponse([]);
+      }),
+    );
+
+    const { ctx, importFn, snapshotsSave, accountsCreate, secrets } = makeCtx({
+      connections: [
+        { id: "c1", name: "Invest", apiKey: "k", accountId: "acc-1", trackingMode: "HOLDINGS" },
+      ],
+      existingAccounts: [{ id: "acc-1", trackingMode: "HOLDINGS" }],
+      syncStates: { c1: { lastSync: null, importedRefs: [] } },
+    });
+    secrets.set("t212_settings", JSON.stringify({ proxyUrl: "http://proxy", env: "demo", extractCard: true }));
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { result } = renderHook(() => useSync(ctx as any));
+
+    await act(async () => {
+      await result.current.syncAll();
+    });
+
+    expect(result.current.error).toBeNull();
+    // Snapshot still written for the investing account…
+    expect(snapshotsSave).toHaveBeenCalledTimes(1);
+    // …and the card row imported to the dedicated CASH card account.
+    const createArgs = accountsCreate.mock.calls as unknown as Array<
+      [{ providerAccountId?: string; accountType?: string }]
+    >;
+    expect(createArgs.map((c) => c[0]).find((a) => a?.providerAccountId === "1-card")?.accountType).toBe("CASH");
+    const card = importFn.mock.calls.flatMap((c) => c[0]).find((a) => a.id === "t212-txn-CARD1");
+    expect(card).toBeTruthy();
+    expect(card!.accountId).toBe("acc-new");
+    expect(card!.comment).toBe("SAINSBURYS · Shopping");
+    expect(JSON.parse(secrets.get("t212_sync_c1")!).cardLastSync).toBeTruthy();
+  });
 });
 
 describe("useSync — tracking-mode drift", () => {

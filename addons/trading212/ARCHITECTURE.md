@@ -189,8 +189,11 @@ isolated so it can be wired to a real categories API if one ships.
 Because card data is **CSV-only** (the JSON `/transactions` feed has no card type), the card
 pipeline runs on its own watermark (`ConnectionSyncState.cardLastSync`): the first sync
 backfills card history via the windowed CSV export, and incremental syncs top it up with a
-recent window (`fetchCardActivities`, deduped via `importedRefs`). HOLDINGS-mode accounts skip
-card extraction (logged) since it rides the activity/CSV pipeline.
+recent window (`fetchCardActivities`, deduped via `importedRefs`). The card account is an
+independent CASH activity account, so extraction works in **both** modes: TRANSACTIONS full
+backfills route card rows inline through the shared CSV loop, while HOLDINGS syncs (and
+incremental TRANSACTIONS syncs) import them via `syncCardAccount` alongside the positions
+snapshot.
 
 ### Symbol resolution (`symbol-resolver.ts`)
 

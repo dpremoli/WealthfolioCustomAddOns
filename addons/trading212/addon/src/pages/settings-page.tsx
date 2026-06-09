@@ -327,7 +327,7 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
               When on, Trading 212 card spending is routed into a dedicated “&lt;name&gt; Card” cash
               account (created automatically) instead of the investing account, with the merchant
               category mapped to a Wealthfolio spending label — so Wealthfolio’s Spending module can
-              categorise it. Applies to Transactions-mode accounts.
+              categorise it. Works whether the account is in Holdings or Transactions mode.
             </p>
           </div>
           <div className="flex items-center gap-3">

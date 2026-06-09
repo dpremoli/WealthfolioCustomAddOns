@@ -108,6 +108,15 @@ In Wealthfolio: **Settings → Add-ons → Install from ZIP**.
 > a new account stays manual (a Transactions backfill can take a few minutes). Turn it off
 > under **Settings → Connection settings → Automatic sync**.
 
+> **Card transactions (off by default):** if you use the Trading 212 debit card, turn on
+> **Settings → Connection settings → Card transactions → Separate account**. The add-on then
+> creates a dedicated **"&lt;name&gt; Card"** cash account and routes your card spending,
+> refunds and cashback there (instead of mixing them into the investing account), tagging each
+> with the Trading 212 merchant category mapped to a Wealthfolio spending label
+> (`"SAINSBURYS · Shopping"`) so Wealthfolio's Spending module can categorise it. Applies to
+> Transactions-mode accounts. (The add-on can't set a structured category via the API yet, so
+> the label rides in the comment; Wealthfolio's own categorisation stays in charge.)
+
 > **Renaming / removing:** rename or delete the accounts in Wealthfolio's own **Accounts**
 > page. Removing an account in the add-on only forgets the API key — the Wealthfolio
 > account and its imported activity stay.

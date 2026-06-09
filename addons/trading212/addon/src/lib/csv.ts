@@ -1,7 +1,14 @@
 import type { ActivityImport } from "@wealthfolio/addon-sdk";
 import type { SymbolResolver } from "./symbol-resolver";
+import { mapSpendingCategory } from "./spending-category";
 
 type ActivityType = ActivityImport["activityType"];
+
+/** Builds a card activity comment from the merchant and mapped spending category. */
+function cardComment(merchant?: string, category?: string): string | undefined {
+  const parts = [merchant, category].filter((p): p is string => !!p);
+  return parts.length ? parts.join(" · ") : undefined;
+}
 
 function round2(n: number): number {
   return Math.round(n * 100) / 100;
@@ -118,7 +125,11 @@ export async function mapCsvRow(
   row: Record<string, string>,
   accountId: string,
   resolver: SymbolResolver,
+  cardAccountId?: string,
 ): Promise<ActivityImport | null> {
+  // When card extraction is on, card spend/refund/cashback rows are routed to the
+  // dedicated card (spending) account instead of the main investing account.
+  const cardAccount = cardAccountId ?? accountId;
   const csvId = row["ID"]?.trim() ?? "";
   const action = row["Action"]?.trim();
   if (!action) return null;
@@ -252,11 +263,14 @@ export async function mapCsvRow(
   }
 
   // ── CARD: debit (spend) → withdrawal, credit (refund) → deposit ─────────
+  // The T212 `Merchant category` column (card debits only) is mapped to a Wealthfolio
+  // spending label and appended to the comment ("MERCHANT · Label").
   if (actionLower === "card debit") {
     if (total <= 0) return null;
+    const category = mapSpendingCategory(row["Merchant category"]);
     return {
       id: `t212-txn-${csvId}`,
-      accountId,
+      accountId: cardAccount,
       activityType: "WITHDRAWAL" as ActivityType,
       date,
       symbol: `$CASH-${currency}`,
@@ -264,14 +278,15 @@ export async function mapCsvRow(
       currency,
       isValid: true,
       isDraft: false,
-      comment: merchant,
+      comment: cardComment(merchant, category),
     };
   }
   if (actionLower === "card credit") {
     if (total <= 0) return null;
+    const category = mapSpendingCategory(row["Merchant category"]);
     return {
       id: `t212-txn-${csvId}`,
-      accountId,
+      accountId: cardAccount,
       activityType: "DEPOSIT" as ActivityType,
       date,
       symbol: `$CASH-${currency}`,
@@ -279,16 +294,19 @@ export async function mapCsvRow(
       currency,
       isValid: true,
       isDraft: false,
-      comment: merchant,
+      comment: cardComment(merchant, category),
     };
   }
 
   // ── INTEREST (Interest on cash / Lending interest) and cashback rewards ──
+  // Spending cashback is a card reward → route it to the card account too (so the
+  // spending account nets correctly); cash/lending interest stays in the investing account.
   if (actionLower.includes("interest") || actionLower.includes("cashback")) {
     if (total <= 0) return null;
+    const isCashback = actionLower.includes("cashback");
     return {
       id: `t212-txn-${csvId}`,
-      accountId,
+      accountId: isCashback ? cardAccount : accountId,
       activityType: "INTEREST" as ActivityType,
       date,
       symbol: `$CASH-${currency}`,

@@ -169,6 +169,29 @@ it. Background runs pass an empty `confirmedModeSwitches`, so a drifted account 
 Stable id scheme (drives idempotency): `t212-order-{orderId}`,
 `t212-div-{reference}`, `t212-txn-{reference}`.
 
+### Card spending → dedicated account + category map (`spending-category.ts`, opt-in)
+
+Trading 212 issues a debit card, and its CSV export carries card rows (`Card debit`/`Card
+credit` + `Spending cashback`) with a trailing **`Merchant category`** column
+(`RETAIL_STORES`, `TRANSPORT`, `RESTAURANTS`, …). When the **"Card transactions → Separate
+account"** setting (`T212Settings.extractCard`, default off) is on, `syncOne` (TRANSACTIONS
+mode) calls `ensureCardAccount` to create a dedicated **CASH** account `"<name> Card"`
+(`providerAccountId: "${id}-card"`, recorded as `T212Connection.cardAccountId`) and routes
+card rows there via `mapCsvRow(row, accountId, resolver, cardAccountId)` — so card spend stays
+out of the investing account and Wealthfolio 3.5.0's Spending module can categorise it.
+
+`spending-category.ts` maps the T212 `Merchant category` onto a Wealthfolio spending label
+(`mapSpendingCategory`), appended to the activity comment as `"MERCHANT · Label"`. The add-on
+SDK (3.3.0) has **no structured spending-category field** on `ActivityImport`, so the label is
+surfaced via the comment (Wealthfolio's own rules/AI engine remains authoritative); the map is
+isolated so it can be wired to a real categories API if one ships.
+
+Because card data is **CSV-only** (the JSON `/transactions` feed has no card type), the card
+pipeline runs on its own watermark (`ConnectionSyncState.cardLastSync`): the first sync
+backfills card history via the windowed CSV export, and incremental syncs top it up with a
+recent window (`fetchCardActivities`, deduped via `importedRefs`). HOLDINGS-mode accounts skip
+card extraction (logged) since it rides the activity/CSV pipeline.
+
 ### Symbol resolution (`symbol-resolver.ts`)
 
 Trading 212 tickers look like `AAPL_US_EQ`. `resolveTicker` queries the host

@@ -111,6 +111,7 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
   const [proxyUrl, setProxyUrl] = useState("");
   const [env, setEnv] = useState<T212Env>("live");
   const [autoSync, setAutoSync] = useState(true);
+  const [extractCard, setExtractCard] = useState(false);
   const [settingsSaved, setSettingsSaved] = useState<string | null>(null);
 
   const [accountType, setAccountType] = useState<"invest" | "isa">("invest");
@@ -144,6 +145,7 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
       setProxyUrl(settings.proxyUrl);
       setEnv(settings.env);
       setAutoSync(settings.autoSync !== false);
+      setExtractCard(settings.extractCard === true);
     }
   }, [settings]);
 
@@ -153,7 +155,7 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
   }
 
   async function saveSettings() {
-    const s: T212Settings = { proxyUrl: proxyUrl.trim(), env, autoSync };
+    const s: T212Settings = { proxyUrl: proxyUrl.trim(), env, autoSync, extractCard };
     if (!s.proxyUrl) {
       setError("Enter the proxy URL.");
       return;
@@ -170,7 +172,7 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
     setError(null);
     setStatus(null);
     try {
-      const s: T212Settings = { proxyUrl: proxyUrl.trim(), env, autoSync };
+      const s: T212Settings = { proxyUrl: proxyUrl.trim(), env, autoSync, extractCard };
       if (!s.proxyUrl) throw new Error("Enter and save the proxy URL first.");
       if (!apiKey.trim()) throw new Error("Enter your Trading 212 API key.");
       if (!name.trim()) throw new Error("Enter an account name.");
@@ -305,6 +307,27 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
               Wealthfolio refreshes its portfolio) while the app is open — so Holdings snapshots
               build a daily history without a manual sync. The first sync of a new account is
               always manual.
+            </p>
+          </div>
+          <div className="space-y-1">
+            <label className="text-sm font-medium">Card transactions</label>
+            <div className="flex gap-2">
+              {([true, false] as const).map((on) => (
+                <Button
+                  key={String(on)}
+                  variant={extractCard === on ? "default" : "outline"}
+                  size="sm"
+                  onClick={() => setExtractCard(on)}
+                >
+                  {on ? "Separate account" : "Keep in investing"}
+                </Button>
+              ))}
+            </div>
+            <p className="text-xs text-muted-foreground">
+              When on, Trading 212 card spending is routed into a dedicated “&lt;name&gt; Card” cash
+              account (created automatically) instead of the investing account, with the merchant
+              category mapped to a Wealthfolio spending label — so Wealthfolio’s Spending module can
+              categorise it. Applies to Transactions-mode accounts.
             </p>
           </div>
           <div className="flex items-center gap-3">

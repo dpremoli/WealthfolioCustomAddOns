@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   addConnection,
   clearAccountData,
+  ensureCardAccount,
   ensureProviderAccount,
   getConnections,
   migrateLegacyConfig,
@@ -106,6 +107,64 @@ describe("ensureProviderAccount", () => {
 
     await ensureProviderAccount(ctx, "Invest", { id: 1, currency: "GBP" });
     expect(createdWith!.trackingMode).toBe("TRANSACTIONS");
+  });
+});
+
+describe("ensureCardAccount", () => {
+  function makeCardCtx() {
+    const accounts: { id: string; providerAccountId?: string }[] = [];
+    const secrets = new Map<string, string>();
+    let created: { accountType?: string; providerAccountId?: string; name?: string } | null = null;
+    const ctx = {
+      api: {
+        accounts: {
+          getAll: async () => accounts,
+          create: async (a: { providerAccountId?: string }) => {
+            created = a;
+            const acc = { id: "card-1", ...a };
+            accounts.push(acc);
+            return acc;
+          },
+        },
+        secrets: {
+          get: async (k: string) => secrets.get(k) ?? null,
+          set: async (k: string, v: string) => void secrets.set(k, v),
+          delete: async (k: string) => void secrets.delete(k),
+        },
+      },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any;
+    return { ctx, getCreated: () => created, setCreated: (v: null) => (created = v) };
+  }
+
+  it("creates a CASH card account suffixed by `${id}-card`, names it, and links it", async () => {
+    const { ctx, getCreated } = makeCardCtx();
+    const conn = { id: "c1", name: "Trading 212 (Invest)", apiKey: "k", accountId: "acc-1" };
+    await addConnection(ctx, conn);
+
+    const id = await ensureCardAccount(ctx, conn, { id: 42, currency: "GBP" });
+
+    expect(id).toBe("card-1");
+    expect(getCreated()!.accountType).toBe("CASH");
+    expect(getCreated()!.providerAccountId).toBe("42-card");
+    expect(getCreated()!.name).toBe("Trading 212 (Invest) Card");
+    expect((await getConnections(ctx))[0].cardAccountId).toBe("card-1");
+  });
+
+  it("dedupes on a second run (no new account created)", async () => {
+    const { ctx, getCreated, setCreated } = makeCardCtx();
+    const conn = { id: "c1", name: "Trading 212 (Invest)", apiKey: "k", accountId: "acc-1" };
+    await addConnection(ctx, conn);
+    await ensureCardAccount(ctx, conn, { id: 42, currency: "GBP" });
+
+    setCreated(null);
+    const id2 = await ensureCardAccount(
+      ctx,
+      { ...conn, cardAccountId: "card-1" },
+      { id: 42, currency: "GBP" },
+    );
+    expect(id2).toBe("card-1");
+    expect(getCreated()).toBeNull();
   });
 });
 

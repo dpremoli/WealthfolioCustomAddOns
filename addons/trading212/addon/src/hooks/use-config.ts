@@ -129,6 +129,38 @@ export async function ensureProviderAccount(
   return created.id;
 }
 
+/** Finds (or creates) the dedicated CASH "<name> Card" account that receives this
+ *  connection's card spending, and records its id on the connection. Deduped by a
+ *  `${summary.id}-card` providerAccountId so it never collides with the investing account. */
+export async function ensureCardAccount(
+  ctx: AddonContext,
+  conn: T212Connection,
+  summary: AccountSummary,
+): Promise<string> {
+  const providerId = `${summary.id}-card`;
+  const accounts = await ctx.api.accounts.getAll();
+  const match = accounts.find(
+    (a) => (a as { providerAccountId?: string }).providerAccountId === providerId,
+  );
+  if (match) {
+    if (conn.cardAccountId !== match.id) await updateConnection(ctx, conn.id, { cardAccountId: match.id });
+    return match.id;
+  }
+
+  const created = await ctx.api.accounts.create({
+    name: `${conn.name} Card`,
+    accountType: "CASH",
+    currency: summary.currency || "GBP",
+    isDefault: false,
+    isActive: true,
+    trackingMode: "TRANSACTIONS",
+    provider: PROVIDER,
+    providerAccountId: providerId,
+  });
+  await updateConnection(ctx, conn.id, { cardAccountId: created.id });
+  return created.id;
+}
+
 /** Removes all data this add-on synced into an account under a given mode, then
  *  resets the connection's sync state. Used when a tracking-mode change is detected
  *  and confirmed: the stale data from the previous mode is cleared before re-syncing. */
@@ -189,6 +221,16 @@ export async function setBackfillCheckpoint(
 ): Promise<void> {
   const state = await getSyncState(ctx, id);
   state.backfillCheckpoint = iso;
+  await ctx.api.secrets.set(syncKey(id), JSON.stringify(state));
+}
+
+export async function setCardLastSync(
+  ctx: AddonContext,
+  id: string,
+  iso: string,
+): Promise<void> {
+  const state = await getSyncState(ctx, id);
+  state.cardLastSync = iso;
   await ctx.api.secrets.set(syncKey(id), JSON.stringify(state));
 }
 

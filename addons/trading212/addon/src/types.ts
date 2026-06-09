@@ -23,6 +23,10 @@ export interface T212Settings {
   // Wealthfolio refreshes its portfolio) so HOLDINGS snapshots build a daily history
   // without a manual click. Absent ⇒ enabled (opt-out).
   autoSync?: boolean;
+  // Route Trading 212 card spending into a dedicated "<name> Card" cash account (created
+  // on the fly) so Wealthfolio's Spending module can categorise it, instead of mixing it
+  // into the investing account. Absent ⇒ off (opt-in; existing users unaffected).
+  extractCard?: boolean;
 }
 
 // One Trading 212 API key linked to one Wealthfolio account.
@@ -35,6 +39,9 @@ export interface T212Connection {
   // Mode the linked account was created in / last synced in. Absent ⇒ TRANSACTIONS
   // (connections created before the mode picker existed keep their behaviour).
   trackingMode?: T212TrackingMode;
+  // Linked Wealthfolio CASH account that receives card spending, when card extraction
+  // is enabled. Created on the fly the first time the connection syncs with it on.
+  cardAccountId?: string;
 }
 
 // Per-connection sync state (stored under t212_sync_{id}).
@@ -45,6 +52,10 @@ export interface ConnectionSyncState {
   // each window so an interrupted backfill resumes there instead of restarting;
   // cleared once the backfill completes.
   backfillCheckpoint?: string | null;
+  // Watermark for the separate card-spending pipeline (card data is CSV-only, so it's
+  // synced independently of the JSON activity watermark). Absent ⇒ card history not yet
+  // backfilled; set to the sync time after the first card backfill completes.
+  cardLastSync?: string | null;
 }
 
 // GET /api/v0/equity/account/summary

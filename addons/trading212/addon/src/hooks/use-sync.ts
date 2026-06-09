@@ -29,6 +29,7 @@ import {
   addImportedRefs,
   clearAccountData,
   connectionConfig,
+  ensureCardAccount,
   ensureProviderAccount,
   getConnections,
   getImportedRefs,
@@ -37,6 +38,7 @@ import {
   getSyncState,
   resetSyncState,
   setBackfillCheckpoint,
+  setCardLastSync,
   setLastSync,
   setSymbolMap,
   updateConnection,
@@ -171,6 +173,90 @@ async function collectJsonActivities(
   }
 
   return { activities, unresolved };
+}
+
+/**
+ * Fetches card spend/refund/cashback rows (CSV-only data) for the dedicated card
+ * account. On the first run (`cardSince` null) it walks back up to MAX_EXPORT_WINDOWS
+ * one-year windows to backfill card history; thereafter it fetches a single window since
+ * the card watermark. Rows are mapped with `cardAccountId`, and only those that actually
+ * routed to the card account are returned (non-card rows are handled by the JSON path).
+ * Already-imported rows are skipped via `importedRefs`; the import's own duplicate check
+ * is the backstop.
+ */
+async function fetchCardActivities(
+  client: Trading212ProxyClient,
+  resolver: SymbolResolver,
+  mainAccountId: string,
+  cardAccountId: string,
+  cardSince: string | null,
+  importedRefs: Set<string>,
+  log: string[],
+  onProgress: ProgressFn,
+): Promise<ActivityImport[]> {
+  // Build the window list: a single recent window when we already have a watermark,
+  // otherwise a chain of one-year windows walked back from now (first-time backfill).
+  const now = new Date();
+  const windows: { start: Date; end: Date }[] = [];
+  if (cardSince) {
+    windows.push({ start: new Date(cardSince), end: now });
+  } else {
+    let end = now;
+    for (let w = 0; w < MAX_EXPORT_WINDOWS; w++) {
+      const start = new Date(
+        Date.UTC(
+          end.getUTCFullYear() - 1,
+          end.getUTCMonth(),
+          end.getUTCDate(),
+          end.getUTCHours(),
+          end.getUTCMinutes(),
+          end.getUTCSeconds(),
+        ),
+      );
+      windows.push({ start, end });
+      end = start;
+    }
+  }
+
+  let knownReports: ExportReport[] = [];
+  try {
+    knownReports = await client.listExports();
+  } catch {
+    // proceed without the cache; runExport fetches the list itself if needed
+  }
+
+  const out: ActivityImport[] = [];
+  const seen = new Set<string>();
+  let emptyStreak = 0;
+  for (const { start, end } of windows) {
+    const label = `${start.toISOString().slice(0, 10)}→${end.toISOString().slice(0, 10)}`;
+    onProgress({ phase: "export", message: `Fetching card history ${label}…` });
+    let csv: string;
+    try {
+      csv = await client.runExport({ timeFrom: start.toISOString(), timeTo: end.toISOString(), knownReports });
+    } catch (e) {
+      log.push(`Card window ${label}: export failed (${errDetail(e)})`);
+      break;
+    }
+    const rows = parseCsv(csv);
+    if (rows.length === 0) {
+      // During a first-time backfill, two empty windows in a row means no older history.
+      if (!cardSince && ++emptyStreak >= 2) break;
+      continue;
+    }
+    emptyStreak = 0;
+    for (const row of rows) {
+      const act = await mapCsvRow(row, mainAccountId, resolver, cardAccountId);
+      if (!act || act.accountId !== cardAccountId) continue; // keep card rows only
+      const id = act.id ?? "";
+      if (id && !seen.has(id) && !importedRefs.has(id)) {
+        seen.add(id);
+        out.push(act);
+      }
+    }
+  }
+  if (out.length > 0) log.push(`Card sync: ${out.length} card row(s) to import.`);
+  return out;
 }
 
 /**
@@ -343,11 +429,22 @@ async function syncOne(
     }
 
     if (mode === "HOLDINGS") {
+      if (settings.extractCard) {
+        log.push("Card extraction runs in Transactions mode — this account is in Holdings mode, so card rows are skipped.");
+      }
       return await syncHoldings(ctx, client, conn, accountId, resolver, onProgress, log, base);
     }
 
-    const { lastSync: since, backfillCheckpoint } = await getSyncState(ctx, conn.id);
+    const { lastSync: since, backfillCheckpoint, cardLastSync } = await getSyncState(ctx, conn.id);
     const importedRefs = await getImportedRefs(ctx, conn.id);
+
+    // Card extraction (opt-in): ensure the dedicated "<name> Card" cash account exists so
+    // card spend/refund/cashback rows can be routed to it. Card data is CSV-only, so the
+    // full backfill routes card rows inline (below) and incremental syncs top it up via a
+    // separate card-only export. `undefined` ⇒ extraction off (card rows stay in investing).
+    const cardAccountId = settings.extractCard
+      ? await ensureCardAccount(ctx, conn, await client.getAccountSummary())
+      : undefined;
 
     // Accumulators shared across every import batch. A backfill imports one batch
     // per year-window (checkpointing as it goes); other paths import a single batch.
@@ -512,7 +609,7 @@ async function syncOne(
 
         const windowActivities: ActivityImport[] = [];
         for (const row of rows) {
-          const act = await mapCsvRow(row, accountId, resolver);
+          const act = await mapCsvRow(row, accountId, resolver, cardAccountId);
           if (act) {
             const id = act.id ?? "";
             if (id && !seen.has(id) && !importedRefs.has(id)) {
@@ -568,6 +665,9 @@ async function syncOne(
       if (backfillComplete) {
         await setLastSync(ctx, conn.id, new Date().toISOString());
         await setBackfillCheckpoint(ctx, conn.id, null);
+        // Card rows were routed inline during the backfill above — mark the card
+        // pipeline backfilled so incremental syncs only fetch a recent top-up window.
+        if (cardAccountId) await setCardLastSync(ctx, conn.id, new Date().toISOString());
       } else {
         log.push("Backfill incomplete — next sync resumes from the checkpoint.");
       }
@@ -585,6 +685,24 @@ async function syncOne(
       unresolved += u;
       await importActivities(jsonActs);
       await setLastSync(ctx, conn.id, new Date().toISOString());
+
+      // Card data is CSV-only (the JSON feed has no card type), so refresh it separately:
+      // a one-time full backfill the first time extraction is on (cardLastSync absent),
+      // then a recent top-up window thereafter. Card rows are deduped via importedRefs.
+      if (cardAccountId) {
+        const cardActs = await fetchCardActivities(
+          client,
+          resolver,
+          accountId,
+          cardAccountId,
+          cardLastSync ?? null,
+          importedRefs,
+          log,
+          onProgress,
+        );
+        await importActivities(cardActs);
+        await setCardLastSync(ctx, conn.id, new Date().toISOString());
+      }
     }
 
     const breakdown =

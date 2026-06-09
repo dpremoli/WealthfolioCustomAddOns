@@ -390,6 +390,63 @@ describe("useSync — CSV export / hybrid path", () => {
     expect(state.importedRefs).toContain("t212-txn-DEP1");
   });
 
+  it("routes card spending to a dedicated CASH card account when extraction is on", async () => {
+    const CARD_HDR = "Action,Time,Total,Currency (Total),Merchant name,Merchant category,ID";
+    const CARD_ROW = "Card debit,2025-06-01T10:00:00.000Z,-12.34,GBP,SAINSBURYS,RETAIL_STORES,CARD1";
+    const CARD_CSV = `${CARD_HDR}\n${CARD_ROW}`;
+    let downloadCount = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        const u = String(url);
+        if (u.includes("account/summary")) return jsonResponse({ id: 99, currency: "GBP" });
+        if (u.includes("/export-download")) {
+          downloadCount++;
+          return {
+            ok: true,
+            status: 200,
+            text: async () => (downloadCount === 1 ? CARD_CSV : CARD_HDR),
+            headers: { get: () => null },
+          } as unknown as Response;
+        }
+        if (u.includes("/exports")) return jsonResponse([FINISHED_REPORT]);
+        return routeFetch(u);
+      }),
+    );
+
+    const { ctx, importFn, accountsCreate, secrets } = makeCtx({
+      syncStates: { c1: { lastSync: null, importedRefs: [] } },
+    });
+    // Enable card extraction in the shared settings.
+    secrets.set("t212_settings", JSON.stringify({ proxyUrl: "http://proxy", env: "demo", extractCard: true }));
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { result } = renderHook(() => useSync(ctx as any));
+
+    await act(async () => {
+      await result.current.syncAll();
+    });
+
+    expect(result.current.error).toBeNull();
+    // A CASH card account was created, deduped by the `${id}-card` providerAccountId.
+    const createArgs = accountsCreate.mock.calls as unknown as Array<
+      [{ providerAccountId?: string; accountType?: string }]
+    >;
+    const cardCreate = createArgs.map((c) => c[0]).find((a) => a?.providerAccountId === "99-card");
+    expect(cardCreate).toBeTruthy();
+    expect(cardCreate!.accountType).toBe("CASH");
+    // The card row was imported to the card account (id "acc-new") with the mapped category.
+    const imported = importFn.mock.calls.flatMap((c) => c[0]);
+    const card = imported.find((a) => a.id === "t212-txn-CARD1");
+    expect(card).toBeTruthy();
+    expect(card!.accountId).toBe("acc-new");
+    expect(card!.activityType).toBe("WITHDRAWAL");
+    expect(card!.comment).toBe("SAINSBURYS · Shopping");
+    // The connection now records its linked card account, and the card watermark is set.
+    const conns = JSON.parse(secrets.get("t212_connections")!);
+    expect(conns[0].cardAccountId).toBe("acc-new");
+    expect(JSON.parse(secrets.get("t212_sync_c1")!).cardLastSync).toBeTruthy();
+  });
+
   it("checkpoints each window and resumes (no lastSync) when interrupted mid-backfill", async () => {
     // Window 0 downloads data; window 1's download fails → backfill breaks after
     // importing window 0. lastSync must stay null and a checkpoint must be saved.

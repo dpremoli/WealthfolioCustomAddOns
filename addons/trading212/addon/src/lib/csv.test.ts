@@ -332,6 +332,65 @@ describe("mapCsvRow", () => {
       expect(act!.symbol).toBe("$CASH-EUR");
       expect(act!.comment).toBe("2024 US dividends withholding tax adjustment");
     });
+
+    it("maps the T212 Merchant category into the comment", async () => {
+      const row = {
+        ...cashRow("Card debit", { Total: "-34.10", ID: "CD2" }),
+        "Merchant name": "SAINSBURYS",
+        "Merchant category": "RETAIL_STORES",
+      };
+      const act = await mapCsvRow(row, ACC, makeResolver());
+      expect(act!.comment).toBe("SAINSBURYS · Shopping");
+    });
+
+    it("routes card spend/refund/cashback to the card account when one is given", async () => {
+      const debit = {
+        ...cashRow("Card debit", { Total: "-10.00", ID: "CD3" }),
+        "Merchant name": "JD WETHERSPOON",
+        "Merchant category": "RESTAURANTS",
+      };
+      const debitAct = await mapCsvRow(debit, ACC, makeResolver(), "card-acc");
+      expect(debitAct!.accountId).toBe("card-acc");
+      expect(debitAct!.activityType).toBe("WITHDRAWAL");
+      expect(debitAct!.comment).toBe("JD WETHERSPOON · Eating Out");
+
+      const credit = await mapCsvRow(
+        cashRow("Card credit", { Total: "5.00", ID: "CC3" }),
+        ACC,
+        makeResolver(),
+        "card-acc",
+      );
+      expect(credit!.accountId).toBe("card-acc");
+
+      const cashback = await mapCsvRow(
+        cashRow("Spending cashback", { Total: "0.20", ID: "CB3" }),
+        ACC,
+        makeResolver(),
+        "card-acc",
+      );
+      expect(cashback!.accountId).toBe("card-acc");
+      expect(cashback!.activityType).toBe("INTEREST");
+    });
+
+    it("leaves card rows in the main account when no card account is given", async () => {
+      const act = await mapCsvRow(
+        cashRow("Card debit", { Total: "-1.89", ID: "CD4" }),
+        ACC,
+        makeResolver(),
+      );
+      expect(act!.accountId).toBe(ACC);
+    });
+
+    it("keeps cash/lending interest in the main account even when a card account exists", async () => {
+      const act = await mapCsvRow(
+        cashRow("Interest on cash", { Total: "0.50", ID: "IC1" }),
+        ACC,
+        makeResolver(),
+        "card-acc",
+      );
+      expect(act!.accountId).toBe(ACC);
+      expect(act!.activityType).toBe("INTEREST");
+    });
   });
 
   describe("date normalisation", () => {

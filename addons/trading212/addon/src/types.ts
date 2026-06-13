@@ -43,6 +43,10 @@ export interface T212Connection {
   // Mode the linked account was created in / last synced in. Absent ⇒ TRANSACTIONS
   // (connections created before the mode picker existed keep their behaviour).
   trackingMode?: T212TrackingMode;
+  // Trading 212 product flavour. ISA accounts can't have a card, so card extraction is
+  // skipped for them regardless of the global toggle. Absent ⇒ "invest" (backwards
+  // compatible — pre-1.12 connections behave like Invest, matching the prior default).
+  kind?: "invest" | "isa";
   // Linked Wealthfolio CASH account that receives card spending, when card extraction
   // is enabled. Created on the fly the first time the connection syncs with it on.
   cardAccountId?: string;

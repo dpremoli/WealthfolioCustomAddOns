@@ -342,7 +342,16 @@ async function syncCardAccount(
   }
 
   if (accounted.length > 0) await addImportedRefs(ctx, conn.id, accounted);
-  await setCardLastSync(ctx, conn.id, new Date().toISOString());
+  // Only advance the watermark once we've actually seen card data — otherwise a first
+  // sync that returned an empty CSV would pin the window to "now→now" forever, silently
+  // skipping any rows the user adds afterwards. With no rows AND no prior watermark, leave
+  // it unset so the next sync re-runs the full backfill walk.
+  const hadPriorWatermark = !!(await getSyncState(ctx, conn.id)).cardLastSync;
+  if (acts.length > 0 || hadPriorWatermark) {
+    await setCardLastSync(ctx, conn.id, new Date().toISOString());
+  } else {
+    log.push("Card account: no rows found yet — leaving the backfill window open for next sync.");
+  }
   if (imported > 0 || duplicates > 0) log.push(`Card account: ${imported} imported, ${duplicates} duplicates.`);
   return { imported, duplicates };
 }
@@ -469,7 +478,16 @@ async function syncHoldings(
   if (unresolved > 0) log.push(`${unresolved} positions skipped (symbol not matched).`);
   onProgress({ phase: "done", message: "Snapshot saved." });
 
-  return { ...base, imported: holdings.length, duplicates: 0, unresolved };
+  // HOLDINGS has no per-type tally (it's a single snapshot), but the dashboard's Summary
+  // tab requires `breakdown` to enable. Surface the holdings count so the tab has content;
+  // the card sync — when on — adds its own row in the caller.
+  return {
+    ...base,
+    imported: holdings.length,
+    duplicates: 0,
+    unresolved,
+    breakdown: { Holdings: holdings.length },
+  };
 }
 
 /** Syncs one connection into its linked Wealthfolio account. */
@@ -521,7 +539,13 @@ async function syncOne(
     // independent CASH activity account, so it works regardless of the main account's mode —
     // in TRANSACTIONS the full backfill routes card rows inline; in HOLDINGS (and incremental
     // TRANSACTIONS) `syncCardAccount` imports them via its own CSV window. `undefined` ⇒ off.
-    const cardAccountId = settings.extractCard
+    // Skipped for ISA — Trading 212's Stocks ISA has no card, so creating the side account
+    // would just create an empty stub.
+    const isIsa = conn.kind === "isa";
+    if (settings.extractCard && isIsa) {
+      log.push("Card extraction skipped: ISA accounts don't have a card.");
+    }
+    const cardAccountId = settings.extractCard && !isIsa
       ? await ensureCardAccount(ctx, conn, await client.getAccountSummary(), settings.cardAccountType ?? "CASH")
       : undefined;
 
@@ -533,6 +557,10 @@ async function syncOne(
         out.imported += card.imported;
         out.duplicates += card.duplicates;
         out.card = card;
+        // Surface the card import in the Summary tab too — HOLDINGS only has Holdings + Card.
+        if (card.imported > 0) {
+          out.breakdown = { ...(out.breakdown ?? {}), Card: card.imported };
+        }
       }
       return out;
     }

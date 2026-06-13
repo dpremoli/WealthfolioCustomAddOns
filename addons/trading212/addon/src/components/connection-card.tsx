@@ -37,7 +37,7 @@ interface ConnectionCardProps {
 const TYPE_ICON = {
   BUY: "TrendingUp", SELL: "TrendingDown", DIVIDEND: "HandCoins", INTEREST: "Percent",
   DEPOSIT: "ArrowDown", WITHDRAWAL: "ArrowUp", FEE: "Receipt", TRANSFER_IN: "ArrowDownLeft",
-  TRANSFER_OUT: "ArrowUpRight", Card: "CreditCard",
+  TRANSFER_OUT: "ArrowUpRight", Card: "CreditCard", Holdings: "Briefcase",
 } as const;
 
 export function ConnectionCard({ ctx, settings, conn, result, isSyncing }: ConnectionCardProps) {
@@ -199,6 +199,7 @@ function labelFor(type: string): string {
     case "TRANSFER_IN": return "Transfers in";
     case "TRANSFER_OUT": return "Transfers out";
     case "Card": return "Card transactions";
+    case "Holdings": return "Holdings snapshot";
     default: return type;
   }
 }

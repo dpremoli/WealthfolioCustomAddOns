@@ -37,6 +37,7 @@ interface Conn {
   apiSecret?: string;
   accountId: string;
   trackingMode?: "TRANSACTIONS" | "HOLDINGS";
+  kind?: "invest" | "isa";
 }
 
 type SyncStateMap = Record<string, { lastSync: string | null; importedRefs: string[] }>;
@@ -722,6 +723,95 @@ describe("useSync — HOLDINGS mode", () => {
     expect(card!.accountId).toBe("acc-new");
     expect(card!.comment).toBe("SAINSBURYS · Shopping");
     expect(JSON.parse(secrets.get("t212_sync_c1")!).cardLastSync).toBeTruthy();
+    // HOLDINGS breakdown surfaces Holdings + Card so the Summary tab isn't greyed out.
+    const r = result.current.results!.perAccount[0];
+    expect(r.breakdown).toEqual({ Holdings: 1, Card: 1 });
+  });
+
+  it("skips card extraction entirely for an ISA connection", async () => {
+    // ISA returns a snapshot but the export endpoint should never be hit, and no
+    // "<name> Card" account should be created.
+    let exportCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        const u = String(url);
+        if (u.includes("/exports") || u.includes("/export-download")) {
+          exportCalls++;
+          return jsonResponse([]);
+        }
+        return routeHoldingsFetch(u);
+      }),
+    );
+
+    const { ctx, accountsCreate, secrets } = makeCtx({
+      connections: [
+        { id: "c1", name: "ISA", apiKey: "k", accountId: "acc-1", trackingMode: "HOLDINGS", kind: "isa" },
+      ],
+      existingAccounts: [{ id: "acc-1", trackingMode: "HOLDINGS" }],
+      syncStates: { c1: { lastSync: null, importedRefs: [] } },
+    });
+    secrets.set("t212_settings", JSON.stringify({ proxyUrl: "http://proxy", env: "demo", extractCard: true }));
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { result } = renderHook(() => useSync(ctx as any));
+
+    await act(async () => {
+      await result.current.syncAll();
+    });
+
+    expect(result.current.error).toBeNull();
+    expect(exportCalls).toBe(0);
+    // No "*-card" account was created for the ISA.
+    const createArgs = accountsCreate.mock.calls as unknown as Array<[{ providerAccountId?: string }]>;
+    const cardCreate = createArgs.map((c) => c[0]).find((a) => a?.providerAccountId?.endsWith("-card"));
+    expect(cardCreate).toBeUndefined();
+    const lg = result.current.results!.perAccount[0].log.join("\n");
+    expect(lg).toContain("ISA accounts don't have a card");
+  });
+
+  it("leaves cardLastSync unset when the first backfill finds no rows", async () => {
+    // First-time card sync with an empty CSV. We must NOT advance the watermark —
+    // otherwise the next sync would only check a tiny "now→now" window forever.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        const u = String(url);
+        if (u.includes("account/summary"))
+          return jsonResponse({ id: 1, currency: "GBP", cash: { availableToTrade: 0 } });
+        if (u.includes("/positions")) return jsonResponse([]);
+        if (u.includes("/export-download")) {
+          return {
+            ok: true,
+            status: 200,
+            text: async () => CSV_HDR, // header-only — zero rows every window
+            headers: { get: () => null },
+          } as unknown as Response;
+        }
+        if (u.includes("/exports")) return jsonResponse([FINISHED_REPORT]);
+        return jsonResponse([]);
+      }),
+    );
+
+    const { ctx, secrets } = makeCtx({
+      connections: [
+        { id: "c1", name: "Invest", apiKey: "k", accountId: "acc-1", trackingMode: "HOLDINGS" },
+      ],
+      existingAccounts: [{ id: "acc-1", trackingMode: "HOLDINGS" }],
+      syncStates: { c1: { lastSync: null, importedRefs: [] } },
+    });
+    secrets.set("t212_settings", JSON.stringify({ proxyUrl: "http://proxy", env: "demo", extractCard: true }));
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { result } = renderHook(() => useSync(ctx as any));
+
+    await act(async () => {
+      await result.current.syncAll();
+    });
+
+    expect(result.current.error).toBeNull();
+    const state = JSON.parse(secrets.get("t212_sync_c1")!);
+    expect(state.cardLastSync).toBeFalsy();
+    const lg = result.current.results!.perAccount[0].log.join("\n");
+    expect(lg).toContain("leaving the backfill window open");
   });
 });
 

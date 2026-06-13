@@ -53,6 +53,8 @@ function ConnectionRow({
   conn: T212Connection;
   onChanged: () => void;
 }) {
+  const queryClient = useQueryClient();
+  const [resetFeedback, setResetFeedback] = useState<string | null>(null);
   const { data: syncState } = useQuery({
     queryKey: ["t212_sync_state_row", conn.id],
     queryFn: () => getSyncState(ctx, conn.id),
@@ -67,63 +69,97 @@ function ConnectionRow({
 
   async function reset() {
     await resetSyncState(ctx, conn.id);
+    // Without explicit invalidation the "Last sync" badge keeps showing the old time
+    // because every component reads its own copy of the sync state.
+    await queryClient.invalidateQueries({ queryKey: ["t212_sync_state_row", conn.id] });
+    await queryClient.invalidateQueries({ queryKey: ["t212_sync_state", conn.id] });
+    setResetFeedback("Sync history cleared. The next sync will start from scratch.");
+    setTimeout(() => setResetFeedback(null), 5000);
     onChanged();
   }
 
+  const kind = conn.kind ?? "invest";
   return (
-    <div className="flex flex-col gap-3 rounded-lg border bg-card p-3 sm:flex-row sm:items-center sm:justify-between">
-      <div className="min-w-0 space-y-1.5">
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="font-medium truncate">{conn.name}</span>
-          <ConnectionHealth ctx={ctx} settings={settings} conn={conn} />
-        </div>
-        <div className="text-muted-foreground flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
-          <Badge variant="outline" className="gap-1">
-            <Icons.Globe size={10} weight="duotone" />
-            {settings.env === "live" ? "Live" : "Demo"}
-          </Badge>
-          <Badge variant={mode === "HOLDINGS" ? "info" : "secondary"} className="gap-1">
-            <Icons.Activity size={10} weight="duotone" />
-            {mode === "HOLDINGS" ? "Holdings" : "Transactions"}
-          </Badge>
-          {conn.cardAccountId && (
+    <div className="flex flex-col gap-3 rounded-lg border bg-card p-3">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="min-w-0 space-y-1.5">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-medium truncate">{conn.name}</span>
+            <ConnectionHealth ctx={ctx} settings={settings} conn={conn} />
+          </div>
+          <div className="text-muted-foreground flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
             <Badge variant="outline" className="gap-1">
-              <Icons.CreditCard size={10} weight="duotone" />
-              Card
+              <Icons.Globe size={10} weight="duotone" />
+              {settings.env === "live" ? "Live" : "Demo"}
             </Badge>
-          )}
-          <span className="font-mono">{maskKey(conn.apiKey)}</span>
-          <span className="flex items-center gap-1">
-            <Icons.Clock size={10} weight="duotone" />
-            {last ? <RelativeWithTooltip iso={last} /> : "Never synced"}
-          </span>
+            <Badge variant={kind === "isa" ? "info" : "secondary"} className="gap-1">
+              <Icons.Wallet size={10} weight="duotone" />
+              {kind === "isa" ? "Stocks ISA" : "Invest"}
+            </Badge>
+            <Badge variant={mode === "HOLDINGS" ? "info" : "secondary"} className="gap-1">
+              <Icons.Activity size={10} weight="duotone" />
+              {mode === "HOLDINGS" ? "Holdings" : "Transactions"}
+            </Badge>
+            {conn.cardAccountId && (
+              <Badge variant="outline" className="gap-1">
+                <Icons.CreditCard size={10} weight="duotone" />
+                Card
+              </Badge>
+            )}
+            <span className="font-mono">{maskKey(conn.apiKey)}</span>
+            <span className="flex items-center gap-1">
+              <Icons.Clock size={10} weight="duotone" />
+              {last ? <RelativeWithTooltip iso={last} /> : "Never synced"}
+            </span>
+          </div>
+        </div>
+        <div className="flex shrink-0 gap-2">
+          <ActionConfirm
+            confirmTitle="Reset sync history?"
+            confirmMessage={
+              <span>
+                Forgets the last-sync watermarks and the de-dup ref cache for this account.
+                The next sync re-imports from scratch (Wealthfolio's own duplicate check still
+                runs, so nothing is double-counted). No accounts or activities are deleted.
+              </span>
+            }
+            confirmButtonText="Reset"
+            confirmButtonVariant="destructive"
+            isPending={false}
+            handleConfirm={reset}
+            button={
+              <Button variant="outline" size="sm">
+                <Icons.RefreshCw size={14} className="mr-1" weight="bold" />
+                Reset
+              </Button>
+            }
+          />
+          <ActionConfirm
+            confirmTitle="Remove this connection?"
+            confirmMessage={
+              <span>
+                This forgets the API key and resets sync state. The Wealthfolio account itself
+                stays intact — delete it in Wealthfolio's Accounts page if you want it gone.
+              </span>
+            }
+            confirmButtonText="Remove"
+            confirmButtonVariant="destructive"
+            isPending={false}
+            handleConfirm={remove}
+            button={
+              <Button variant="outline" size="sm">
+                <Icons.Trash size={14} className="mr-1" weight="bold" />
+                Remove
+              </Button>
+            }
+          />
         </div>
       </div>
-      <div className="flex shrink-0 gap-2">
-        <Button variant="outline" size="sm" onClick={reset}>
-          <Icons.RefreshCw size={14} className="mr-1" weight="bold" />
-          Reset
-        </Button>
-        <ActionConfirm
-          confirmTitle="Remove this connection?"
-          confirmMessage={
-            <span>
-              This forgets the API key and resets sync state. The Wealthfolio account itself
-              stays intact — delete it in Wealthfolio's Accounts page if you want it gone.
-            </span>
-          }
-          confirmButtonText="Remove"
-          confirmButtonVariant="destructive"
-          isPending={false}
-          handleConfirm={remove}
-          button={
-            <Button variant="outline" size="sm">
-              <Icons.Trash size={14} className="mr-1" weight="bold" />
-              Remove
-            </Button>
-          }
-        />
-      </div>
+      {resetFeedback && (
+        <AlertFeedback variant="success" title="Reset">
+          {resetFeedback}
+        </AlertFeedback>
+      )}
     </div>
   );
 }
@@ -239,6 +275,7 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
         apiSecret: apiSecret.trim() || undefined,
         accountId,
         trackingMode,
+        kind: accountType,
       });
 
       queryClient.invalidateQueries({ queryKey: ["t212_connections"] });
@@ -377,7 +414,7 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
           <SwitchRow
             icon="CreditCard"
             title="Extract card transactions"
-            description="Route Trading 212 card spending into a dedicated “<name> Card” cash account, with the merchant category mapped to a Wealthfolio spending label — so the Spending module can categorise it. Works in both Holdings and Transactions modes."
+            description="Route Trading 212 card spending into a dedicated “<name> Card” cash account, with the merchant category mapped to a Wealthfolio spending label — so the Spending module can categorise it. Skipped for Stocks ISA accounts (no card). Works in both Holdings and Transactions modes."
             checked={extractCard}
             onChange={setExtractCard}
           />

@@ -103,8 +103,13 @@ export function useSync(ctx: AddonContext) {
 
         const isFlex = flexAccountIds.has(monzoAccountId);
         const eligible = transactions.filter(
-          // Flex transactions are never settled (monthly billing) — don't filter them out
-          (tx) => (isFlex || !isPending(tx)) && !isPotTransfer(tx) && !isFlexRepayment(tx),
+          // Flex transactions are never settled (monthly billing) — don't filter them out.
+          // Savings-category transactions are investment transfers (e.g. Trading 212) — skip them.
+          (tx) =>
+            (isFlex || !isPending(tx)) &&
+            !isPotTransfer(tx) &&
+            !isFlexRepayment(tx) &&
+            tx.category !== "savings",
         );
         log.push(`Account ${monzoAccountId.slice(0, 10)}…: ${transactions.length} fetched, ${eligible.length} eligible.`);
         // Tally spending by category across all accounts for the UI breakdown.

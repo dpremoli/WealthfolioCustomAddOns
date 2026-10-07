@@ -1,7 +1,9 @@
 # Node
 node_modules/
-addon/dist/
+dist/
+coverage/
 *.log
+*.tsbuildinfo
 
 # Python
 __pycache__/
@@ -18,4 +20,3 @@ venv/
 .DS_Store
 .idea/
 .vscode/
-coverage/

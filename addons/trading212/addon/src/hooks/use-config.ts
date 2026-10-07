@@ -1,0 +1,321 @@
+import type { AddonContext } from "@wealthfolio/addon-sdk";
+import type {
+  AccountSummary,
+  ConnectionSyncState,
+  T212Config,
+  T212Connection,
+  T212Settings,
+  T212TrackingMode,
+} from "../types";
+
+/** Wealthfolio account `provider` tag for accounts this addon creates. */
+export const PROVIDER = "trading212-addon";
+
+export const KEYS = {
+  settings: "t212_settings",
+  connections: "t212_connections",
+  // v6 invalidates pre-1.7.5 entries: v5's MTF deprioritisation ran before the
+  // ISIN-shape drop, so an EUR position whose only real ticker was on a Cboe
+  // venue (VUAAM/DXE) got stranded and dropped as unresolved. v6 drops ISIN-
+  // shaped symbols first, so MTF-only listings still resolve.
+  symbolMap: "t212_symbol_map_v6",
+  legacySymbolMapV5: "t212_symbol_map_v5",
+  legacySymbolMapV4: "t212_symbol_map_v4",
+  legacySymbolMapV3: "t212_symbol_map_v3",
+  legacySymbolMapV2: "t212_symbol_map_v2",
+  legacySymbolMap: "t212_symbol_map",
+  // Legacy single-account keys — read once during migration, then deleted.
+  legacyConfig: "t212_config",
+  legacyAccountId: "t212_account_id",
+  legacyLastSync: "t212_last_sync",
+  legacyImportedRefs: "t212_imported_refs",
+} as const;
+
+const syncKey = (id: string) => `t212_sync_${id}`;
+
+/** Generates a unique id. Wealthfolio's webview lacks crypto.randomUUID (it
+ *  requires a secure context), so fall back to getRandomValues, then Math.random. */
+export function randomId(): string {
+  const c = (globalThis as { crypto?: Crypto }).crypto;
+  if (c?.randomUUID) return c.randomUUID();
+  if (c?.getRandomValues) {
+    const b = c.getRandomValues(new Uint8Array(16));
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    const h = [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
+    return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+  }
+  return `t212-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function parse<T>(raw: string | null, fallback: T): T {
+  if (!raw) return fallback;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+// --- shared settings -----------------------------------------------------
+
+export async function getSettings(ctx: AddonContext): Promise<T212Settings | null> {
+  return parse<T212Settings | null>(await ctx.api.secrets.get(KEYS.settings), null);
+}
+
+export async function setSettings(ctx: AddonContext, s: T212Settings): Promise<void> {
+  await ctx.api.secrets.set(KEYS.settings, JSON.stringify(s));
+}
+
+// --- connections (whole-array CRUD) --------------------------------------
+
+export async function getConnections(ctx: AddonContext): Promise<T212Connection[]> {
+  return parse<T212Connection[]>(await ctx.api.secrets.get(KEYS.connections), []);
+}
+
+async function saveConnections(ctx: AddonContext, conns: T212Connection[]): Promise<void> {
+  await ctx.api.secrets.set(KEYS.connections, JSON.stringify(conns));
+}
+
+export async function addConnection(ctx: AddonContext, conn: T212Connection): Promise<void> {
+  const conns = await getConnections(ctx);
+  conns.push(conn);
+  await saveConnections(ctx, conns);
+}
+
+export async function updateConnection(
+  ctx: AddonContext,
+  id: string,
+  patch: Partial<T212Connection>,
+): Promise<void> {
+  const conns = await getConnections(ctx);
+  const next = conns.map((c) => (c.id === id ? { ...c, ...patch, id: c.id } : c));
+  await saveConnections(ctx, next);
+}
+
+/** Forgets the credentials + sync state. The Wealthfolio account is left intact
+ *  (the SDK has no accounts.delete); the user removes it natively if desired. */
+export async function removeConnection(ctx: AddonContext, id: string): Promise<void> {
+  const conns = await getConnections(ctx);
+  await saveConnections(ctx, conns.filter((c) => c.id !== id));
+  await ctx.api.secrets.delete(syncKey(id));
+}
+
+/** Finds the Wealthfolio account previously created for this Trading 212 account
+ *  (matched by providerAccountId), or creates one. Returns its Wealthfolio id. */
+export async function ensureProviderAccount(
+  ctx: AddonContext,
+  name: string,
+  summary: AccountSummary,
+  trackingMode: T212TrackingMode = "TRANSACTIONS",
+): Promise<string> {
+  const accounts = await ctx.api.accounts.getAll();
+  const providerId = String(summary.id);
+  const match = accounts.find(
+    (a) => (a as { providerAccountId?: string }).providerAccountId === providerId,
+  );
+  if (match) return match.id;
+
+  const created = await ctx.api.accounts.create({
+    name,
+    accountType: "SECURITIES",
+    currency: summary.currency || "GBP",
+    isDefault: false,
+    isActive: true,
+    trackingMode,
+    provider: PROVIDER,
+    providerAccountId: providerId,
+  });
+  return created.id;
+}
+
+/** Finds (or creates) the dedicated "<name> Card" account that receives this connection's
+ *  card spending, and records its id on the connection. Deduped by a `${summary.id}-card`
+ *  providerAccountId so it never collides with the investing account. `accountType` defaults
+ *  to CASH (debit-card accurate); CREDIT models it as a credit-card liability. The type is
+ *  only applied at creation — there's no accounts.update, so changing the setting later won't
+ *  retype an existing card account (do that in Wealthfolio's Update Account dialog). */
+export async function ensureCardAccount(
+  ctx: AddonContext,
+  conn: T212Connection,
+  summary: AccountSummary,
+  accountType: "CASH" | "CREDIT_CARD" = "CASH",
+): Promise<string> {
+  const providerId = `${summary.id}-card`;
+  const accounts = await ctx.api.accounts.getAll();
+  const match = accounts.find(
+    (a) => (a as { providerAccountId?: string }).providerAccountId === providerId,
+  );
+  if (match) {
+    if (conn.cardAccountId !== match.id) await updateConnection(ctx, conn.id, { cardAccountId: match.id });
+    return match.id;
+  }
+
+  const created = await ctx.api.accounts.create({
+    name: `${conn.name} Card`,
+    // CREDIT_CARD isn't in the bundled SDK 3.3.0 AccountType union (added in 3.5.x); cast.
+    accountType: accountType as "CASH",
+    currency: summary.currency || "GBP",
+    isDefault: false,
+    isActive: true,
+    trackingMode: "TRANSACTIONS",
+    provider: PROVIDER,
+    providerAccountId: providerId,
+  });
+  await updateConnection(ctx, conn.id, { cardAccountId: created.id });
+  return created.id;
+}
+
+/** Removes all data this add-on synced into an account under a given mode, then
+ *  resets the connection's sync state. Used when a tracking-mode change is detected
+ *  and confirmed: the stale data from the previous mode is cleared before re-syncing. */
+export async function clearAccountData(
+  ctx: AddonContext,
+  connectionId: string,
+  accountId: string,
+  mode: T212TrackingMode,
+): Promise<void> {
+  if (mode === "HOLDINGS") {
+    const snapshots = await ctx.api.snapshots.getAll(accountId);
+    for (const s of snapshots) await ctx.api.snapshots.delete(accountId, s.snapshotDate);
+  } else {
+    const activities = await ctx.api.activities.getAll(accountId);
+    const ids = activities.map((a) => a.id).filter((id): id is string => Boolean(id));
+    // Chunk deletes so a large history stays under the backend's batch limit.
+    for (let i = 0; i < ids.length; i += CLEAR_CHUNK_SIZE) {
+      await ctx.api.activities.saveMany({ deleteIds: ids.slice(i, i + CLEAR_CHUNK_SIZE) });
+    }
+  }
+  await resetSyncState(ctx, connectionId);
+}
+
+const CLEAR_CHUNK_SIZE = 100;
+
+/** Builds the proxy-client config for one connection from the shared settings. */
+export function connectionConfig(settings: T212Settings, conn: T212Connection): T212Config {
+  return {
+    proxyUrl: settings.proxyUrl,
+    env: settings.env,
+    apiKey: conn.apiKey,
+    apiSecret: conn.apiSecret,
+  };
+}
+
+// --- per-connection sync state -------------------------------------------
+
+export async function getSyncState(
+  ctx: AddonContext,
+  id: string,
+): Promise<ConnectionSyncState> {
+  return parse<ConnectionSyncState>(await ctx.api.secrets.get(syncKey(id)), {
+    lastSync: null,
+    importedRefs: [],
+  });
+}
+
+export async function setLastSync(ctx: AddonContext, id: string, iso: string): Promise<void> {
+  const state = await getSyncState(ctx, id);
+  state.lastSync = iso;
+  await ctx.api.secrets.set(syncKey(id), JSON.stringify(state));
+}
+
+export async function setBackfillCheckpoint(
+  ctx: AddonContext,
+  id: string,
+  iso: string | null,
+): Promise<void> {
+  const state = await getSyncState(ctx, id);
+  state.backfillCheckpoint = iso;
+  await ctx.api.secrets.set(syncKey(id), JSON.stringify(state));
+}
+
+export async function setCardLastSync(
+  ctx: AddonContext,
+  id: string,
+  iso: string,
+): Promise<void> {
+  const state = await getSyncState(ctx, id);
+  state.cardLastSync = iso;
+  await ctx.api.secrets.set(syncKey(id), JSON.stringify(state));
+}
+
+export async function getImportedRefs(ctx: AddonContext, id: string): Promise<Set<string>> {
+  const state = await getSyncState(ctx, id);
+  return new Set(state.importedRefs);
+}
+
+export async function addImportedRefs(
+  ctx: AddonContext,
+  id: string,
+  refs: string[],
+): Promise<void> {
+  if (refs.length === 0) return;
+  const state = await getSyncState(ctx, id);
+  const set = new Set(state.importedRefs);
+  for (const r of refs) set.add(r);
+  state.importedRefs = [...set];
+  await ctx.api.secrets.set(syncKey(id), JSON.stringify(state));
+}
+
+export async function resetSyncState(ctx: AddonContext, id: string): Promise<void> {
+  await ctx.api.secrets.delete(syncKey(id));
+}
+
+// --- shared symbol map (account-independent) -----------------------------
+
+export async function getSymbolMap(ctx: AddonContext): Promise<Record<string, string>> {
+  return parse<Record<string, string>>(await ctx.api.secrets.get(KEYS.symbolMap), {});
+}
+
+export async function setSymbolMap(
+  ctx: AddonContext,
+  map: Record<string, string>,
+): Promise<void> {
+  await ctx.api.secrets.set(KEYS.symbolMap, JSON.stringify(map));
+}
+
+// --- one-time migration from the single-account layout -------------------
+
+/** Converts the legacy single-key layout into one connection. Idempotent. */
+export async function migrateLegacyConfig(ctx: AddonContext): Promise<void> {
+  // Drop earlier symbol caches regardless — their entries may point at the
+  // wrong listing (v1 had no currency filter; v2 mis-picked some ticker
+  // collisions; v3 accepted a wrong first-query hit; v4 regressed European
+  // primaries onto Cboe Europe MTF venues and Meta onto the reassigned FB;
+  // v5 dropped MTF-only listings like VUAAM/DXE as unresolved).
+  await ctx.api.secrets.delete(KEYS.legacySymbolMap);
+  await ctx.api.secrets.delete(KEYS.legacySymbolMapV2);
+  await ctx.api.secrets.delete(KEYS.legacySymbolMapV3);
+  await ctx.api.secrets.delete(KEYS.legacySymbolMapV4);
+  await ctx.api.secrets.delete(KEYS.legacySymbolMapV5);
+
+  const [settings, connections] = [await getSettings(ctx), await getConnections(ctx)];
+  if (settings || connections.length > 0) return; // already migrated
+
+  const legacy = parse<T212Config | null>(
+    await ctx.api.secrets.get(KEYS.legacyConfig),
+    null,
+  );
+  const legacyAccountId = await ctx.api.secrets.get(KEYS.legacyAccountId);
+  if (!legacy || !legacyAccountId) return; // nothing to migrate
+
+  await setSettings(ctx, { proxyUrl: legacy.proxyUrl, env: legacy.env });
+
+  const id = randomId();
+  await addConnection(ctx, {
+    id,
+    name: "Trading 212 (Invest)",
+    apiKey: legacy.apiKey,
+    apiSecret: legacy.apiSecret,
+    accountId: legacyAccountId,
+  });
+
+  const lastSync = parse<string | null>(await ctx.api.secrets.get(KEYS.legacyLastSync), null);
+  const importedRefs = parse<string[]>(await ctx.api.secrets.get(KEYS.legacyImportedRefs), []);
+  await ctx.api.secrets.set(syncKey(id), JSON.stringify({ lastSync, importedRefs }));
+
+  await ctx.api.secrets.delete(KEYS.legacyConfig);
+  await ctx.api.secrets.delete(KEYS.legacyAccountId);
+  await ctx.api.secrets.delete(KEYS.legacyLastSync);
+  await ctx.api.secrets.delete(KEYS.legacyImportedRefs);
+}

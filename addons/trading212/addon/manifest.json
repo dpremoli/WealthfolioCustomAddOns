@@ -1,0 +1,47 @@
+{
+  "id": "trading212-addon",
+  "name": "Trading 212 Sync",
+  "version": "1.12.0",
+  "description": "Automatically sync your Trading 212 investment account (trades, dividends, deposits, withdrawals, fees and interest) into Wealthfolio.",
+  "author": "dpremoli",
+  "main": "addon.js",
+  "sdkVersion": "3.3.0",
+  "enabled": true,
+  "permissions": [
+    {
+      "category": "accounts",
+      "functions": ["getAll", "create"],
+      "purpose": "Create and map a Wealthfolio securities account for Trading 212"
+    },
+    {
+      "category": "activities",
+      "functions": ["import", "checkImport", "getAll", "saveMany"],
+      "purpose": "Import Trading 212 trades, dividends and cash movements as activities, and clear them when the tracking mode changes"
+    },
+    {
+      "category": "snapshots",
+      "functions": ["getAll", "save", "delete"],
+      "purpose": "Write current positions/cash as a holdings snapshot for HOLDINGS-mode accounts"
+    },
+    {
+      "category": "market-data",
+      "functions": ["searchTicker"],
+      "purpose": "Match Trading 212 tickers and ISINs to Wealthfolio symbols"
+    },
+    {
+      "category": "secrets",
+      "functions": ["set", "get", "delete"],
+      "purpose": "Securely store the Trading 212 API key and sync state"
+    },
+    {
+      "category": "ui",
+      "functions": ["sidebar.addItem", "router.add"],
+      "purpose": "Add Trading 212 Sync navigation and configuration pages"
+    },
+    {
+      "category": "events",
+      "functions": ["portfolio.onUpdateComplete"],
+      "purpose": "Trigger a background snapshot/refresh when Wealthfolio refreshes its portfolio"
+    }
+  ]
+}

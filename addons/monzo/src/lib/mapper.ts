@@ -1,10 +1,27 @@
 import type { ActivityImport } from "@wealthfolio/addon-sdk";
-import { cashSymbol, round2, withSourceRef } from "@wf-addons/kit";
+import { cashSymbol, round2 } from "@wf-addons/kit";
 import type { MonzoMerchant, MonzoTransaction } from "../types";
 import { resolveCategory } from "./category-map";
+import { SPENDING_CATEGORY_CANDIDATES } from "./spending-rules";
 
 const DEPOSIT = "DEPOSIT" as ActivityImport["activityType"];
 const WITHDRAWAL = "WITHDRAWAL" as ActivityImport["activityType"];
+const CREDIT = "CREDIT" as ActivityImport["activityType"];
+
+/**
+ * Money back on a spending category (a refund, or Monzo's "Refunded (Flex)"), as opposed to
+ * income or a transfer. Wealthfolio counts a cash `DEPOSIT` as income, so these are imported
+ * as a `CREDIT` with subtype `REFUND`, which reduces the category's spending instead.
+ * "General" credits are too vague to call refunds, and top-ups are not.
+ */
+export function isRefund(tx: MonzoTransaction): boolean {
+  return (
+    tx.amount > 0 &&
+    !tx.is_load &&
+    tx.category !== "general" &&
+    Object.prototype.hasOwnProperty.call(SPENDING_CATEGORY_CANDIDATES, tx.category)
+  );
+}
 
 /**
  * The merchant as an object, or null. Requests use `expand[]=merchant`, which makes it
@@ -61,21 +78,52 @@ export function tallyByCategory(
   return out;
 }
 
+/** Monzo internal ids (`user_…`, `acc_…`, `pot_…`) that sometimes stand in for a description. */
+const INTERNAL_ID = /^(?:user|anonuser|acc|pot|merch)_[0-9A-Za-z]+$/;
+
+/** Who the money went to or came from, for display. */
+export function payeeName(tx: MonzoTransaction): string {
+  const merchant = merchantOf(tx)?.name?.trim();
+  if (merchant) return merchant;
+  const counterparty = (tx.counterparty?.preferred_name || tx.counterparty?.name || "").trim();
+  if (counterparty) return counterparty;
+  const description = (tx.description || "").trim();
+  return INTERNAL_ID.test(description) ? "" : description;
+}
+
+/**
+ * The payment reference of a transfer, when it says something: not a merchant's raw
+ * statement text, not the payee again, not an internal id, and not just the sender's own
+ * name (Monzo's default reference, passed in as `ownNames`).
+ */
+function paymentReference(tx: MonzoTransaction, name: string, ownNames: ReadonlySet<string>): string | null {
+  if (merchantOf(tx)?.name || !(tx.counterparty?.name || tx.counterparty?.preferred_name)) return null;
+  const ref = (tx.description || "").trim();
+  if (!ref || INTERNAL_ID.test(ref)) return null;
+  const lower = ref.toLowerCase();
+  if (lower === name.toLowerCase() || ownNames.has(lower)) return null;
+  return ref;
+}
+
 function buildComment(
   tx: MonzoTransaction,
   categoryLabels: Record<string, string>,
+  ownNames: ReadonlySet<string>,
+  legacy = false,
 ): string {
   const parts: string[] = [];
 
-  // Primary description: prefer merchant name, fall back to description
+  // Who it was paid to / received from; the category label must stay second (spending rules
+  // match it there). Versions up to 2.2 used the merchant name or else the description.
   const merchant = merchantOf(tx);
-  const name = merchant?.name || tx.description;
+  const name = legacy ? merchant?.name || tx.description : payeeName(tx);
   if (name) parts.push(name);
 
-  // Category label (skip "General" as it's noise)
+  // Category label. Versions up to 2.2 left out "General"; it is kept now so the spending
+  // rules can file it.
   if (tx.category) {
     const label = resolveCategory(tx.category, categoryLabels);
-    if (label !== "General") parts.push(label);
+    if (!legacy || label !== "General") parts.push(label);
   }
 
   // Merchant location
@@ -94,6 +142,9 @@ function buildComment(
     parts.push(`${tx.local_currency} ${localAmt}`);
   }
 
+  const reference = legacy ? null : paymentReference(tx, name, ownNames);
+  if (reference) parts.push(`Ref: ${reference}`);
+
   // User notes (only if different from description)
   if (tx.notes && tx.notes !== tx.description) {
     parts.push(`Note: ${tx.notes}`);
@@ -102,10 +153,30 @@ function buildComment(
   return parts.join(" | ");
 }
 
+/**
+ * `tx` as versions up to 2.2 imported it (a plain DEPOSIT/WITHDRAWAL, the old comment, no
+ * `[ref:…]` tag): lets rows they imported be recognised, and rewritten in the current form.
+ */
+export function legacyActivity(
+  tx: MonzoTransaction,
+  wealthfolioAccountId: string,
+  categoryLabels: Record<string, string> = {},
+): ActivityImport {
+  const current = mapTransactionToActivity(tx, wealthfolioAccountId, categoryLabels);
+  return {
+    ...current,
+    activityType: tx.amount >= 0 ? DEPOSIT : WITHDRAWAL,
+    subtype: undefined,
+    comment: buildComment(tx, categoryLabels, new Set(), true) || undefined,
+  };
+}
+
 export function mapTransactionToActivity(
   tx: MonzoTransaction,
   wealthfolioAccountId: string,
   categoryLabels: Record<string, string> = {},
+  /** Lower-cased names of the account holders, to drop "reference = my own name". */
+  ownNames: ReadonlySet<string> = new Set(),
 ): ActivityImport {
   const currency = tx.currency || "GBP";
   const amountInMajorUnits = round2(Math.abs(tx.amount) / 100);
@@ -113,7 +184,8 @@ export function mapTransactionToActivity(
   return {
     id: tx.id,
     accountId: wealthfolioAccountId,
-    activityType: tx.amount >= 0 ? DEPOSIT : WITHDRAWAL,
+    activityType: isRefund(tx) ? CREDIT : tx.amount >= 0 ? DEPOSIT : WITHDRAWAL,
+    subtype: isRefund(tx) ? "REFUND" : undefined,
     date: tx.created,
     amount: amountInMajorUnits,
     currency,
@@ -122,8 +194,8 @@ export function mapTransactionToActivity(
     symbol: cashSymbol(currency),
     isValid: true,
     isDraft: false,
-    // The transaction id rides along as `[ref:tx_…]` so a re-fetch (or a CSV import of the
-    // same transaction) is recognised even after its notes or category changed.
-    comment: withSourceRef(buildComment(tx, categoryLabels), tx.id),
+    // `id` is the Monzo transaction id; `importNew` remembers imported ids so a re-fetch (or
+    // a CSV import of the same transaction) is recognised even after its comment changed.
+    comment: buildComment(tx, categoryLabels, ownNames) || undefined,
   };
 }

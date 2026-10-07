@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { mapTransactionToActivity, isFlexRepayment, tallyByCategory } from './mapper';
+import { mapTransactionToActivity, payeeName, isFlexRepayment, tallyByCategory } from './mapper';
 import type { MonzoTransaction } from '../types';
 
 function catTx(amount: number, category: string): MonzoTransaction {
@@ -187,10 +187,10 @@ describe('mapTransactionToActivity', () => {
       metadata: {},
       merchant: 'merch_0000abcdef',
     };
-    expect(mapTransactionToActivity(tx, 'acc-123').comment).toBe('TESCO 1234 | Groceries [ref:tx_str]');
+    expect(mapTransactionToActivity(tx, 'acc-123').comment).toBe('TESCO 1234 | Groceries');
   });
 
-  it('keeps the comment format: name | category | city, country | FOREIGN amt | Note: notes [ref:id]', () => {
+  it('keeps the comment format: name | category | city, country | FOREIGN amt | Note: notes', () => {
     const tx: MonzoTransaction = {
       id: 'tx_fmt',
       created: '2026-05-05T10:00:00.000Z',
@@ -207,7 +207,7 @@ describe('mapTransactionToActivity', () => {
       merchant: { name: 'Bistro', address: { city: 'Paris', country: 'FR' } },
     };
     expect(mapTransactionToActivity(tx, 'acc-123').comment).toBe(
-      'Bistro | Eating Out | Paris, FR | EUR 59.00 | Note: birthday [ref:tx_fmt]',
+      'Bistro | Eating Out | Paris, FR | EUR 59.00 | Note: birthday',
     );
   });
 });
@@ -252,5 +252,69 @@ describe('isFlexRepayment', () => {
       merchant: { name: 'Tesco' },
     };
     expect(isFlexRepayment(tx)).toBe(false);
+  });
+});
+
+describe('payee names for transfers', () => {
+  const transfer = (over: Partial<MonzoTransaction>): MonzoTransaction => ({
+    id: 'tx_tr',
+    created: '2026-10-01T10:00:00.000Z',
+    settled: '2026-10-01T10:00:00.000Z',
+    amount: -3000,
+    currency: 'GBP',
+    description: 'Dennis Premoli',
+    notes: '',
+    category: 'personal_care',
+    is_load: false,
+    metadata: {},
+    merchant: null,
+    counterparty: { name: 'Sheffield Springers Volleyball Club', sort_code: '000000', account_number: '12345678' },
+    ...over,
+  });
+  const me = new Set(['dennis premoli']);
+
+  it('names who the money went to, not the default reference (the sender\'s own name)', () => {
+    expect(mapTransactionToActivity(transfer({}), 'acc', {}, me).comment).toBe(
+      'Sheffield Springers Volleyball Club | Personal Care',
+    );
+  });
+
+  it('keeps a reference that says something', () => {
+    expect(mapTransactionToActivity(transfer({ description: 'Subs October' }), 'acc', {}, me).comment).toBe(
+      'Sheffield Springers Volleyball Club | Personal Care | Ref: Subs October',
+    );
+  });
+
+  it('uses the name, not the internal user id, for Monzo-to-Monzo payments', () => {
+    const p2p = transfer({ description: 'user_0000AbCdEf', counterparty: { preferred_name: 'Sam Smith', user_id: 'user_0000AbCdEf' } });
+    expect(mapTransactionToActivity(p2p, 'acc', {}, me).comment).toBe('Sam Smith | Personal Care');
+    expect(payeeName({ ...p2p, counterparty: null })).toBe('');
+  });
+});
+
+describe('refunds', () => {
+  const credit = (over: Partial<MonzoTransaction>): MonzoTransaction => ({
+    id: 'tx_rf',
+    created: '2026-10-03T03:05:00.000Z',
+    settled: '2026-10-03T03:05:00.000Z',
+    amount: 285,
+    currency: 'GBP',
+    description: 'TRAINLINE',
+    notes: '',
+    category: 'holidays',
+    is_load: false,
+    metadata: {},
+    merchant: { name: 'Trainline' },
+    ...over,
+  });
+
+  it('imports money back on a spending category as a REFUND credit, not income', () => {
+    expect(mapTransactionToActivity(credit({}), 'acc')).toMatchObject({ activityType: 'CREDIT', subtype: 'REFUND', amount: 2.85 });
+  });
+
+  it('keeps income, top-ups, transfers and vague General credits as deposits', () => {
+    for (const over of [{ category: 'income' }, { is_load: true }, { category: 'transfers' }, { category: 'general' }]) {
+      expect(mapTransactionToActivity(credit(over), 'acc')).toMatchObject({ activityType: 'DEPOSIT', subtype: undefined });
+    }
   });
 });

@@ -5,6 +5,10 @@ export {
   contentKey,
   withSourceRef,
   sourceRefOf,
+  reconcileWithLedger,
+  ledgerEntry,
+  type ImportLedger,
+  type LedgerReconcileResult,
   type ExistingActivityLike,
 } from "./reconcile";
 export {

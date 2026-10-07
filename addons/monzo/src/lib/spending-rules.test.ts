@@ -27,10 +27,24 @@ describe("monzoSpendingRules", () => {
     expect(new RegExp(r.pattern).test("Pizza Place | Dining (out) [ref:tx_1]")).toBe(true);
   });
 
-  it("files spending as expense withdrawals and income as income deposits; general gets no rule", () => {
+  it("files spending (and refunds of it) as expense, income deposits as income", () => {
     const rules = monzoSpendingRules({});
-    expect(rules.find((r) => r.ruleKey === "monzo-groceries")).toMatchObject({ kind: "expense", activityType: "WITHDRAWAL" });
+    const groceries = rules.find((r) => r.ruleKey === "monzo-groceries")!;
+    expect(groceries).toMatchObject({ kind: "expense", priority: 0 });
+    expect(groceries.activityType).toBeUndefined(); // refunds are CREDITs
     expect(rules.find((r) => r.ruleKey === "monzo-income")).toMatchObject({ kind: "income", activityType: "DEPOSIT" });
-    expect(rules.some((r) => r.ruleKey === "monzo-general")).toBe(false);
+  });
+
+  it("targets Wealthfolio's own category keys", () => {
+    const rules = monzoSpendingRules({});
+    expect(rules.find((r) => r.ruleKey === "monzo-eating_out")!.categories[0]).toBe("food_restaurants");
+    expect(rules.find((r) => r.ruleKey === "monzo-rent")!.categories[0]).toBe("housing_rent");
+    expect(rules.find((r) => r.ruleKey === "monzo-income")!.categories[0]).toBe("income_other");
+  });
+
+  it("files General as Other Expenses, below every other rule", () => {
+    const general = monzoSpendingRules({}).find((r) => r.ruleKey === "monzo-general")!;
+    expect(general).toMatchObject({ priority: -10, categories: ["other_expense", "other expenses"] });
+    expect(new RegExp(general.pattern).test(comment({ category: "general", description: "Flex" }))).toBe(true);
   });
 });

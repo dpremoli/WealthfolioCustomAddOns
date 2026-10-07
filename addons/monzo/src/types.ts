@@ -24,6 +24,8 @@ export interface MonzoAccount {
   account_type: string;
   type?: string;
   closed?: boolean;
+  /** The account holders; their names are the default reference on payments they send. */
+  owners?: { user_id?: string; preferred_name?: string; preferred_first_name?: string }[];
 }
 
 export interface MonzoMerchant {
@@ -52,6 +54,18 @@ export interface MonzoTransaction {
   /** An object when requested with `expand[]=merchant`; otherwise just the merchant id. */
   merchant?: MonzoMerchant | string | null;
   is_load: boolean;
+  /**
+   * The other side of a bank transfer or Monzo-to-Monzo payment: who it was sent to (or came
+   * from). For these, `description` is only the payment reference (by default the sender's
+   * own name) or an internal id, so the name lives here.
+   */
+  counterparty?: {
+    name?: string;
+    preferred_name?: string;
+    account_number?: string;
+    sort_code?: string;
+    user_id?: string;
+  } | null;
   /** Payment scheme, e.g. "mastercard", "payport_faster_payments", "uk_retail_pot". */
   scheme?: string;
   metadata: Record<string, string>;

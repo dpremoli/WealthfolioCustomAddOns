@@ -66,6 +66,17 @@ export function makeCtx(
       },
       activities: {
         getAll: async (accountId?: string) => [...(activities.get(accountId ?? "") ?? [])],
+        saveMany: async (req: { updates?: { id: string; comment?: string | null; amount?: unknown }[] }) => {
+          for (const u of req.updates ?? []) {
+            for (const list of activities.values()) {
+              const row = list.find((r) => r.id === u.id);
+              if (!row) continue;
+              row.comment = u.comment ?? null;
+              if (u.amount !== undefined) row.amount = u.amount == null ? null : String(u.amount);
+            }
+          }
+          return { created: [], updated: req.updates ?? [], deleted: [], createdMappings: [], errors: [] };
+        },
         import: async (batch: ActivityImport[]) => {
           importCalls.push(batch);
           for (const a of batch) {

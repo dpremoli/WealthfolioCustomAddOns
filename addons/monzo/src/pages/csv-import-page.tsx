@@ -12,7 +12,7 @@ import {
 import { addonRoute, jsonStore, type AddonPageProps } from "@wf-addons/kit";
 import { ADDON_ID, KEY_CATEGORY_LABELS } from "../constants";
 import { parseMonzoCsv } from "../lib/csv-parser";
-import { isFlexRepayment, isPotTransfer, mapTransactionToActivity } from "../lib/mapper";
+import { isFlexRepayment, isPotTransfer, legacyActivity, mapTransactionToActivity } from "../lib/mapper";
 import { ensureMigrated } from "../lib/migrate";
 import { importNew } from "../lib/sync";
 import type { MonzoTransaction } from "../types";
@@ -58,7 +58,8 @@ export default function CsvImportPage({ ctx }: AddonPageProps) {
       // Reconcile against what the account already holds (by count, so genuine repeats
       // survive) and force-import the rest. Rows carry their Monzo transaction id, so this is
       // safe to re-run or overlap with API syncs.
-      const outcome = await importNew(ctx, accountId, activities);
+      const legacy = new Map(filtered.map((tx) => [tx.id, legacyActivity(tx, accountId, categoryLabels)]));
+      const outcome = await importNew(ctx, accountId, activities, legacy);
       setResult({ imported: outcome.imported, duplicates: outcome.duplicates });
     } catch (err) {
       setError((err as Error).message);

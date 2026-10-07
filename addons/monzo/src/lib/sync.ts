@@ -1,16 +1,26 @@
 import type { ActivityImport, AddonContext } from "@wealthfolio/addon-sdk";
 import {
   jsonStore,
-  selectNewActivities,
+  ledgerEntry,
+  reconcileWithLedger,
+  sourceRefOf,
   spendingRulesNote,
   syncSpendingRules,
   type ExistingActivityLike,
+  type ImportLedger,
   type SyncProgress,
 } from "@wf-addons/kit";
-import { KEY_CATEGORY_LABELS, KEY_LAST_RUN, KEY_LAST_SYNC, KEY_MAPPING } from "../constants";
+import {
+  KEY_CATEGORY_LABELS,
+  KEY_IMPORTED_IDS,
+  KEY_LAST_RUN,
+  KEY_LAST_SYNC,
+  KEY_MAPPING,
+} from "../constants";
 import type { AccountMapping, MonzoTransaction, SyncPhaseId, SyncResult } from "../types";
 import { MonzoAuthError, getConnectionStatus } from "./auth";
 import {
+  legacyActivity,
   isDeclined,
   isFlexRepayment,
   isPending,
@@ -43,7 +53,10 @@ export const HISTORY_LIMIT_MS = 89 * DAY_MS;
  * allows (asking for more is refused). Undefined on a first sync, which tries for the
  * full history first (see {@link runSync}).
  */
-export function syncSince(lastSync: string | undefined, now: Date): { since?: string; clamped: boolean } {
+export function syncSince(
+  lastSync: string | undefined,
+  now: Date
+): { since?: string; clamped: boolean } {
   if (!lastSync) return { since: undefined, clamped: false };
   const floor = new Date(now.getTime() - HISTORY_LIMIT_MS).toISOString();
   const last = Date.parse(lastSync);
@@ -86,6 +99,8 @@ export function normaliseLegacyCash<T extends ExistingActivityLike>(existing: T[
 
 export interface ImportOutcome {
   imported: number;
+  /** Already imported rows rewritten because the transaction changed (payee name, notes, …). */
+  updated: number;
   /** Already in the account (matched by count), so not imported again. */
   duplicates: number;
   skipped: number;
@@ -95,22 +110,101 @@ export interface ImportOutcome {
  * Imports `desired` into a Wealthfolio account without duplicating what is already there.
  *
  * Wealthfolio's own content-hash dedupe would drop genuine identical same-day
- * transactions, so every row is force-imported and idempotency is handled here:
- * `selectNewActivities` matches the `[ref:tx_…]` the mapper puts in each comment, and
- * falls back to content (by count) for rows imported before refs were added.
+ * transactions, so every row is force-imported and idempotency is handled here, by the
+ * kit's `reconcileWithLedger`: the add-on remembers each imported Monzo transaction id
+ * (with its account and content hash) in storage, so a re-fetched transaction is
+ * recognised even after its comment changed, and a new identical one (a second coffee) is
+ * not mistaken for it. Rows imported by versions before the ledger match by content.
  */
 export async function importNew(
   ctx: AddonContext,
   accountId: string,
   desired: ActivityImport[],
+  /** Each row as older versions imported it, by activity id (see `legacyActivity`). */
+  legacyForms: ReadonlyMap<string, ActivityImport> = new Map()
 ): Promise<ImportOutcome> {
-  if (desired.length === 0) return { imported: 0, duplicates: 0, skipped: 0 };
+  if (desired.length === 0) return { imported: 0, updated: 0, duplicates: 0, skipped: 0 };
+  const store = jsonStore(ctx.api.storage);
   const existing = normaliseLegacyCash(await ctx.api.activities.getAll(accountId));
-  const toImport = selectNewActivities(desired, existing);
-  const duplicates = desired.length - toImport.length;
-  if (toImport.length === 0) return { imported: 0, duplicates, skipped: 0 };
-  const r = await ctx.api.activities.import(toImport);
-  return { imported: r.summary.imported, duplicates, skipped: r.summary.skipped };
+  const { toImport, present, stale, ledger } = reconcileWithLedger(
+    desired,
+    existing,
+    await store.get<ImportLedger>(KEY_IMPORTED_IDS, {}),
+    accountId,
+    { legacy: (a) => (a.id ? legacyForms.get(a.id) : undefined) }
+  );
+  let imported = 0;
+  let skipped = 0;
+  if (toImport.length > 0) {
+    const r = await ctx.api.activities.import(toImport);
+    imported = r.summary.imported;
+    skipped = r.summary.skipped;
+  }
+  await store.set(KEY_IMPORTED_IDS, ledger);
+
+  // Rewrite rows whose transaction changed since (payee name, notes, settled amount).
+  let updated = 0;
+  if (stale.length > 0) {
+    // Best effort: a refused update leaves the row as it was, and the next sync retries it.
+    const res = await ctx.api.activities
+      .saveMany({
+        updates: stale.map(({ row, activity }) => ({
+          id: row.id,
+          accountId,
+          activityType: activity.activityType,
+          subtype: activity.subtype ?? null,
+          activityDate: activity.date ?? row.date,
+          amount: activity.amount,
+          currency: activity.currency,
+          comment: activity.comment ?? null,
+        })),
+      })
+      .catch(() => null);
+    if (!res) return { imported, updated: 0, duplicates: present.length, skipped };
+    const failed = new Set((res.errors ?? []).map((e) => e.id));
+    for (const { row, activity } of stale) {
+      if (failed.has(row.id) || !activity.id) continue;
+      ledger[activity.id] = ledgerEntry(accountId, activity);
+      updated++;
+    }
+    await store.set(KEY_IMPORTED_IDS, ledger);
+  }
+  return { imported, updated, duplicates: present.length - updated, skipped };
+}
+
+/**
+ * v2.1–2.2 appended `[ref:tx_…]` to each comment. Records those ids in the import ledger
+ * and rewrites the comments without the tag. Best effort, and a no-op once done.
+ */
+export async function stripRefTags(ctx: AddonContext, accountId: string): Promise<number> {
+  const all = await ctx.api.activities.getAll(accountId);
+  const tagged = all.filter((a) => sourceRefOf(a.comment));
+  if (tagged.length === 0) return 0;
+  const store = jsonStore(ctx.api.storage);
+  // Reconciling nothing against the account records every tagged row in the ledger.
+  const { ledger } = reconcileWithLedger(
+    [],
+    tagged,
+    await store.get<ImportLedger>(KEY_IMPORTED_IDS, {}),
+    accountId
+  );
+  await store.set(KEY_IMPORTED_IDS, ledger);
+  const res = await ctx.api.activities.saveMany({
+    updates: tagged.map((a) => ({
+      id: a.id,
+      accountId: a.accountId || accountId,
+      activityType: a.activityType,
+      activityDate: a.date,
+      amount: a.amount,
+      currency: a.currency,
+      comment: stripRef(a.comment) || null,
+    })),
+  });
+  return tagged.length - (res?.errors?.length ?? 0);
+}
+
+function stripRef(comment: string | undefined): string {
+  return (comment ?? "").replace(/\s*\[ref:[^\]\s]+\]\s*$/, "").trim();
 }
 
 /**
@@ -132,7 +226,7 @@ export function pendingHoldBack(txs: MonzoTransaction[], now: Date): string | nu
 /** Fetch -> filter -> reconcile -> import for every mapped Monzo account. */
 export async function runSync(
   ctx: AddonContext,
-  onProgress: SyncProgressHandler = () => {},
+  onProgress: SyncProgressHandler = () => {}
 ): Promise<SyncResult> {
   await ensureMigrated(ctx);
   const store = jsonStore(ctx.api.storage);
@@ -150,17 +244,27 @@ export async function runSync(
   const categoryLabels = await store.get<Record<string, string>>(KEY_CATEGORY_LABELS, {});
   const startedAt = new Date();
   const { since, clamped } = syncSince(lastSync, startedAt);
-  if (!lastSync) log.push("Full sync (all history if Monzo allows it, otherwise the last 90 days).");
+  // The account holders' names: Monzo's default payment reference, not worth repeating.
+  const ownNames = new Set<string>();
+  if (!lastSync)
+    log.push("Full sync (all history if Monzo allows it, otherwise the last 90 days).");
   else if (clamped) {
     log.push(
       `Last synced ${lastSync}, more than 90 days ago: Monzo only shares the last 90 days now, ` +
-        "so fetching from " + since + ". Use CSV import to fill the gap.",
+        "so fetching from " +
+        since +
+        ". Use CSV import to fill the gap."
     );
   } else log.push(`Incremental sync since ${since}.`);
   const client = new MonzoClient(ctx);
   const monzoAccounts = await client.getAccounts();
+  for (const a of monzoAccounts) {
+    for (const o of a.owners ?? []) {
+      if (o.preferred_name) ownNames.add(o.preferred_name.trim().toLowerCase());
+    }
+  }
   const flexAccountIds = new Set(
-    monzoAccounts.filter((a) => a.account_type === "uk_monzo_flex").map((a) => a.id),
+    monzoAccounts.filter((a) => a.account_type === "uk_monzo_flex").map((a) => a.id)
   );
 
   const entries = Object.entries(mapping).filter(([monzoId]) => {
@@ -174,11 +278,12 @@ export async function runSync(
   if (entries.some(([, id]) => !wfIds.has(id))) {
     throw new Error(
       "Account mapping is out of date (mapped accounts were deleted). " +
-        "Open Settings to reconnect and re-create accounts.",
+        "Open Settings to reconnect and re-create accounts."
     );
   }
 
   let imported = 0;
+  let updated = 0;
   let skipped = 0;
   let duplicates = 0;
   let holdBack: string | null = null;
@@ -198,7 +303,7 @@ export async function runSync(
       fullHistory = false;
       log.push(
         "Monzo refused full history (it only shares it for 5 minutes after you connect); " +
-          "fetching the last 90 days instead. Use CSV import for anything older.",
+          "fetching the last 90 days instead. Use CSV import for anything older."
       );
       return client.getTransactions(accountId, floor);
     }
@@ -207,13 +312,24 @@ export async function runSync(
   let idx = 0;
   for (const [monzoAccountId, wealthfolioAccountId] of entries) {
     idx++;
-    onProgress({ phase: "fetch", message: "Fetching transactions…", current: idx, total: entries.length });
+    onProgress({
+      phase: "fetch",
+      message: "Fetching transactions…",
+      current: idx,
+      total: entries.length,
+    });
+    try {
+      const cleaned = await stripRefTags(ctx, wealthfolioAccountId);
+      if (cleaned) log.push(`Removed the [ref:…] tag from ${cleaned} older comment(s).`);
+    } catch (err) {
+      log.push(`Could not tidy older comments: ${(err as Error).message}`);
+    }
     const transactions = await fetchAll(monzoAccountId);
 
     const isFlex = flexAccountIds.has(monzoAccountId);
     const eligible = transactions.filter((tx) => isEligible(tx, isFlex));
     log.push(
-      `Account ${monzoAccountId.slice(0, 10)}…: ${transactions.length} fetched, ${eligible.length} eligible.`,
+      `Account ${monzoAccountId.slice(0, 10)}…: ${transactions.length} fetched, ${eligible.length} eligible.`
     );
     if (!isFlex) {
       const hb = pendingHoldBack(transactions, startedAt);
@@ -225,19 +341,28 @@ export async function runSync(
     if (eligible.length === 0) continue;
 
     onProgress({ phase: "import", message: `Importing ${eligible.length} transactions…` });
-    const desired = eligible.map((tx) => mapTransactionToActivity(tx, wealthfolioAccountId, categoryLabels));
-    const outcome = await importNew(ctx, wealthfolioAccountId, desired);
+    const desired = eligible.map((tx) =>
+      mapTransactionToActivity(tx, wealthfolioAccountId, categoryLabels, ownNames)
+    );
+    const legacy = new Map(
+      eligible.map((tx) => [tx.id, legacyActivity(tx, wealthfolioAccountId, categoryLabels)])
+    );
+    const outcome = await importNew(ctx, wealthfolioAccountId, desired, legacy);
+    updated += outcome.updated;
     imported += outcome.imported;
     duplicates += outcome.duplicates;
     skipped += outcome.skipped;
   }
 
   // Watermark: when this sync started, or earlier if a transaction was still pending.
-  const watermark = holdBack && holdBack < startedAt.toISOString() ? holdBack : startedAt.toISOString();
+  const watermark =
+    holdBack && holdBack < startedAt.toISOString() ? holdBack : startedAt.toISOString();
   const finishedAt = new Date().toISOString();
   await store.set(KEY_LAST_SYNC, watermark);
   await store.set(KEY_LAST_RUN, finishedAt);
-  log.push(`Import: ${imported} imported, ${duplicates} already present, ${skipped} skipped.`);
+  log.push(
+    `Import: ${imported} imported, ${updated} updated, ${duplicates} already present, ${skipped} skipped.`
+  );
 
   // Keep Wealthfolio's Spending categories in step with Monzo's (rules keyed on the category
   // label in each comment). Best effort: never fails the sync.
@@ -248,6 +373,9 @@ export async function runSync(
     log.push(`Next sync re-checks from ${watermark} (a transaction was still pending).`);
   }
 
-  onProgress({ phase: "done", message: `Synced ${imported} transaction${imported === 1 ? "" : "s"}.` });
+  onProgress({
+    phase: "done",
+    message: `Synced ${imported} transaction${imported === 1 ? "" : "s"}.`,
+  });
   return { imported, skipped, duplicates, breakdown, log, finishedAt };
 }

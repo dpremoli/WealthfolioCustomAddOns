@@ -96,6 +96,31 @@ describe("mapOrderToActivity", () => {
     expect(mapOrderToActivity(sell, "acc-1", "AAPL")!.activityType).toBe("SELL");
   });
 
+  it("accepts a sell fill reported with a negative quantity", () => {
+    const sell: HistoricalOrder = {
+      order: { ...baseOrder.order!, side: "SELL" },
+      fill: { ...baseOrder.fill!, quantity: -3 },
+    };
+    const a = mapOrderToActivity(sell, "acc-1", "AAPL")!;
+    expect(a.activityType).toBe("SELL");
+    expect(a.quantity).toBe(3);
+  });
+
+  it("never adds a charge in another currency to the fee without a rate to convert it", () => {
+    const noTotal: HistoricalOrder = {
+      ...baseOrder,
+      fill: {
+        ...baseOrder.fill!,
+        walletImpact: { currency: "GBP", fxRate: 1.27, taxes: [{ quantity: 0.5, currency: "GBP" }] },
+      },
+    };
+    expect(mapOrderToActivity(noTotal, "acc-1", "AAPL")!.fee).toBeUndefined();
+  });
+
+  it("treats negative charges as costs", () => {
+    expect(chargesInActivityCurrency([{ amount: -0.5, currency: "GBP" }], "GBP", undefined)).toBe(0.5);
+  });
+
   it("skips non-trade fills (e.g. stock splits)", () => {
     const split: HistoricalOrder = { ...baseOrder, fill: { ...baseOrder.fill!, type: "STOCK_SPLIT" } };
     expect(mapOrderToActivity(split, "acc-1", "AAPL")).toBeNull();
@@ -180,6 +205,15 @@ describe("mapTransactionToActivity", () => {
 
   it("maps a fee", () => {
     expect(mapTransactionToActivity({ ...base, type: "FEE" }, "acc-1").activityType).toBe("FEE");
+  });
+
+  it("maps interest on cash and share-lending interest to INTEREST", () => {
+    for (const type of ["INTEREST_ON_FREE_CASH", "LENDING_INTEREST"] as const) {
+      const a = mapTransactionToActivity({ ...base, type, amount: 1.23 }, "acc-1");
+      expect(a.activityType).toBe("INTEREST");
+      expect(a.amount).toBe(1.23);
+      expect(a.symbol).toBe("$CASH-GBP");
+    }
   });
 
   it("maps transfers by sign", () => {

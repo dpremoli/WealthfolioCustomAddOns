@@ -32,12 +32,17 @@ export class MonzoClient {
     if (isExpiring(await getExpiresAt(this.ctx))) await refreshAccessToken(this.ctx);
 
     const call = () =>
-      brokeredJson<T>(this.ctx, {
-        url,
-        method: "GET",
-        auth: { type: "bearer", secretKey: SECRET_ACCESS_TOKEN },
-        timeoutSecs: 30,
-      });
+      brokeredJson<T>(
+        this.ctx,
+        {
+          url,
+          method: "GET",
+          auth: { type: "bearer", secretKey: SECRET_ACCESS_TOKEN },
+          timeoutSecs: 30,
+        },
+        // Monzo answers 500/504 for trouble on its side; GETs are safe to repeat.
+        { maxServerErrorRetries: 2 },
+      );
     try {
       return await call();
     } catch (err) {
@@ -53,6 +58,7 @@ export class MonzoClient {
     }
   }
 
+  /** 403 means the app approval is pending, or (after a lapse) more than 90 days was asked for. */
   private mapError(err: unknown): unknown {
     if (err instanceof HttpError) {
       if (err.status === 403) return new MonzoAuthError("approval", APPROVAL_MESSAGE);

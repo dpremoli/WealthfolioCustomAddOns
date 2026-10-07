@@ -269,9 +269,20 @@ describe("useSync — JSON incremental path", () => {
     expect(r.error).toContain("payload=");
   });
 
-  it("skips duplicates flagged by checkImport without importing", async () => {
+  it("skips activities the account already holds without importing", async () => {
     const { ctx, importFn } = makeCtx({
-      checkImport: async (a) => a.map((x) => ({ ...x, duplicateOfId: "existing" })),
+      existingActivities: [
+        {
+          id: "existing",
+          activityType: "BUY",
+          date: "2026-04-01T10:00:00.000Z",
+          quantity: "2",
+          unitPrice: "100",
+          currency: "USD",
+          comment: "Apple Inc",
+          assetSymbol: "AAPL",
+        } as { id: string },
+      ],
     });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { result } = renderHook(() => useSync(ctx as any));
@@ -286,6 +297,32 @@ describe("useSync — JSON incremental path", () => {
       unresolved: 0,
     });
     expect(importFn).not.toHaveBeenCalled();
+  });
+
+  it("imports genuine identical same-day deposits even though checkImport flags them", async () => {
+    const dep = (reference: string) => ({
+      type: "DEPOSIT",
+      amount: 50,
+      currency: "GBP",
+      dateTime: "2026-04-02T09:00:00.000Z",
+      reference,
+    });
+    net((url) =>
+      url.includes("/transactions")
+        ? jsonResponse({ items: [dep("D1"), dep("D2")], nextPagePath: null })
+        : jsonResponse({ items: [], nextPagePath: null }),
+    );
+    const { ctx, importFn } = makeCtx({
+      checkImport: async (a) => a.map((x, i) => (i > 0 ? { ...x, duplicateOfId: "content-hash" } : x)),
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { result } = renderHook(() => useSync(ctx as any));
+    await act(async () => {
+      await result.current.syncAll();
+    });
+    const imported = importFn.mock.calls.flatMap((c) => c[0]);
+    expect(imported.map((a) => a.id)).toEqual(["t212-txn-D1", "t212-txn-D2"]);
+    expect(imported.every((a) => a.forceImport)).toBe(true);
   });
 
   it("isolates imported refs per connection (same order id in two accounts)", async () => {
@@ -407,6 +444,7 @@ describe("useSync — CSV export / hybrid path", () => {
 
     const state = JSON.parse(storage.get("t212_sync_c1")!);
     expect(state.lastSync).toBeTruthy();
+    expect(state.backfillStartedAt).toBeNull();
     expect(state.importedRefs).toContain("t212-txn-DEP1");
   });
 
@@ -486,6 +524,9 @@ describe("useSync — CSV export / hybrid path", () => {
       await result.current.syncAll();
     });
 
+    // The backfill's start is kept for the resume, so its final watermark covers the gap.
+    expect(JSON.parse(storage.get("t212_sync_c1")!).backfillStartedAt).toBeTruthy();
+
     // Window 0's single activity was imported and its refs persisted.
     expect(importFn).toHaveBeenCalledTimes(1);
     expect(result.current.results?.totals.imported).toBe(1);
@@ -494,6 +535,34 @@ describe("useSync — CSV export / hybrid path", () => {
     expect(state.lastSync).toBeNull(); // backfill incomplete → not finalized
     expect(state.backfillCheckpoint).toBeTruthy(); // resume point saved
     expect(state.importedRefs).toContain("t212-txn-DEP1");
+  });
+
+  it("a resumed backfill sets the watermark to when the backfill first started", async () => {
+    net(async (url: string) => {
+      if (url.includes("amazonaws.com")) return textResponse(CSV_HDR); // no older history
+      if (url.includes("/exports")) return jsonResponse([FINISHED_REPORT]);
+      return routeFetch(url);
+    });
+    const started = "2026-03-01T00:00:00.000Z";
+    const { ctx, storage } = makeCtx({
+      syncStates: {
+        c1: {
+          lastSync: null,
+          importedRefs: [],
+          backfillCheckpoint: "2025-03-01T00:00:00.000Z",
+          backfillStartedAt: started,
+        } as SyncStateMap[string],
+      },
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { result } = renderHook(() => useSync(ctx as any));
+    await act(async () => {
+      await result.current.syncAll();
+    });
+    const state = JSON.parse(storage.get("t212_sync_c1")!);
+    expect(state.lastSync).toBe(started);
+    expect(state.backfillCheckpoint).toBeNull();
+    expect(state.backfillStartedAt).toBeNull();
   });
 
   it("recreates a deleted Wealthfolio account, re-links, and imports into the new id", async () => {
@@ -575,7 +644,11 @@ const POSITION = {
 function routeHoldingsFetch(url: string): Res {
   const u = String(url);
   if (u.includes("account/summary"))
-    return jsonResponse({ id: 1, currency: "GBP", cash: { availableToTrade: 250 } });
+    return jsonResponse({
+      id: 1,
+      currency: "GBP",
+      cash: { availableToTrade: 250, reservedForOrders: 40, inPies: 10.5 },
+    });
   if (u.includes("/positions")) return jsonResponse([POSITION]);
   return jsonResponse([]);
 }
@@ -607,7 +680,8 @@ describe("useSync — HOLDINGS mode", () => {
     expect(holdings).toEqual([
       { symbol: "AAPL", quantity: "3", currency: "USD", averageCost: "150", name: "Apple Inc" },
     ]);
-    expect(cash).toEqual({ GBP: "250" });
+    // Free cash + cash reserved for pending orders + uninvested cash in pies.
+    expect(cash).toEqual({ GBP: "300.5" });
 
     expect(result.current.results?.totals.imported).toBe(1);
     expect(JSON.parse(storage.get("t212_sync_c1")!).lastSync).toBeTruthy();

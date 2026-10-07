@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { parseMonzoCsv } from "./csv-parser";
+import { isPotTransfer } from "./mapper";
 
 const HEADER =
   "Transaction ID,Date,Time,Type,Name,Emoji,Category,Amount,Currency,Local amount,Local currency,Notes and #tags,Address,Receipt,Description,Category split,Money Out,Money In";
@@ -24,6 +25,13 @@ describe("parseMonzoCsv", () => {
       description: "CAFE PARIS",
       merchant: { name: "Cafe" },
     });
+  });
+
+  it("marks pot transfers so they are skipped like the API's", () => {
+    const [t] = parseMonzoCsv(
+      [HEADER, "tx_2,05/03/2026,09:00:00,Pot transfer,Holiday,,Savings,-50.00,GBP,-50.00,GBP,,,,Holiday,,-50.00,"].join("\n"),
+    );
+    expect(isPotTransfer(t)).toBe(true);
   });
 
   it("matches columns by header name, so a reordered export still parses", () => {

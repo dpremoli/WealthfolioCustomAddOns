@@ -54,8 +54,12 @@ export function chargesInActivityCurrency(
 ): number {
   const ccy = activityCurrency.toUpperCase();
   const total = charges.reduce((acc, c) => {
-    const foreign = fxRate !== undefined && !!c.currency && c.currency.toUpperCase() !== ccy;
-    return acc + (foreign ? c.amount / (fxRate as number) : c.amount);
+    // Charges are costs whatever sign Trading 212 reports them with.
+    const amount = Math.abs(c.amount);
+    if (!c.currency || c.currency.toUpperCase() === ccy) return acc + amount;
+    // A charge in another currency can only be converted with a rate; without one,
+    // leave it out rather than add e.g. GBP pence to a USD fee.
+    return fxRate !== undefined ? acc + amount / fxRate : acc;
   }, 0);
   return fxRate !== undefined ? roundTo(total, 6) : round2(total);
 }
@@ -82,9 +86,11 @@ export function mapOrderToActivity(
   if (fill?.type && fill.type !== "TRADE") return null; // skip splits/distributions
   if (o.side !== "BUY" && o.side !== "SELL") return null;
 
-  const quantity = fill?.quantity ?? o.filledQuantity;
+  // Trading 212 signs sell quantities negative when placing orders; accept either sign.
+  const rawQuantity = fill?.quantity ?? o.filledQuantity;
+  const quantity = rawQuantity === undefined ? undefined : Math.abs(rawQuantity);
   const unitPrice = fill?.price;
-  if (quantity === undefined || quantity <= 0 || unitPrice === undefined) return null;
+  if (!quantity || unitPrice === undefined) return null;
 
   const wallet = fill?.walletImpact;
   const currency = o.currency || o.instrument?.currency || wallet?.currency || "GBP";
@@ -94,7 +100,7 @@ export function mapOrderToActivity(
   const crossCurrency = !!wallet?.currency && wallet.currency.toUpperCase() !== currency.toUpperCase();
   const implied =
     wallet?.netValue !== undefined && wallet.netValue !== null
-      ? Math.abs(wallet.netValue) / (Math.abs(quantity) * unitPrice)
+      ? Math.abs(wallet.netValue) / (quantity * unitPrice)
       : undefined;
   const fxRate = crossCurrency ? accountPerActivityRate(wallet?.fxRate, implied) : undefined;
 
@@ -110,7 +116,7 @@ export function mapOrderToActivity(
     activityType: o.side === "BUY" ? BUY : SELL,
     date,
     symbol,
-    quantity: Math.abs(quantity),
+    quantity,
     unitPrice,
     fee: fee > 0 ? fee : undefined,
     currency,
@@ -144,7 +150,7 @@ export function mapDividendToActivity(
     currency,
     isValid: true,
     isDraft: false,
-    comment: formatDividendType(div.type),
+    comment: div.type ? formatDividendType(div.type) : undefined,
   };
 }
 
@@ -164,6 +170,10 @@ export function mapTransactionToActivity(
     case "FEE":
       activityType = FEE;
       break;
+    case "INTEREST_ON_FREE_CASH":
+    case "LENDING_INTEREST":
+      activityType = INTEREST;
+      break;
     case "TRANSFER":
     default:
       activityType = txn.amount >= 0 ? TRANSFER_IN : TRANSFER_OUT;
@@ -182,6 +192,12 @@ export function mapTransactionToActivity(
     currency,
     isValid: true,
     isDraft: false,
+    comment:
+      txn.type === "INTEREST_ON_FREE_CASH"
+        ? "Interest on cash"
+        : txn.type === "LENDING_INTEREST"
+          ? "Share lending interest"
+          : undefined,
   };
 }
 

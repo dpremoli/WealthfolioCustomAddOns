@@ -65,6 +65,11 @@ export interface ConnectionSyncState {
   // each window so an interrupted backfill resumes there instead of restarting;
   // cleared once the backfill completes.
   backfillCheckpoint?: string | null;
+  // When the current full backfill started (ISO). Its windows end here, so once it
+  // completes this — not the finish time — becomes `lastSync`; otherwise anything that
+  // happened while the backfill ran (or between an interrupted run and its resume)
+  // would fall between the CSV windows and the first incremental sync.
+  backfillStartedAt?: string | null;
   // Watermark for the separate card-spending pipeline (card data is CSV-only, so it's
   // synced independently of the JSON activity watermark). Absent ⇒ card history not yet
   // backfilled; set to the sync time after the first card backfill completes.
@@ -136,6 +141,7 @@ export interface Fill {
 
 export interface Order {
   id: number;
+  ticker?: string;
   side?: "BUY" | "SELL";
   status?: string;
   currency?: string;
@@ -155,7 +161,7 @@ export interface HistoricalOrder {
 export interface DividendItem {
   ticker: string;
   reference: string;
-  type: string; // ORDINARY | INTEREST | BONUS | ...
+  type?: string; // ORDINARY | INTEREST | BONUS | ...
   amount: number; // in account's primary currency
   currency?: string; // account primary currency
   tickerCurrency?: string;
@@ -167,7 +173,8 @@ export interface DividendItem {
 
 // GET /api/v0/equity/history/transactions -> items
 export interface TransactionItem {
-  type: "DEPOSIT" | "WITHDRAW" | "FEE" | "TRANSFER";
+  // INTEREST_ON_FREE_CASH and LENDING_INTEREST are newer additions to the API spec.
+  type: "DEPOSIT" | "WITHDRAW" | "FEE" | "TRANSFER" | "INTEREST_ON_FREE_CASH" | "LENDING_INTEREST";
   amount: number;
   currency?: string;
   dateTime: string;

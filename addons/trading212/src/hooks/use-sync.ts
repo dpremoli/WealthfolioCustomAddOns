@@ -3,6 +3,8 @@ import type { Account, ActivityImport, AddonContext, SnapshotHoldingInput } from
 import {
   appendStep,
   markLastDone,
+  round2,
+  selectNewActivities,
   type SyncProgress as KitSyncProgress,
   type SyncStep as KitSyncStep,
 } from "@wf-addons/kit";
@@ -36,6 +38,7 @@ import { SymbolResolver, type ResolveDiag } from "../lib/symbol-resolver";
 import {
   addImportedRefs,
   clearAccountData,
+  setBackfillStartedAt,
   connectionConfig,
   ensureCardAccount,
   ensureProviderAccount,
@@ -80,6 +83,13 @@ const IMPORT_CHUNK_SIZE = 20;
 // one-year windows. Caps the walk so a sparse history can't loop forever.
 const MAX_EXPORT_WINDOWS = 15;
 
+/** Whether an RFC 3339 timestamp is at or before the watermark (compared as instants). */
+function atOrBefore(d: string, since: string): boolean {
+  const a = Date.parse(d);
+  const b = Date.parse(since);
+  return Number.isNaN(a) || Number.isNaN(b) ? d <= since : a <= b;
+}
+
 /** Pages a cursor endpoint newest-first, stopping once records predate `since`. */
 async function collectSince<T>(
   pageFn: (cursor?: string) => Promise<Paginated<T>>,
@@ -92,7 +102,7 @@ async function collectSince<T>(
     const page = await pageFn(cursor);
     for (const item of page.items ?? []) {
       const d = dateOf(item);
-      if (since && d && d <= since) return out;
+      if (since && d && atOrBefore(d, since)) return out;
       out.push(item);
     }
     const next = cursorFromNextPage(page.nextPagePath);
@@ -117,7 +127,7 @@ async function collectTransactions(
   for (let i = 0; i < PAGE_GUARD; i++) {
     const page = await client.pageTransactions(params);
     for (const t of page.items ?? []) {
-      if (since && t.dateTime && t.dateTime <= since) return out;
+      if (since && t.dateTime && atOrBefore(t.dateTime, since)) return out;
       out.push(t);
     }
     const next = transactionPageParams(page.nextPagePath);
@@ -134,7 +144,7 @@ async function collectJsonActivities(
   importedRefs: Set<string>,
   accountId: string,
   resolver: SymbolResolver,
-): Promise<{ activities: ActivityImport[]; unresolved: number }> {
+): Promise<{ activities: ActivityImport[]; unresolved: number; nonTrade: Record<string, number> }> {
   const orders = await collectSince<HistoricalOrder>(
     (c) => client.pageOrders(c),
     (o) => o.fill?.filledAt || o.order?.createdAt,
@@ -149,20 +159,29 @@ async function collectJsonActivities(
 
   const activities: ActivityImport[] = [];
   let unresolved = 0;
+  // Fills that are not trades (splits, stock dividends, spin-offs, …) are not imported;
+  // counted so the log says what was left out.
+  const nonTrade: Record<string, number> = {};
 
   for (const ho of orders) {
     const o = ho.order;
     if (!o || o.id === undefined) continue;
     if (importedRefs.has(`t212-order-${o.id}`)) continue;
-    const ticker = o.instrument?.ticker;
+    if (ho.fill?.type && ho.fill.type !== "TRADE") {
+      nonTrade[ho.fill.type] = (nonTrade[ho.fill.type] ?? 0) + 1;
+      continue;
+    }
+    // Map first: cancelled/rejected orders (no fill) need no symbol lookup.
+    const activity = mapOrderToActivity(ho, accountId, "");
+    if (!activity) continue;
+    const ticker = o.instrument?.ticker ?? o.ticker;
     if (!ticker) continue;
     const symbol = await resolver.resolve(ticker, o.instrument);
     if (!symbol) {
       unresolved++;
       continue;
     }
-    const activity = mapOrderToActivity(ho, accountId, symbol);
-    if (activity) activities.push(activity);
+    activities.push({ ...activity, symbol });
   }
 
   for (const d of dividends) {
@@ -183,7 +202,15 @@ async function collectJsonActivities(
     activities.push(mapTransactionToActivity(t, accountId));
   }
 
-  return { activities, unresolved };
+  return { activities, unresolved, nonTrade };
+}
+
+/** Log line for non-trade fills left out of the import, if any. */
+function nonTradeNote(nonTrade: Record<string, number>): string | null {
+  const parts = Object.entries(nonTrade).map(([k, v]) => `${v} ${k}`);
+  return parts.length
+    ? `Not imported (corporate-action fills, add them manually if they changed your holdings): ${parts.join(", ")}.`
+    : null;
 }
 
 /**
@@ -275,6 +302,29 @@ async function fetchCardActivities(
   return out;
 }
 
+/** Marks a row to bypass Wealthfolio's content-hash dedupe (see {@link reconcileWithAccount}). */
+function forced(a: ActivityImport): ActivityImport {
+  return { ...a, forceImport: true };
+}
+
+/**
+ * The rows of `batch` the account does not already hold. Wealthfolio's own duplicate
+ * check (checkImport's `duplicateOfId`) is a content hash, so it would drop the second
+ * of two genuinely identical same-day rows (two equal deposits, two equal fills) and lose
+ * real money; the kit's `selectNewActivities` matches by count instead. `fresh` rows are
+ * marked `forceImport`; `dropped` are those already present (every row carries an id).
+ */
+async function reconcileWithAccount(
+  ctx: AddonContext,
+  accountId: string,
+  batch: ActivityImport[],
+): Promise<{ fresh: ActivityImport[]; dropped: ActivityImport[] }> {
+  if (batch.length === 0) return { fresh: [], dropped: [] };
+  const fresh = selectNewActivities(batch, await ctx.api.activities.getAll(accountId));
+  const kept = new Set(fresh.map((a) => a.id));
+  return { fresh, dropped: batch.filter((a) => !kept.has(a.id)) };
+}
+
 /**
  * Self-contained card pipeline: fetches the connection's card rows ({@link fetchCardActivities})
  * and imports them into the dedicated card account, advancing the card watermark. Used by the
@@ -293,6 +343,8 @@ async function syncCardAccount(
   log: string[],
   onProgress: ProgressFn,
 ): Promise<{ imported: number; duplicates: number }> {
+  // The card windows end "now", so the watermark is when this run started, not finished.
+  const startedAt = new Date().toISOString();
   const { cardLastSync } = await getSyncState(ctx, conn.id);
   const importedRefs = await getImportedRefs(ctx, conn.id);
   const acts = await fetchCardActivities(
@@ -341,16 +393,17 @@ async function syncCardAccount(
       }
       throw new Error(`card checkImport rejected a single activity: ${errDetail(e)} — payload=${JSON.stringify(chunk[0])}`);
     }
-    const dupes = checked.filter((a) => a.duplicateOfId);
-    const toImport = checked.filter((a) => a.isValid !== false && !a.duplicateOfId);
-    duplicates += dupes.length;
-    for (const a of dupes) if (a.id) accounted.push(a.id);
-    await doImport(toImport);
+    // Duplicates were already removed by `selectNewActivities`; checkImport's own
+    // content-hash `duplicateOfId` would wrongly drop genuine identical same-day rows.
+    await doImport(checked.filter((a) => a.isValid !== false).map(forced));
   };
 
-  if (acts.length > 0) onProgress({ phase: "import", message: `Importing ${acts.length} card activities…` });
-  for (let i = 0; i < acts.length; i += IMPORT_CHUNK_SIZE) {
-    await process(acts.slice(i, i + IMPORT_CHUNK_SIZE));
+  const { fresh, dropped } = await reconcileWithAccount(ctx, cardAccountId, acts);
+  duplicates += dropped.length;
+  for (const a of dropped) if (a.id) accounted.push(a.id);
+  if (fresh.length > 0) onProgress({ phase: "import", message: `Importing ${fresh.length} card activities…` });
+  for (let i = 0; i < fresh.length; i += IMPORT_CHUNK_SIZE) {
+    await process(fresh.slice(i, i + IMPORT_CHUNK_SIZE));
   }
 
   if (accounted.length > 0) await addImportedRefs(ctx, conn.id, accounted);
@@ -360,7 +413,7 @@ async function syncCardAccount(
   // it unset so the next sync re-runs the full backfill walk.
   const hadPriorWatermark = !!(await getSyncState(ctx, conn.id)).cardLastSync;
   if (acts.length > 0 || hadPriorWatermark) {
-    await setCardLastSync(ctx, conn.id, new Date().toISOString());
+    await setCardLastSync(ctx, conn.id, startedAt);
   } else {
     log.push("Card account: no rows found yet — leaving the backfill window open for next sync.");
   }
@@ -487,9 +540,12 @@ async function syncHoldings(
     log.push(`Merged ${mapped.length - holdings.length} position(s) that resolved to a shared symbol (cross-listing collapse).`);
   }
 
-  const cashBalances: Record<string, string> = {
-    [accountCurrency]: String(summary.cash?.availableToTrade ?? 0),
-  };
+  // Trading 212 splits cash into disjoint buckets; all of it is the account's cash.
+  const cash = summary.cash;
+  const totalCash = round2(
+    (cash?.availableToTrade ?? 0) + (cash?.reservedForOrders ?? 0) + (cash?.inPies ?? 0),
+  );
+  const cashBalances: Record<string, string> = { [accountCurrency]: String(totalCash) };
 
   onProgress({ phase: "import", message: `Saving snapshot (${holdings.length} holdings)…` });
   await ctx.api.snapshots.save(accountId, holdings, cashBalances);
@@ -592,7 +648,8 @@ async function syncOne(
       return out;
     }
 
-    const { lastSync: since, backfillCheckpoint } = await getSyncState(ctx, conn.id);
+    const { lastSync: since, backfillCheckpoint, backfillStartedAt } = await getSyncState(ctx, conn.id);
+    const syncStartedAt = new Date().toISOString();
     const importedRefs = await getImportedRefs(ctx, conn.id);
 
     // Accumulators shared across every import batch. A backfill imports one batch
@@ -652,27 +709,32 @@ async function syncOne(
           throw new Error(`checkImport rejected a single activity: ${errDetail(e)} — payload=${JSON.stringify(chunk[0])}`);
         }
 
+        // Duplicates were already removed by `reconcileWithAccount`; checkImport's own
+        // content-hash `duplicateOfId` would wrongly drop genuine identical same-day rows.
         const invalid = checked.filter((a) => a.isValid === false);
-        const toImport = checked.filter((a) => a.isValid !== false && !a.duplicateOfId);
-        const dupes = checked.filter((a) => a.duplicateOfId);
-        duplicates += dupes.length;
+        const toImport = checked.filter((a) => a.isValid !== false).map(forced);
         invalidCount += invalid.length;
         if (!invalidDetail && invalid.length > 0) {
           const withErrors = invalid.find((a) => a.errors && Object.keys(a.errors).length > 0);
           invalidDetail = `${withErrors?.errors ? JSON.stringify(withErrors.errors) : "no detail"} — first: ${describeActivity(invalid[0])}`;
         }
-        for (const a of dupes) if (a.id) accounted.push(a.id);
 
         await doImport(toImport);
       };
 
-      for (let i = 0; i < batch.length; i += IMPORT_CHUNK_SIZE) {
-        const chunk = batch.slice(i, i + IMPORT_CHUNK_SIZE);
+      // Leave out what the account already holds (by content and count), e.g. after a
+      // sync-history reset or an interrupted run.
+      const { fresh, dropped } = await reconcileWithAccount(ctx, accountId, batch);
+      duplicates += dropped.length;
+      for (const a of dropped) if (a.id) accounted.push(a.id);
+
+      for (let i = 0; i < fresh.length; i += IMPORT_CHUNK_SIZE) {
+        const chunk = fresh.slice(i, i + IMPORT_CHUNK_SIZE);
         onProgress({
           phase: "import",
-          message: `Importing activities… ${Math.min(i + chunk.length, batch.length)}/${batch.length}`,
+          message: `Importing activities… ${Math.min(i + chunk.length, fresh.length)}/${fresh.length}`,
           current: i + chunk.length,
-          total: batch.length,
+          total: fresh.length,
         });
         await process(chunk);
       }
@@ -703,7 +765,13 @@ async function syncOne(
         // proceed without the cache; runExport will fetch per window if needed
       }
 
-      let windowEnd = backfillCheckpoint ? new Date(backfillCheckpoint) : new Date();
+      // The newest window ends when the backfill first started, and that instant becomes
+      // the watermark once it completes, so activity during (or between runs of) a long
+      // backfill is picked up by the next incremental sync instead of being skipped.
+      const backfillStart =
+        backfillCheckpoint && backfillStartedAt ? backfillStartedAt : syncStartedAt;
+      if (backfillStart !== backfillStartedAt) await setBackfillStartedAt(ctx, conn.id, backfillStart);
+      let windowEnd = backfillCheckpoint ? new Date(backfillCheckpoint) : new Date(backfillStart);
       if (backfillCheckpoint) log.push(`Resuming backfill from checkpoint ${backfillCheckpoint}.`);
       let emptyStreak = 0;
       let w = 0;
@@ -799,7 +867,7 @@ async function syncOne(
       if (exportFailed) {
         // CSV unavailable — use JSON paging for the initial full sync.
         log.push("CSV export unavailable → falling back to JSON paging.");
-        const { activities: jsonActs, unresolved: u } = await collectJsonActivities(
+        const { activities: jsonActs, unresolved: u, nonTrade } = await collectJsonActivities(
           client,
           null,
           importedRefs,
@@ -807,6 +875,8 @@ async function syncOne(
           resolver,
         );
         unresolved += u;
+        const note = nonTradeNote(nonTrade);
+        if (note) log.push(note);
         await importActivities(jsonActs);
         backfillComplete = true;
       }
@@ -814,11 +884,14 @@ async function syncOne(
       // Only mark the full sync complete when the backfill actually finished;
       // otherwise keep the checkpoint so the next run resumes where this left off.
       if (backfillComplete) {
-        await setLastSync(ctx, conn.id, new Date().toISOString());
+        // The JSON fallback fetched everything up to this run's start.
+        const watermark = exportFailed ? syncStartedAt : backfillStart;
+        await setLastSync(ctx, conn.id, watermark);
         await setBackfillCheckpoint(ctx, conn.id, null);
+        await setBackfillStartedAt(ctx, conn.id, null);
         // Card rows were routed inline during the backfill above — mark the card
         // pipeline backfilled so incremental syncs only fetch a recent top-up window.
-        if (cardAccountId) await setCardLastSync(ctx, conn.id, new Date().toISOString());
+        if (cardAccountId) await setCardLastSync(ctx, conn.id, watermark);
       } else {
         log.push("Backfill incomplete — next sync resumes from the checkpoint.");
       }
@@ -826,7 +899,7 @@ async function syncOne(
       // ── JSON incremental (since last watermark) ──────────────────────────
       log.push(`Incremental sync since ${since}.`);
       onProgress({ phase: "export", message: "Fetching recent activity…" });
-      const { activities: jsonActs, unresolved: u } = await collectJsonActivities(
+      const { activities: jsonActs, unresolved: u, nonTrade } = await collectJsonActivities(
         client,
         since,
         importedRefs,
@@ -834,8 +907,12 @@ async function syncOne(
         resolver,
       );
       unresolved += u;
+      const note = nonTradeNote(nonTrade);
+      if (note) log.push(note);
       await importActivities(jsonActs);
-      await setLastSync(ctx, conn.id, new Date().toISOString());
+      // Pages are read newest-first from when this run started; anything newer is for
+      // the next run, so the watermark is the start time, not the finish time.
+      await setLastSync(ctx, conn.id, syncStartedAt);
 
       // Card data is CSV-only (the JSON feed has no card type), so refresh it separately
       // via its own watermark: a one-time backfill the first time extraction is on, then a

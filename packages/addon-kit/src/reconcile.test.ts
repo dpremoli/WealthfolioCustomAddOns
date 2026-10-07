@@ -1,5 +1,11 @@
 import type { ActivityImport } from "@wealthfolio/addon-sdk";
-import { contentKey, selectNewActivities, type ExistingActivityLike } from "./reconcile";
+import {
+  contentKey,
+  selectNewActivities,
+  sourceRefOf,
+  withSourceRef,
+  type ExistingActivityLike,
+} from "./reconcile";
 
 const cash = (amount: number, comment: string, date = "2026-03-01T10:00:00.000Z"): ActivityImport => ({
   accountId: "acc",
@@ -48,6 +54,44 @@ describe("selectNewActivities", () => {
     const a = cash(3, "Coffee  Shop", "2026-03-01T23:59:00.000Z");
     const b = { ...stored(cash(3, "Coffee Shop", "2026-03-01T00:00:00.000Z")) };
     expect(selectNewActivities([a], [b])).toHaveLength(0);
+  });
+});
+
+describe("source refs", () => {
+  it("round-trips a ref through the comment", () => {
+    expect(withSourceRef("Tesco | Groceries", "tx_1")).toBe("Tesco | Groceries [ref:tx_1]");
+    expect(withSourceRef(undefined, "tx_1")).toBe("[ref:tx_1]");
+    expect(withSourceRef("Tesco [ref:tx_old]", "tx_1")).toBe("Tesco [ref:tx_1]");
+    expect(sourceRefOf("Tesco [ref:tx_1]")).toBe("tx_1");
+    expect(sourceRefOf("Tesco")).toBeUndefined();
+  });
+
+  it("matches a tagged row by ref even when its comment changed", () => {
+    const before = cash(3, withSourceRef("Coffee", "tx_1"));
+    const after = cash(3, withSourceRef("Coffee | Note: with Sam", "tx_1"));
+    expect(selectNewActivities([after], [stored(before)])).toHaveLength(0);
+  });
+
+  it("keeps tagged genuine repeats and drops a ref repeated in one batch", () => {
+    const a = cash(3, withSourceRef("Coffee", "tx_1"));
+    const b = cash(3, withSourceRef("Coffee", "tx_2"));
+    expect(selectNewActivities([a, b, a], [])).toHaveLength(2);
+    expect(selectNewActivities([a, b], [stored(a)]).map((x) => x.comment)).toEqual([b.comment]);
+  });
+
+  it("tagged rows reconcile against untagged legacy rows by content", () => {
+    const legacy = [cash(3, "Coffee"), cash(3, "Coffee")].map(stored);
+    const desired = [
+      cash(3, withSourceRef("Coffee", "tx_1")),
+      cash(3, withSourceRef("Coffee", "tx_2")),
+      cash(3, withSourceRef("Coffee", "tx_3")),
+    ];
+    expect(selectNewActivities(desired, legacy).map((x) => sourceRefOf(x.comment))).toEqual(["tx_3"]);
+  });
+
+  it("a tagged existing row is not matched by content to a different ref", () => {
+    const existing = [stored(cash(3, withSourceRef("Coffee", "tx_1")))];
+    expect(selectNewActivities([cash(3, withSourceRef("Coffee", "tx_2"))], existing)).toHaveLength(1);
   });
 });
 

@@ -318,7 +318,8 @@ export default function SettingsPage({ ctx }: AddonPageProps) {
               </li>
               <li>
                 Approve the access request in the <strong>Monzo app</strong>. Accounts are created
-                automatically.
+                automatically. Then run your first sync straight away: Monzo only shares your full
+                history for 5 minutes after you connect, and just the last 90 days after that.
               </li>
             </ol>
           </div>
@@ -478,7 +479,8 @@ export default function SettingsPage({ ctx }: AddonPageProps) {
             <p className="text-sm">
               After logging in, Monzo asks you to approve this client in the <strong>Monzo app</strong>{" "}
               (strong customer authentication). Until you do, API calls return 403 and nothing
-              syncs. Approve it there, then come back and sync.
+              syncs. Approve it there, then come back and sync <strong>within 5 minutes</strong> to
+              import your full history; after that Monzo only shares the last 90 days.
             </p>
           </AlertFeedback>
 

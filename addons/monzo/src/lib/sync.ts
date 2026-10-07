@@ -8,23 +8,57 @@ import {
 import { KEY_CATEGORY_LABELS, KEY_LAST_RUN, KEY_LAST_SYNC, KEY_MAPPING } from "../constants";
 import type { AccountMapping, MonzoTransaction, SyncPhaseId, SyncResult } from "../types";
 import { MonzoAuthError, getConnectionStatus } from "./auth";
-import { isFlexRepayment, isPending, isPotTransfer, mapTransactionToActivity, tallyByCategory } from "./mapper";
+import {
+  isDeclined,
+  isFlexRepayment,
+  isPending,
+  isPotTransfer,
+  mapTransactionToActivity,
+  tallyByCategory,
+} from "./mapper";
 import { MonzoClient } from "./monzo-client";
 import { ensureMigrated } from "./migrate";
 
 export type SyncProgressHandler = (p: SyncProgress<SyncPhaseId>) => void;
 
-/** Pending transactions older than this no longer hold the watermark back (declined/stuck ones). */
-const PENDING_HOLD_BACK_MS = 7 * 24 * 60 * 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
- * Whether a fetched transaction should become an activity. Pending ones are skipped (they
- * can still change) except on Flex, whose purchases never "settle" because they are billed
- * monthly. Pot transfers, Flex repayments (the matching spend is already on the Flex account)
- * and savings-category moves (investment transfers) are never imported.
+ * Pending transactions older than this no longer hold the watermark back (stuck ones).
+ * Monzo says most settle within 24-48 hours; this leaves room for the slow ones.
+ */
+const PENDING_HOLD_BACK_MS = 14 * DAY_MS;
+
+/**
+ * How far back Monzo lets a client read once 5 minutes have passed since the user
+ * authenticated (90 days, per its docs), with a day's margin for clock skew.
+ */
+export const HISTORY_LIMIT_MS = 89 * DAY_MS;
+
+/**
+ * The `since` for an incremental sync: the watermark, but never further back than Monzo
+ * allows (asking for more is refused). Undefined on a first sync, which tries for the
+ * full history first (see {@link runSync}).
+ */
+export function syncSince(lastSync: string | undefined, now: Date): { since?: string; clamped: boolean } {
+  if (!lastSync) return { since: undefined, clamped: false };
+  const floor = new Date(now.getTime() - HISTORY_LIMIT_MS).toISOString();
+  const last = Date.parse(lastSync);
+  if (Number.isNaN(last) || last < Date.parse(floor)) return { since: floor, clamped: true };
+  return { since: lastSync, clamped: false };
+}
+
+/**
+ * Whether a fetched transaction should become an activity. Declined and zero-value ones
+ * (card checks) moved no money. Pending ones are skipped (they can still change) except
+ * on Flex, whose purchases never "settle" because they are billed monthly. Pot transfers,
+ * Flex repayments (the matching spend is already on the Flex account) and savings-category
+ * moves (investment transfers) are never imported.
  */
 export function isEligible(tx: MonzoTransaction, isFlex: boolean): boolean {
   return (
+    !isDeclined(tx) &&
+    tx.amount !== 0 &&
     (isFlex || !isPending(tx)) &&
     !isPotTransfer(tx) &&
     !isFlexRepayment(tx) &&
@@ -59,7 +93,8 @@ export interface ImportOutcome {
  *
  * Wealthfolio's own content-hash dedupe would drop genuine identical same-day
  * transactions, so every row is force-imported and idempotency is handled here:
- * `selectNewActivities` compares against `activities.getAll` by count per content key.
+ * `selectNewActivities` matches the `[ref:tx_…]` the mapper puts in each comment, and
+ * falls back to content (by count) for rows imported before refs were added.
  */
 export async function importNew(
   ctx: AddonContext,
@@ -110,9 +145,15 @@ export async function runSync(
   }
   const lastSync = (await store.get<string | null>(KEY_LAST_SYNC, null)) ?? undefined;
   const categoryLabels = await store.get<Record<string, string>>(KEY_CATEGORY_LABELS, {});
-  log.push(lastSync ? `Incremental sync since ${lastSync}.` : "Full sync (everything Monzo allows, up to 90 days).");
-
   const startedAt = new Date();
+  const { since, clamped } = syncSince(lastSync, startedAt);
+  if (!lastSync) log.push("Full sync (all history if Monzo allows it, otherwise the last 90 days).");
+  else if (clamped) {
+    log.push(
+      `Last synced ${lastSync}, more than 90 days ago: Monzo only shares the last 90 days now, ` +
+        "so fetching from " + since + ". Use CSV import to fill the gap.",
+    );
+  } else log.push(`Incremental sync since ${since}.`);
   const client = new MonzoClient(ctx);
   const monzoAccounts = await client.getAccounts();
   const flexAccountIds = new Set(
@@ -140,11 +181,31 @@ export async function runSync(
   let holdBack: string | null = null;
   const breakdown: Record<string, number> = {};
 
+  // Monzo shares all history only within 5 minutes of the user authenticating; after that,
+  // asking for more than 90 days is refused (403). A first sync tries for everything and
+  // falls back to 90 days on that refusal.
+  const floor = new Date(startedAt.getTime() - HISTORY_LIMIT_MS).toISOString();
+  let fullHistory = since === undefined;
+  const fetchAll = async (accountId: string) => {
+    if (!fullHistory) return client.getTransactions(accountId, since ?? floor);
+    try {
+      return await client.getTransactions(accountId, undefined);
+    } catch (err) {
+      if (!(err instanceof MonzoAuthError && err.kind === "approval")) throw err;
+      fullHistory = false;
+      log.push(
+        "Monzo refused full history (it only shares it for 5 minutes after you connect); " +
+          "fetching the last 90 days instead. Use CSV import for anything older.",
+      );
+      return client.getTransactions(accountId, floor);
+    }
+  };
+
   let idx = 0;
   for (const [monzoAccountId, wealthfolioAccountId] of entries) {
     idx++;
     onProgress({ phase: "fetch", message: "Fetching transactions…", current: idx, total: entries.length });
-    const transactions = await client.getTransactions(monzoAccountId, lastSync);
+    const transactions = await fetchAll(monzoAccountId);
 
     const isFlex = flexAccountIds.has(monzoAccountId);
     const eligible = transactions.filter((tx) => isEligible(tx, isFlex));

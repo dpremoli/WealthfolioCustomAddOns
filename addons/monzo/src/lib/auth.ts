@@ -5,6 +5,7 @@ import {
   KEY_EXPIRES_AT,
   KEY_OAUTH_STATE,
   KEY_REDIRECT_URL,
+  LOGOUT_URL,
   SECRET_ACCESS_TOKEN,
   SECRET_CLIENT_SECRET,
   SECRET_REFRESH_TOKEN,
@@ -136,8 +137,28 @@ export async function storeTokens(
   await ctx.api.storage.set(KEY_EXPIRES_AT, String(expiresAtFrom(res, now)));
 }
 
-/** Forgets the tokens (keeps the client id/secret/redirect so reconnecting is one click). */
+/**
+ * Revokes the tokens at Monzo (`POST /oauth2/logout`, best effort: an expired token or no
+ * network must not block disconnecting) and forgets them locally. Keeps the client
+ * id/secret/redirect so reconnecting is one click.
+ */
 export async function disconnect(ctx: AddonContext): Promise<void> {
+  if (await ctx.api.storage.get(KEY_EXPIRES_AT)) {
+    try {
+      await brokeredRequest(
+        ctx,
+        {
+          url: LOGOUT_URL,
+          method: "POST",
+          auth: { type: "bearer", secretKey: SECRET_ACCESS_TOKEN },
+          timeoutSecs: 15,
+        },
+        { maxTransportRetries: 0, max429Retries: 0 },
+      );
+    } catch {
+      /* best effort */
+    }
+  }
   await ctx.api.secrets.delete(SECRET_ACCESS_TOKEN);
   await ctx.api.secrets.delete(SECRET_REFRESH_TOKEN);
   await ctx.api.storage.delete(KEY_EXPIRES_AT);
@@ -181,14 +202,23 @@ function errorDetail(body: string): string {
   return body.trim().slice(0, 200);
 }
 
+/**
+ * POSTs to the token endpoint. Never re-sent after a transport failure: codes and refresh
+ * tokens are single-use, so a retry of a request Monzo already processed would burn the
+ * new tokens it issued.
+ */
 async function postToken(ctx: AddonContext, body: string) {
-  return brokeredRequest(ctx, {
-    url: TOKEN_URL,
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body,
-    timeoutSecs: 30,
-  });
+  return brokeredRequest(
+    ctx,
+    {
+      url: TOKEN_URL,
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body,
+      timeoutSecs: 30,
+    },
+    { maxTransportRetries: 0 },
+  );
 }
 
 function parseTokenResponse(body: string): MonzoTokenResponse {

@@ -186,4 +186,18 @@ describe("disconnect", () => {
     expect(t.secrets.get(SECRET_CLIENT_SECRET)).toBe("mnzconf.sec");
     expect(t.storage.get(KEY_CLIENT_ID)).toBe("oauth2client_abc");
   });
+
+  it("revokes the token at Monzo first, and still disconnects if that fails", async () => {
+    const t = await configured({ handler: () => ({ status: 500, body: "" }) });
+    t.secrets.set(SECRET_ACCESS_TOKEN, "a");
+    t.storage.set(KEY_EXPIRES_AT, "5");
+    await disconnect(t.ctx);
+    expect(t.requests).toHaveLength(1);
+    expect(t.requests[0]).toMatchObject({
+      url: "https://api.monzo.com/oauth2/logout",
+      method: "POST",
+      auth: { type: "bearer", secretKey: SECRET_ACCESS_TOKEN },
+    });
+    expect(t.secrets.has(SECRET_ACCESS_TOKEN)).toBe(false);
+  });
 });

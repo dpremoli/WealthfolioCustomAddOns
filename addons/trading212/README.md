@@ -131,7 +131,7 @@ are verified before they replace the stored ones.
 |--------------------|----------------------|
 | Filled order (BUY/SELL) | `BUY` / `SELL` |
 | Dividend | `DIVIDEND` |
-| Interest | `INTEREST` |
+| Interest (dividend feed, interest on cash, share-lending interest) | `INTEREST` |
 | Deposit | `DEPOSIT` |
 | Withdrawal | `WITHDRAWAL` |
 | Fee | `FEE` |
@@ -151,8 +151,10 @@ reported as "unmatched symbols" on the dashboard.
 ### Incremental & idempotent sync
 
 Each connected account keeps its **own** `lastSync` watermark and set of
-already-imported Trading 212 reference ids, and the addon uses Wealthfolio's
-`checkImport` duplicate detection — so re-syncing never creates duplicates. Use the
+already-imported Trading 212 reference ids, and compares what it fetched with what the
+account already holds (by count, so two genuinely identical same-day rows — say two £50
+deposits — both land instead of being merged by Wealthfolio's content-hash duplicate
+check) — so re-syncing never creates duplicates. Use the
 per-account **Reset sync** button in Settings to force a full re-scan of that account.
 
 ### Rate limits & the 2 MB response cap

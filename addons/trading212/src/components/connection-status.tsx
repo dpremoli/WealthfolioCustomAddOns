@@ -1,11 +1,11 @@
 import type { AddonContext } from "@wealthfolio/addon-sdk";
 import { Badge, Icons, cn } from "@wealthfolio/ui";
 import { useQuery } from "@tanstack/react-query";
-import { Trading212Client, isUnauthorized } from "../lib/t212-client";
+import { Trading212Client, isForbidden, isUnauthorized } from "../lib/t212-client";
 import { connectionConfig } from "../hooks/use-config";
 import type { T212Connection, T212Settings } from "../types";
 
-export type HealthState = "checking" | "ok" | "auth" | "err" | "creds";
+export type HealthState = "checking" | "ok" | "auth" | "scope" | "err" | "creds";
 
 /** Health probe — calls /account/summary and maps the outcome to a UI state. */
 export function useConnectionHealth(
@@ -23,7 +23,7 @@ export function useConnectionHealth(
         await new Trading212Client(ctx, connectionConfig(settings, conn)).getAccountSummary();
         return "ok";
       } catch (err) {
-        return isUnauthorized(err) ? "auth" : "err";
+        return isUnauthorized(err) ? "auth" : isForbidden(err) ? "scope" : "err";
       }
     },
     enabled: !!settings || !!conn.needsCredentials,
@@ -40,6 +40,7 @@ const CONFIG: Record<
   checking: { label: "Checking…", variant: "outline", dot: "bg-muted-foreground" },
   ok: { label: "Connected", variant: "success", dot: "bg-green-500" },
   auth: { label: "Auth failed", variant: "destructive", dot: "bg-red-500" },
+  scope: { label: "Missing permission", variant: "destructive", dot: "bg-red-500" },
   err: { label: "Unreachable", variant: "warning", dot: "bg-amber-500" },
   creds: { label: "Needs credentials", variant: "warning", dot: "bg-amber-500" },
 };

@@ -1,0 +1,32 @@
+{
+  "id": "monzo-addon",
+  "name": "Monzo Bank Sync",
+  "version": "1.2.1",
+  "description": "Automatically sync Monzo Bank transactions into your Wealthfolio cash accounts.",
+  "author": "dpremoli",
+  "main": "addon.js",
+  "sdkVersion": "3.3.0",
+  "enabled": true,
+  "permissions": [
+    {
+      "category": "accounts",
+      "functions": ["getAll", "create"],
+      "purpose": "Map Monzo accounts to Wealthfolio cash accounts"
+    },
+    {
+      "category": "activities",
+      "functions": ["import", "checkImport"],
+      "purpose": "Import Monzo transactions as cash activities"
+    },
+    {
+      "category": "secrets",
+      "functions": ["set", "get", "delete"],
+      "purpose": "Store Monzo OAuth tokens and account mapping securely"
+    },
+    {
+      "category": "ui",
+      "functions": ["sidebar.addItem", "router.add"],
+      "purpose": "Add Monzo Sync navigation and configuration pages"
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+services:
+  monzo-proxy:
+    build: .
+    container_name: monzo-proxy
+    ports:
+      - "${PORT:-8000}:8000"
+    environment:
+      MONZO_CLIENT_ID: ${MONZO_CLIENT_ID}
+      MONZO_CLIENT_SECRET: ${MONZO_CLIENT_SECRET}
+      REDIRECT_URI: ${REDIRECT_URI:-http://localhost:8000/callback}
+    restart: unless-stopped

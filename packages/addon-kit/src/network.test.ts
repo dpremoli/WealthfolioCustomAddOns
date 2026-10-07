@@ -1,5 +1,5 @@
 import type { AddonContext } from "@wealthfolio/addon-sdk";
-import { brokeredJson, brokeredRequest, HttpError, retryDelayMs, withQuery } from "./network";
+import { brokeredJson, brokeredRequest, HostNotApprovedError, HttpError, retryDelayMs, withQuery } from "./network";
 
 type Res = { status: number; headers: Record<string, string>; body: string };
 
@@ -43,6 +43,15 @@ describe("brokeredRequest", () => {
     const policy = ctxWith([new Error("Addon network host 'x.test' is not approved")]);
     await expect(brokeredRequest(policy.ctx, { url: "https://x.test" }, { sleep })).rejects.toThrow(/not approved/);
     expect(policy.request).toHaveBeenCalledTimes(1);
+  });
+
+  it("explains an unapproved network host instead of passing the raw refusal on", async () => {
+    const { ctx, request } = ctxWith([new Error("Addon network host 'live.trading212.com' is not approved")]);
+    const err = await brokeredRequest(ctx, { url: "https://live.trading212.com/x" }, { sleep }).catch((e) => e);
+    expect(err).toBeInstanceOf(HostNotApprovedError);
+    expect(err.host).toBe("live.trading212.com");
+    expect(err.message).toMatch(/Settings → Add-ons → this add-on → Permissions/);
+    expect(request).toHaveBeenCalledTimes(1);
   });
 
   it("returns non-2xx responses untouched", async () => {

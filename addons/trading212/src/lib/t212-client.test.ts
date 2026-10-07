@@ -154,11 +154,16 @@ describe("Trading212Client — export download", () => {
     expect(requests.every((r) => !r.auth)).toBe(true);
   });
 
-  it("names the host when the broker rejects it as not approved", async () => {
-    const { client } = makeClient(() => new Error("Addon network host 'x.example.net' is not approved"));
+  it("names the host and the fix when Wealthfolio has not approved it", async () => {
+    const { client } = makeClient(() => new Error("Addon network host 'files.example.net' is not approved"));
     await expect(client.downloadExportCsv("https://files.example.net/r.csv")).rejects.toThrow(
-      /host "files\.example\.net" is not approved/,
+      /access to files\.example\.net .*Permissions/,
     );
+  });
+
+  it("explains an unapproved API host the same way", async () => {
+    const { client } = makeClient(() => new Error("Addon network host 'demo.trading212.com' is not approved"));
+    await expect(client.getAccountSummary()).rejects.toThrow(/access to demo\.trading212\.com .*Permissions/);
   });
 
   it("fails on a non-2xx download", async () => {

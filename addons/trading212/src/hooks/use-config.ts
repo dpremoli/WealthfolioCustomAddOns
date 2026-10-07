@@ -243,6 +243,15 @@ export function connectionConfig(settings: T212Settings, conn: T212Connection): 
 
 // --- per-connection sync state -------------------------------------------
 
+/**
+ * Whether a connection is an Invest or a Stocks ISA account. Trading 212's API doesn't say,
+ * so it is chosen when connecting; connections carried over from v1 have no choice recorded
+ * and are recognised by name ("Trading 212 (ISA)", "My ISA", …).
+ */
+export function connectionKind(conn: Pick<T212Connection, "kind" | "name">): "invest" | "isa" {
+  return conn.kind ?? (/\bisa\b/i.test(conn.name) ? "isa" : "invest");
+}
+
 export async function getSyncState(
   ctx: AddonContext,
   id: string,

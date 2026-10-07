@@ -166,6 +166,20 @@ Trading 212 enforces strict per-endpoint limits (instruments 1/50s, history
 `Retry-After` / `x-ratelimit-reset`, so a first sync of a long history can take a
 little while.
 
+Card transactions only exist in CSV exports, and Trading 212 takes 15–80 s to prepare each
+export under its rate limits. So recent card history is refreshed **at most every 3 hours**
+(the sync log says when the next refresh is due), an account whose card history turns out
+to be empty is not walked again, and Stocks ISA connections never export card history.
+Connections carried over from v1 are recognised as ISA by their name (e.g.
+"Trading 212 (ISA)").
+
+### "Wealthfolio has not approved network access to …"
+
+Wealthfolio only lets an add-on reach the network hosts you ticked in its permission
+dialog, and installing an update that asks for a new permission can leave them unticked.
+Open **Settings → Add-ons → Trading 212 Sync → Permissions**, tick `*.trading212.com` and
+`*.amazonaws.com` (where the CSV exports download from), save, and sync again.
+
 Wealthfolio's network broker also rejects any response body over **2 MB**. The add-on
 works around it where it matters:
 

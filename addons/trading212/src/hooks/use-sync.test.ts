@@ -813,9 +813,9 @@ describe("useSync — HOLDINGS mode", () => {
     expect(lg).toContain("ISA accounts don't have a card");
   });
 
-  it("leaves cardLastSync unset when the first backfill finds no rows", async () => {
-    // First-time card sync with an empty CSV. We must NOT advance the watermark —
-    // otherwise the next sync would only check a tiny "now→now" window forever.
+  it("marks card history done when the backfill finds no rows, so it is not walked again", async () => {
+    // An account with no card spending: every window is empty. Advancing the watermark stops
+    // later syncs repeating the slow multi-year export walk; new rows are still fetched from it.
     net(async (url: string) => {
         const u = String(url);
         if (u.includes("account/summary"))
@@ -844,10 +844,62 @@ describe("useSync — HOLDINGS mode", () => {
     });
 
     expect(result.current.error).toBeNull();
-    const state = JSON.parse(storage.get("t212_sync_c1")!);
-    expect(state.cardLastSync).toBeFalsy();
-    const lg = result.current.results!.perAccount[0].log.join("\n");
-    expect(lg).toContain("leaving the backfill window open");
+    expect(JSON.parse(storage.get("t212_sync_c1")!).cardLastSync).toBeTruthy();
+
+    // A sync straight after does not export card history again.
+    const requests = (ctx.api.network.request as ReturnType<typeof vi.fn>).mock.calls.length;
+    await act(async () => {
+      await result.current.syncAll();
+    });
+    const exportCalls = (ctx.api.network.request as ReturnType<typeof vi.fn>).mock.calls
+      .slice(requests)
+      .filter(([req]) => String(req.url).includes("/exports"));
+    expect(exportCalls).toHaveLength(0);
+    expect(result.current.results!.perAccount[0].log.join("\n")).toMatch(/Card history refreshed \d+ min ago/);
+  });
+
+  it("leaves card history open for a retry when an export fails", async () => {
+    net(async (url: string) => {
+      const u = String(url);
+      if (u.includes("account/summary"))
+        return jsonResponse({ id: 1, currency: "GBP", cash: { availableToTrade: 0 } });
+      if (u.includes("/positions")) return jsonResponse([]);
+      if (u.includes("amazonaws.com")) return textResponse("boom", 500);
+      if (u.includes("/exports")) return jsonResponse([FINISHED_REPORT]);
+      return jsonResponse([]);
+    });
+    const { ctx, storage } = makeCtx({
+      connections: [{ id: "c1", name: "Invest", accountId: "acc-1", trackingMode: "HOLDINGS" }],
+      existingAccounts: [{ id: "acc-1", trackingMode: "HOLDINGS" }],
+      syncStates: { c1: { lastSync: null, importedRefs: [] } },
+    });
+    storage.set("t212_settings", JSON.stringify({ env: "demo", extractCard: true }));
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { result } = renderHook(() => useSync(ctx as any));
+    await act(async () => {
+      await result.current.syncAll();
+    });
+    expect(JSON.parse(storage.get("t212_sync_c1")!).cardLastSync).toBeFalsy();
+    expect(result.current.results!.perAccount[0].log.join("\n")).toMatch(/retries it/);
+  });
+
+  it("recognises a v1 ISA connection by name and skips card extraction for it", async () => {
+    net((url) => routeHoldingsFetch(url));
+    const { ctx } = makeCtx({
+      connections: [{ id: "c2", name: "Trading 212 (ISA)", accountId: "acc-2", trackingMode: "HOLDINGS" }],
+      existingAccounts: [{ id: "acc-2", trackingMode: "HOLDINGS" }],
+      syncStates: { c2: { lastSync: null, importedRefs: [] } },
+    });
+    (ctx.api.storage as { set: (k: string, v: string) => Promise<void> }).set(
+      "t212_settings",
+      JSON.stringify({ env: "demo", extractCard: true }),
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { result } = renderHook(() => useSync(ctx as any));
+    await act(async () => {
+      await result.current.syncAll();
+    });
+    expect(result.current.results!.perAccount[0].log.join("\n")).toMatch(/ISA accounts don't have a card/);
   });
 });
 

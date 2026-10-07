@@ -1,23 +1,6 @@
-// Small UI-only formatting helpers. No SDK or React deps so they're cheap to import
-// from any component and trivially unit-testable.
-
-/** "2h ago" / "3 days ago" / "just now". Falls back to absolute on bad input. */
-export function relativeTime(iso: string | null | undefined, now: Date = new Date()): string {
-  if (!iso) return "Never";
-  const t = new Date(iso).getTime();
-  if (Number.isNaN(t)) return "Never";
-  const diffMs = now.getTime() - t;
-  if (diffMs < 0) return new Date(iso).toLocaleString();
-  const s = Math.floor(diffMs / 1000);
-  if (s < 45) return "just now";
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m} min${m === 1 ? "" : "s"} ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h} hour${h === 1 ? "" : "s"} ago`;
-  const d = Math.floor(h / 24);
-  if (d < 30) return `${d} day${d === 1 ? "" : "s"} ago`;
-  return new Date(iso).toLocaleDateString();
-}
+// Small UI-only formatting helpers specific to Trading 212. No SDK or React deps so
+// they are cheap to import from any component and trivially unit-testable.
+// (Generic helpers like relativeTime / maskKey live in @wf-addons/kit.)
 
 /** Friendly exchange label for a MIC. Falls back to the raw MIC. */
 const MIC_NAMES: Record<string, string> = {
@@ -52,7 +35,10 @@ export function parseSymbolMap(map: Record<string, string>): SymbolMapEntry[] {
   });
 }
 
-/** Masked API key for display: "••••XXXX". */
-export function maskKey(key: string): string {
-  return key.length <= 4 ? "••••" : `••••${key.slice(-4)}`;
+/**
+ * Masked API key ID for display ("••••XXXX"). Only the last 4 characters of the key ID
+ * are kept (the key itself is never stored in add-on state), so this takes that suffix.
+ */
+export function maskedKeyId(last4?: string | null): string {
+  return last4 ? `••••${last4}` : "••••";
 }

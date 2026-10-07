@@ -1,5 +1,5 @@
 import type { AddonContext, UnlistenFn } from "@wealthfolio/addon-sdk";
-import { getConnections, getSettings, getSyncState } from "../hooks/use-config";
+import { ensureMigrated, getConnections, getSettings, getSyncState } from "../hooks/use-config";
 import { runSyncAll } from "../hooks/use-sync";
 
 // How often the scheduler re-checks whether any account is due while the app stays
@@ -60,6 +60,7 @@ export function startAutoSync(ctx: AddonContext): AutoSyncHandle {
   async function tick(trigger: string): Promise<void> {
     if (stopped || running) return;
     try {
+      await ensureMigrated(ctx); // v1 → v2 storage layout must be in place before reading
       const settings = await getSettings(ctx);
       if (settings?.autoSync === false) return; // user opted out
 
@@ -67,6 +68,7 @@ export function startAutoSync(ctx: AddonContext): AutoSyncHandle {
       const now = new Date();
       const dueIds = new Set<string>();
       for (const conn of connections) {
+        if (conn.needsCredentials) continue; // legacy single-key connection: nothing to sync with
         const { lastSync } = await getSyncState(ctx, conn.id);
         if (isDueForBackgroundSync(lastSync, now)) dueIds.add(conn.id);
       }

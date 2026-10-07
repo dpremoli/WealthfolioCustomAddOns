@@ -1,5 +1,11 @@
 import { useState } from "react";
 import type { Account, ActivityImport, AddonContext, SnapshotHoldingInput } from "@wealthfolio/addon-sdk";
+import {
+  appendStep,
+  markLastDone,
+  type SyncProgress as KitSyncProgress,
+  type SyncStep as KitSyncStep,
+} from "@wf-addons/kit";
 import type {
   DividendItem,
   ExportReport,
@@ -7,16 +13,17 @@ import type {
   Instrument,
   MultiSyncResult,
   Paginated,
+  Position,
+  SyncPhaseId,
   SyncProgress,
   SyncResult,
-  SyncStep,
   T212Connection,
   T212Settings,
   T212TrackingMode,
   TradableInstrument,
   TransactionItem,
 } from "../types";
-import { Trading212ProxyClient, cursorFromNextPage, transactionPageParams } from "../lib/proxy-client";
+import { Trading212Client, cursorFromNextPage, isUnauthorized, transactionPageParams } from "../lib/t212-client";
 import {
   mapDividendToActivity,
   mapOrderToActivity,
@@ -54,10 +61,10 @@ interface SyncState {
   isSyncing: boolean;
   results: MultiSyncResult | null;
   error: string | null;
-  progress: SyncProgress | null;
+  progress: KitSyncProgress<SyncPhaseId> | null;
   // Live timeline of every `onProgress` step the sync emits. Resets each `syncAll`,
   // appended to as phases land. Drives the activity feed in the dashboard.
-  steps: SyncStep[];
+  steps: KitSyncStep<SyncPhaseId>[];
 }
 
 /** Callback used to stream step-by-step progress out of a running sync. */
@@ -102,7 +109,7 @@ async function collectSince<T>(
  * returned `nextPagePath` — sending one without the other is a 400.
  */
 async function collectTransactions(
-  client: Trading212ProxyClient,
+  client: Trading212Client,
   since: string | null,
 ): Promise<TransactionItem[]> {
   const out: TransactionItem[] = [];
@@ -122,7 +129,7 @@ async function collectTransactions(
 
 /** Fetches and maps all activities for a connection via the JSON paging endpoints. */
 async function collectJsonActivities(
-  client: Trading212ProxyClient,
+  client: Trading212Client,
   since: string | null,
   importedRefs: Set<string>,
   accountId: string,
@@ -189,7 +196,7 @@ async function collectJsonActivities(
  * is the backstop.
  */
 async function fetchCardActivities(
-  client: Trading212ProxyClient,
+  client: Trading212Client,
   resolver: SymbolResolver,
   mainAccountId: string,
   cardAccountId: string,
@@ -237,7 +244,12 @@ async function fetchCardActivities(
     onProgress({ phase: "export", message: `Fetching card history ${label}…` });
     let csv: string;
     try {
-      csv = await client.runExport({ timeFrom: start.toISOString(), timeTo: end.toISOString(), knownReports });
+      csv = await client.runExport({
+        timeFrom: start.toISOString(),
+        timeTo: end.toISOString(),
+        knownReports,
+        onNote: (m) => log.push(m),
+      });
     } catch (e) {
       log.push(`Card window ${label}: export failed (${errDetail(e)})`);
       break;
@@ -273,7 +285,7 @@ async function fetchCardActivities(
  */
 async function syncCardAccount(
   ctx: AddonContext,
-  client: Trading212ProxyClient,
+  client: Trading212Client,
   conn: T212Connection,
   mainAccountId: string,
   cardAccountId: string,
@@ -366,7 +378,7 @@ async function syncCardAccount(
 async function resolveAccountId(
   ctx: AddonContext,
   conn: T212Connection,
-  client: Trading212ProxyClient,
+  client: Trading212Client,
   log: string[],
 ): Promise<{ accountId: string; account: Account | null }> {
   const accounts = await ctx.api.accounts.getAll();
@@ -399,10 +411,15 @@ function formatResolveDiag(d: ResolveDiag): string {
   return `[resolve] ${d.ticker} → ${chosen} | ${cands || "no candidates"}${more}`;
 }
 
+/** True when a position carries no embedded ISIN/currency to resolve its listing from. */
+function lacksInstrumentDetail(pos: Position): boolean {
+  return !pos.instrument?.isin || !pos.instrument?.currency;
+}
+
 /** HOLDINGS-mode sync: writes a current positions + cash snapshot (no history). */
 async function syncHoldings(
   ctx: AddonContext,
-  client: Trading212ProxyClient,
+  client: Trading212Client,
   conn: T212Connection,
   accountId: string,
   resolver: SymbolResolver,
@@ -420,11 +437,15 @@ async function syncHoldings(
   // instruments metadata for each holding's ISIN/currency/name. Accurate symbol
   // resolution depends on the instrument currency to disambiguate cross-listings
   // (e.g. TSM/USD vs the MXN-quoted TSMN) and the ISIN to find the right listing.
+  // The instruments feed is ~5 MB upstream — over the host's 2 MB response cap — and rate
+  // limited to 1 request / 50 s, so only ask for it when a position actually lacks the data.
   const instrumentMeta = new Map<string, TradableInstrument>();
-  try {
-    for (const ins of await client.getInstruments()) instrumentMeta.set(ins.ticker, ins);
-  } catch {
-    log.push("Instrument metadata unavailable — resolving from ticker only.");
+  if (positions.some(lacksInstrumentDetail)) {
+    try {
+      for (const ins of await client.getInstruments()) instrumentMeta.set(ins.ticker, ins);
+    } catch (e) {
+      log.push(`Instrument metadata unavailable (${errDetail(e)}) — resolving from ticker only.`);
+    }
   }
 
   onProgress({ phase: "map", message: "Matching symbols…" });
@@ -501,8 +522,14 @@ async function syncOne(
 ): Promise<SyncResult> {
   const log: string[] = [];
   const base = { connectionId: conn.id, accountId: conn.accountId, accountName: conn.name, log };
+  if (conn.needsCredentials) {
+    // Migrated from a v1 legacy single-key connection: the API now needs key ID + secret.
+    const message = "Needs credentials: re-enter the API key ID and secret in Settings.";
+    log.push(`Skipped: ${message}`);
+    return { ...base, imported: 0, duplicates: 0, unresolved: 0, finishedAt: new Date().toISOString(), error: message };
+  }
   try {
-    const client = new Trading212ProxyClient(connectionConfig(settings, conn));
+    const client = new Trading212Client(ctx, connectionConfig(settings, conn));
     // Heal a stale account link (account deleted in Wealthfolio) before doing anything.
     const { accountId, account } = await resolveAccountId(ctx, conn, client, log);
     base.accountId = accountId;
@@ -709,6 +736,7 @@ async function syncOne(
             timeFrom: windowStart.toISOString(),
             timeTo: windowEnd.toISOString(),
             knownReports,
+            onNote: (m) => log.push(m),
           });
         } catch (e) {
           log.push(`Window ${windowLabel}: export failed (${errDetail(e)})`);
@@ -849,10 +877,9 @@ async function syncOne(
 
     return { ...base, imported, duplicates, unresolved, breakdown: tally, card: cardResult ?? undefined, finishedAt };
   } catch (err) {
-    const message =
-      (err as Error).message === "UNAUTHORIZED"
-        ? "Trading 212 rejected this API key. Check it in Settings."
-        : (err as Error).message;
+    const message = isUnauthorized(err)
+      ? "Trading 212 rejected this API key. Check it in Settings."
+      : (err as Error).message;
     log.push(`Error: ${message}`);
     return { ...base, imported: 0, duplicates: 0, unresolved: 0, finishedAt: new Date().toISOString(), error: message };
   }
@@ -899,7 +926,7 @@ export async function runSyncAll(
   const confirmedModeSwitches = opts.confirmedModeSwitches ?? new Set<string>();
 
   const settings = await getSettings(ctx);
-  if (!settings) throw new Error("Not connected. Open Settings to add your API key.");
+  if (!settings) throw new Error("Not connected. Open Settings to add your API key ID and secret.");
 
   let connections = await getConnections(ctx);
   if (connections.length === 0)
@@ -949,12 +976,15 @@ export function useSync(ctx: AddonContext) {
     try {
       const results = await runSyncAll(ctx, {
         confirmedModeSwitches,
-        onProgress: (progress) =>
+        onProgress: ({ accountName, ...p }) => {
+          // The shared activity feed shows messages only, so carry the account in the text.
+          const progress = { ...p, message: `${accountName}: ${p.message}` };
           setState((s) => ({
             ...s,
             progress,
             steps: appendStep(s.steps, progress),
-          })),
+          }));
+        },
       });
       // Mark the last step as done so the timeline shows a final check on every node.
       setState((s) => ({
@@ -963,9 +993,7 @@ export function useSync(ctx: AddonContext) {
         results,
         error: null,
         progress: null,
-        steps: s.steps.length
-          ? [...s.steps.slice(0, -1), { ...s.steps[s.steps.length - 1], status: "done" }]
-          : s.steps,
+        steps: markLastDone(s.steps),
       }));
     } catch (err) {
       setState((s) => ({ ...s, isSyncing: false, progress: null, error: (err as Error).message }));
@@ -973,22 +1001,4 @@ export function useSync(ctx: AddonContext) {
   }
 
   return { ...state, syncAll };
-}
-
-/**
- * Appends a progress event to the live timeline. Coalesces consecutive duplicates
- * (same phase + message + accountName) so import chunk updates land as one row that
- * just updates its `current/total`. Marks the previous step as `done`.
- */
-function appendStep(prev: SyncStep[], progress: SyncProgress): SyncStep[] {
-  const last = prev[prev.length - 1];
-  const same =
-    last &&
-    last.phase === progress.phase &&
-    last.accountName === progress.accountName &&
-    last.message === progress.message;
-  const incoming: SyncStep = { ...progress, ts: new Date().toISOString(), status: "active" };
-  if (same) return [...prev.slice(0, -1), { ...last, ...incoming }];
-  if (last) return [...prev.slice(0, -1), { ...last, status: "done" }, incoming];
-  return [incoming];
 }

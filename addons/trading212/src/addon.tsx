@@ -1,75 +1,39 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import type { AddonContext, AddonEnableFunction } from "@wealthfolio/addon-sdk";
-import { Icons } from "@wealthfolio/ui";
-import React from "react";
+import type { AddonEnableFunction } from "@wealthfolio/addon-sdk";
+import { registerPages } from "@wf-addons/kit";
+import { ADDON_ID, ROUTE_DASHBOARD, ROUTE_SETTINGS } from "./constants";
+import { ensureMigrated } from "./hooks/use-config";
+import { startAutoSync } from "./lib/auto-sync";
 import DashboardPage from "./pages/dashboard-page";
 import SettingsPage from "./pages/settings-page";
-import { startAutoSync } from "./lib/auto-sync";
 
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      staleTime: 1000 * 60 * 5,
-      gcTime: 1000 * 60 * 10,
-    },
-  },
-});
+const enable: AddonEnableFunction = (ctx) => {
+  registerPages(ctx, ADDON_ID, [
+    { id: ROUTE_DASHBOARD, component: DashboardPage },
+    { id: ROUTE_SETTINGS, path: "settings", component: SettingsPage },
+  ]);
 
-const enable: AddonEnableFunction = (context) => {
-  context.api.logger.info("Trading 212 addon enabling");
-
-  const addedItems: { remove: () => void }[] = [];
-  let autoSync: { stop: () => void } | undefined;
-
-  try {
-    const sidebarItem = context.sidebar.addItem({
-      id: "trading212",
-      label: "Trading 212",
-      icon: <Icons.TrendingUp size={16} weight="duotone" />,
-      route: "/addons/trading212",
-      order: 161,
-    });
-    addedItems.push(sidebarItem);
-
-    const wrap = (Component: React.ComponentType<{ ctx: AddonContext }>) => () => (
-      <QueryClientProvider client={queryClient}>
-        <Component ctx={context} />
-      </QueryClientProvider>
-    );
-
-    context.router.add({
-      path: "/addons/trading212",
-      component: React.lazy(() => Promise.resolve({ default: wrap(DashboardPage) })),
-    });
-
-    context.router.add({
-      path: "/addons/trading212/settings",
-      component: React.lazy(() => Promise.resolve({ default: wrap(SettingsPage) })),
-    });
-
-    // Refresh already-synced accounts in the background (≈ daily + on portfolio
-    // refresh) so HOLDINGS snapshots build a history without a manual click.
-    autoSync = startAutoSync(context);
-
-    context.api.logger.info("Trading 212 addon enabled");
-  } catch (error) {
-    context.api.logger.error(
-      "Failed to enable Trading 212 addon: " + (error as Error).message,
-    );
-    throw error;
-  }
-
-  context.onDisable(() => {
-    context.api.logger.info("Trading 212 addon disabling");
-    autoSync?.stop();
-    addedItems.forEach((item) => {
-      try {
-        item.remove();
-      } catch (err) {
-        context.api.logger.error("Error removing item: " + (err as Error).message);
+  // v1.x kept everything — including the connections list, settings and sync state — in
+  // the keyring, with the API key + secret inline and a proxy URL. Move it to the v2
+  // layout (credentials in a per-connection secret, the rest in add-on storage).
+  ensureMigrated(ctx).then(
+    (report) => {
+      if (report.migrated) {
+        ctx.api.logger.info(
+          `Trading 212 v1 → v2 migration done${
+            report.needsCredentials > 0
+              ? `; ${report.needsCredentials} connection(s) need the API key ID + secret re-entered`
+              : ""
+          }.`,
+        );
       }
-    });
-  });
+    },
+    (err) => ctx.api.logger.warn(`Trading 212 migration failed: ${(err as Error).message}`),
+  );
+
+  // Refresh already-synced accounts in the background (≈ daily + on portfolio refresh)
+  // so HOLDINGS snapshots build a history without a manual click.
+  const autoSync = startAutoSync(ctx);
+  ctx.onDisable(() => autoSync.stop());
 };
 
 export default enable;

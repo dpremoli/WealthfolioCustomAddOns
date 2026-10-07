@@ -1,9 +1,10 @@
-import type { AddonContext } from "@wealthfolio/addon-sdk";
 import { Button, Card, CardContent, EmptyPlaceholder, Icons } from "@wealthfolio/ui";
-import { PageShell } from "../components/page-shell";
+import { addonRoute, type AddonPageProps } from "@wf-addons/kit";
+import { PageShell } from "@wf-addons/kit/ui";
+import { ADDON_ID } from "../constants";
 
-export default function DashboardPage({ ctx }: { ctx: AddonContext }) {
-  const openImport = () => ctx.api.navigation.navigate("/addons/revolut/import");
+export default function DashboardPage({ ctx }: AddonPageProps) {
+  const openImport = () => ctx.api.navigation.navigate(addonRoute(ADDON_ID, "import"));
 
   return (
     <PageShell

@@ -1,11 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ActivityImport } from "@wealthfolio/addon-sdk";
-import {
-  mapTransactionToActivity,
-  mapType,
-  openingBalanceActivity,
-  selectNewActivities,
-} from "./mapper";
+import { selectNewActivities } from "@wf-addons/kit";
+import { mapTransactionToActivity, mapType, openingBalanceActivity } from "./mapper";
 import type { RevolutTransaction } from "../types";
 
 function tx(overrides: Partial<RevolutTransaction> = {}): RevolutTransaction {
@@ -178,7 +174,8 @@ describe("openingBalanceActivity", () => {
   });
 });
 
-describe("selectNewActivities", () => {
+// Regression coverage for the shared reconciler with real Revolut shapes.
+describe("selectNewActivities (kit) with Revolut rows", () => {
   function act(over: Partial<ActivityImport> = {}): ActivityImport {
     return {
       id: "x",
@@ -206,8 +203,8 @@ describe("selectNewActivities", () => {
   it("adds nothing on a re-import (account already holds both)", () => {
     const desired = [act({ date: "2022-09-16T10:00:43.000Z" }), act({ date: "2022-09-16T15:50:29.000Z" })];
     const existing = [
-      { activityType: "DEPOSIT", date: "2022-09-16T00:00:00.000Z", amount: "1000", comment: "Withdrawing savings" },
-      { activityType: "DEPOSIT", date: "2022-09-16T00:00:00.000Z", amount: "1000", comment: "Withdrawing savings" },
+      { activityType: "DEPOSIT", date: "2022-09-16T00:00:00.000Z", amount: "1000", comment: "Withdrawing savings", currency: "GBP" },
+      { activityType: "DEPOSIT", date: "2022-09-16T00:00:00.000Z", amount: "1000", comment: "Withdrawing savings", currency: "GBP" },
     ];
     expect(selectNewActivities(desired, existing)).toHaveLength(0);
   });
@@ -215,7 +212,7 @@ describe("selectNewActivities", () => {
   it("imports only the surplus when the account holds some but not all", () => {
     const desired = [act(), act(), act()]; // 3 identical-key rows
     const existing = [
-      { activityType: "DEPOSIT", date: "2022-09-16T00:00:00.000Z", amount: 1000, comment: "Withdrawing savings" },
+      { activityType: "DEPOSIT", date: "2022-09-16T00:00:00.000Z", amount: 1000, comment: "Withdrawing savings", currency: "GBP" },
     ];
     expect(selectNewActivities(desired, existing)).toHaveLength(2);
   });
@@ -234,7 +231,7 @@ describe("selectNewActivities", () => {
   it("handles existing rows whose date is a Date object", () => {
     const desired = [act({ date: "2022-09-16T10:00:43.000Z" })];
     const existing = [
-      { activityType: "DEPOSIT", date: new Date("2022-09-16T00:00:00.000Z"), amount: 1000, comment: "Withdrawing savings" },
+      { activityType: "DEPOSIT", date: new Date("2022-09-16T00:00:00.000Z"), amount: 1000, comment: "Withdrawing savings", currency: "GBP" },
     ];
     expect(selectNewActivities(desired, existing)).toHaveLength(0);
   });

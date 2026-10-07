@@ -1,5 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
+  accountPerActivityRate,
+  chargesInActivityCurrency,
   mapDividendToActivity,
   mapOrderToActivity,
   mapPositionToHolding,
@@ -21,7 +23,13 @@ describe("mapOrderToActivity", () => {
       filledAt: "2026-04-01T10:00:00.000Z",
       price: 170.5,
       quantity: 3,
-      walletImpact: { currency: "USD", fxRate: 1.27, taxes: [{ quantity: 0.5 }] },
+      // Account is GBP, the instrument trades in USD: 3 × 170.5 = 511.5 USD ≈ £402.8 at 1.27.
+      walletImpact: {
+        currency: "GBP",
+        fxRate: 1.27,
+        netValue: -403.3,
+        taxes: [{ quantity: 0.5, currency: "GBP" }],
+      },
     },
   };
 
@@ -33,9 +41,54 @@ describe("mapOrderToActivity", () => {
     expect(a.unitPrice).toBe(170.5);
     expect(a.symbol).toBe("AAPL");
     expect(a.currency).toBe("USD");
-    expect(a.fee).toBe(0.5);
-    expect(a.fxRate).toBe(1.27);
     expect(a.date).toBe("2026-04-01T10:00:00.000Z");
+    // Cross-currency (USD instrument, GBP account): Wealthfolio wants account-per-activity
+    // (GBP per USD ≈ 0.787), and the GBP charge re-expressed in the activity currency.
+    expect(a.fxRate).toBeCloseTo(1 / 1.27, 6);
+    expect(a.fee).toBeCloseTo(0.635, 6);
+  });
+
+  it("omits `amount` on trades so Wealthfolio derives the final cash (qty × price ± fee)", () => {
+    const buy = mapOrderToActivity(baseOrder, "acc-1", "AAPL")!;
+    const sell = mapOrderToActivity(
+      { ...baseOrder, order: { ...baseOrder.order!, side: "SELL" } },
+      "acc-1",
+      "AAPL",
+    )!;
+    expect("amount" in buy).toBe(false);
+    expect("amount" in sell).toBe(false);
+    expect(sell.fee).toBeCloseTo(0.635, 6);
+  });
+
+  it("same-currency trade: no fx rate, fee passed through unchanged", () => {
+    const gbp: HistoricalOrder = {
+      order: { ...baseOrder.order!, currency: "GBP" },
+      fill: {
+        ...baseOrder.fill!,
+        walletImpact: { currency: "GBP", fxRate: 1, netValue: -512, taxes: [{ quantity: 1.5, currency: "GBP" }] },
+      },
+    };
+    const a = mapOrderToActivity(gbp, "acc-1", "RR.L")!;
+    expect(a.fxRate).toBeUndefined();
+    expect(a.fee).toBe(1.5);
+    expect("amount" in a).toBe(false);
+  });
+
+  it("does not trust the direction of Trading 212's rate: picks the one matching the cash total", () => {
+    // Same trade, but the rate arrives pointing the other way (GBP per USD).
+    const inverted: HistoricalOrder = {
+      ...baseOrder,
+      fill: { ...baseOrder.fill!, walletImpact: { ...baseOrder.fill!.walletImpact!, fxRate: 1 / 1.27 } },
+    };
+    expect(mapOrderToActivity(inverted, "acc-1", "AAPL")!.fxRate).toBeCloseTo(1 / 1.27, 6);
+  });
+
+  it("cross-currency without a cash total: leaves the trade in its own currency (no guessed rate)", () => {
+    const noTotal: HistoricalOrder = {
+      ...baseOrder,
+      fill: { ...baseOrder.fill!, walletImpact: { currency: "GBP", fxRate: 1.27 } },
+    };
+    expect(mapOrderToActivity(noTotal, "acc-1", "AAPL")!.fxRate).toBeUndefined();
   });
 
   it("maps a sell order to a SELL activity", () => {
@@ -72,12 +125,24 @@ describe("mapDividendToActivity", () => {
     expect(a.symbol).toBe("AAPL");
     expect(a.currency).toBe("GBP");
     expect(a.comment).toBe("Ordinary");
+    expect("fee" in a).toBe(false);
+  });
+
+  it("dividend/interest amount is the final cash and is rounded to cents", () => {
+    expect(mapDividendToActivity({ ...div, amount: 10.005 }, "acc-1", "AAPL").amount).toBe(10.01);
+    expect(mapDividendToActivity({ ...div, amount: -3 }, "acc-1", "AAPL").amount).toBe(3);
   });
 
   it("maps interest to an INTEREST activity with a $CASH symbol", () => {
     const a = mapDividendToActivity({ ...div, type: "INTEREST", reference: "INT1" }, "acc-1", null);
     expect(a.activityType).toBe("INTEREST");
     expect(a.symbol).toBe("$CASH-GBP");
+    expect(a.amount).toBe(12.34);
+  });
+
+  it("uses the kit's cash symbol (currency upper-cased)", () => {
+    const a = mapDividendToActivity({ ...div, type: "INTEREST", reference: "INT2", currency: "eur" }, "acc-1", null);
+    expect(a.symbol).toBe("$CASH-EUR");
   });
 });
 
@@ -102,6 +167,15 @@ describe("mapTransactionToActivity", () => {
     const a = mapTransactionToActivity({ ...base, type: "WITHDRAW", amount: -500 }, "acc-1");
     expect(a.activityType).toBe("WITHDRAWAL");
     expect(a.amount).toBe(500);
+  });
+
+  it("plain cash rows carry the ledger in `amount` and never a separate fee", () => {
+    for (const type of ["DEPOSIT", "WITHDRAW", "FEE", "TRANSFER"] as const) {
+      const a = mapTransactionToActivity({ ...base, type, amount: type === "WITHDRAW" ? -25.5 : 25.5 }, "acc-1");
+      expect(a.amount).toBe(25.5);
+      expect("fee" in a).toBe(false);
+      expect(a.symbol).toBe("$CASH-GBP");
+    }
   });
 
   it("maps a fee", () => {
@@ -188,5 +262,35 @@ describe("mergeHoldingsBySymbol", () => {
     expect(merged).toHaveLength(1);
     expect(merged[0].quantity).toBe("20");
     expect(merged[0].averageCost).toBeUndefined();
+  });
+});
+
+describe("accountPerActivityRate / chargesInActivityCurrency", () => {
+  it("returns undefined for a missing, unit or invalid rate, or when no implied rate is available", () => {
+    expect(accountPerActivityRate(undefined, 0.8)).toBeUndefined();
+    expect(accountPerActivityRate(1, 1)).toBeUndefined();
+    expect(accountPerActivityRate(-2, 0.5)).toBeUndefined();
+    expect(accountPerActivityRate(1.27, undefined)).toBeUndefined();
+  });
+
+  it("chooses whichever of rate / 1-over-rate matches the implied rate", () => {
+    expect(accountPerActivityRate(1.27, 0.79)).toBeCloseTo(1 / 1.27, 8);
+    expect(accountPerActivityRate(0.7874, 0.79)).toBeCloseTo(0.7874, 8);
+  });
+
+  it("converts only foreign-currency charges and rounds sensibly", () => {
+    // 2 GBP charge on a USD trade at 0.8 GBP/USD → 2.5 USD; a USD charge is untouched.
+    expect(
+      chargesInActivityCurrency(
+        [
+          { amount: 2, currency: "GBP" },
+          { amount: 1, currency: "USD" },
+        ],
+        "USD",
+        0.8,
+      ),
+    ).toBe(3.5);
+    // Without a rate the sum is just rounded to cents.
+    expect(chargesInActivityCurrency([{ amount: 0.1 }, { amount: 0.2 }], "GBP", undefined)).toBe(0.3);
   });
 });

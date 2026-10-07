@@ -1,32 +1,68 @@
 {
   "id": "monzo-addon",
   "name": "Monzo Bank Sync",
-  "version": "1.2.1",
-  "description": "Automatically sync Monzo Bank transactions into your Wealthfolio cash accounts.",
+  "version": "2.0.0",
+  "description": "Sync Monzo Bank transactions straight into your Wealthfolio cash accounts, for the spending module. No proxy server needed.",
   "author": "dpremoli",
-  "main": "addon.js",
-  "sdkVersion": "3.3.0",
+  "license": "GPL-3.0-only",
+  "main": "dist/addon.js",
+  "sdkVersion": "3.9.0",
+  "minWealthfolioVersion": "3.9.0",
   "enabled": true,
+  "keywords": ["monzo", "bank", "sync", "oauth", "spending"],
+  "network": {
+    "allowedHosts": ["api.monzo.com"]
+  },
+  "contributes": {
+    "routes": [
+      { "id": "monzo" },
+      { "id": "monzo-settings", "path": "settings" },
+      { "id": "monzo-import", "path": "import" }
+    ],
+    "links": {
+      "sidebar": [
+        {
+          "id": "monzo",
+          "route": "monzo",
+          "label": "Monzo Sync",
+          "icon": "bank",
+          "order": 160
+        }
+      ]
+    }
+  },
+  "hostDependencies": {
+    "@tanstack/react-query": "^5.90.0",
+    "@wealthfolio/addon-sdk": "^3.9.0",
+    "@wealthfolio/ui": "^3.9.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
   "permissions": [
     {
       "category": "accounts",
       "functions": ["getAll", "create"],
-      "purpose": "Map Monzo accounts to Wealthfolio cash accounts"
+      "purpose": "List your accounts and create a cash account for each Monzo account"
     },
     {
       "category": "activities",
-      "functions": ["import", "checkImport"],
-      "purpose": "Import Monzo transactions as cash activities"
+      "functions": ["getAll", "import"],
+      "purpose": "Import Monzo transactions and reconcile against existing ones so re-syncs add nothing"
     },
     {
       "category": "secrets",
-      "functions": ["set", "get", "delete"],
-      "purpose": "Store Monzo OAuth tokens and account mapping securely"
+      "functions": ["set", "get", "delete", "use"],
+      "purpose": "Store your Monzo client secret and OAuth tokens in the keyring, and let the host attach the access token to Monzo API requests"
+    },
+    {
+      "category": "network",
+      "functions": ["request"],
+      "purpose": "Call the Monzo API (api.monzo.com) to exchange OAuth codes and fetch accounts and transactions"
     },
     {
       "category": "ui",
-      "functions": ["sidebar.addItem", "router.add"],
-      "purpose": "Add Monzo Sync navigation and configuration pages"
+      "functions": ["router.add", "navigation.navigate"],
+      "purpose": "Show the Monzo dashboard, settings and CSV import pages"
     }
   ]
 }

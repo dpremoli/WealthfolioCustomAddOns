@@ -5,76 +5,106 @@ install/deploy instructions see [README.md](README.md).
 
 ## Overview
 
-Two cooperating pieces:
+One piece, running in Wealthfolio's sandbox:
 
 ```
-┌─────────────────────────────┐         ┌──────────────────────┐        ┌──────────────────────┐
-│ Wealthfolio (host app)      │         │ Stateless proxy      │        │ Trading 212 API      │
-│                             │         │ (FastAPI, main.py)   │        │ live/demo.trading212 │
-│  ┌───────────────────────┐  │  HTTPS  │                      │ HTTPS  │                      │
-│  │ Trading 212 add-on    │──┼────────▶│  forwards request +  │───────▶│  /api/v0/equity/...  │
-│  │ (addon.js, in webview)│  │  + key  │  Authorization hdr   │        │                      │
-│  └───────────────────────┘  │◀────────│  (holds nothing)     │◀───────│                      │
-│   keyring  ▲  market-data    │  JSON   └──────────────────────┘        └──────────────────────┘
-│   (API key)│  searchTicker   │
-└────────────┴────────────────┘
+┌──────────────────────────────────────────┐            ┌──────────────────────┐
+│ Wealthfolio (host app)                   │            │ Trading 212 API      │
+│                                          │            │ live/demo.trading212 │
+│  ┌────────────────────────────────────┐  │   HTTPS    │                      │
+│  │ Trading 212 add-on (sandboxed      │──┼───────────▶│  /api/v0/equity/...  │
+│  │ iframe, no fetch, opaque origin)   │  │ network    │                      │
+│  └────────────────────────────────────┘  │ .request   │  signed CSV export   │
+│   storage ▲   secrets ▲   market-data     │ (+ auth:   │  URL → *.amazonaws   │
+│  (settings,│  (API key │  searchTicker    │  secretKey)│                      │
+│   sync     │   ID +    │                  │◀───────────│                      │
+│   state)   │   secret) │                  │   JSON/CSV │                      │
+└────────────┴───────────┴──────────────────┘            └──────────────────────┘
 ```
 
-- **The add-on** runs inside Wealthfolio's webview. It owns all state: the API
-  key (in the OS keyring), the account mapping, the sync watermark, the symbol
-  cache. It calls the host SDK (`ctx.api.*`) for accounts, activity import,
-  symbol search, and secret storage.
-- **The proxy** exists for one reason: Trading 212's API does not send permissive
-  CORS headers, so a browser/webview cannot call it directly. The proxy forwards
-  the add-on's request (including the `Authorization` header the add-on supplies)
-  to Trading 212. It is stateless and credential-free.
+- **The add-on** owns all state: connections, sync watermarks and the symbol cache (add-on
+  storage), and the API credentials (keyring secrets). It calls the host SDK (`ctx.api.*`)
+  for accounts, activity import, snapshots, symbol search, storage and secrets.
+- **Network** — Wealthfolio 3.6+ runs add-ons in a sandboxed iframe (opaque origin, CSP
+  `connect-src 'none'`): no `fetch`, no `localStorage`. The only way out is
+  `ctx.api.network.request({ url, method, headers, body, auth, timeoutSecs })`, which the
+  *host* executes server-side and returns `{ status, headers, body: string }`. Rules that shape
+  the client: HTTPS only; the host must be in manifest `network.allowedHosts` (wildcards
+  allowed) and approved at install; private/LAN hosts blocked; **redirects are not followed**;
+  request body ≤ 1 MB; **response body ≤ 2 MB** (larger → a thrown "…response body is too
+  large"); timeout default 10 s, max 120 s; non-2xx is returned, not thrown.
+- **No proxy.** v1.x needed a stateless Python CORS proxy because a webview can't call
+  Trading 212 directly. The host performs the request, so CORS is moot and the proxy (and its
+  Docker/Unraid deployment) is gone.
 
-### Why this split?
+### Why credentials never touch add-on code
 
-The API key grants full read access to the user's account, so it must be stored
-securely (Wealthfolio's encrypted keyring) and never baked into a server. Keeping
-the proxy stateless means the only place the credential lives is the keyring; the
-proxy just relays bytes and can be deployed anywhere without secret management.
+The add-on may **not** set an `Authorization` header. Instead it names a secret:
+`auth: { type: "basic", secretKey: "t212_auth_<id>" }`, and the host injects
+`Authorization: Basic <secret>` (needs the `secrets` → `use` permission). The stored secret is
+therefore already the base64 of `keyId:secret`. The add-on writes it once (on connect /
+"Update key") and never reads it back; only the last 4 characters of the key ID are kept in
+plain storage for display. Consequence: the old single-value `Authorization: <key>` scheme
+can no longer be expressed, so a key ID **and** secret are required.
 
 ## Module responsibilities
 
 | Path | Responsibility |
 |------|----------------|
-| `main.py` | Stateless FastAPI proxy. Forwards 6 read endpoints; selects upstream host from a fixed `live`/`demo` allow-list; passes through `x-ratelimit-*` headers. |
-| `addon/src/addon.tsx` | Add-on entry point. Registers the sidebar item and the dashboard/settings routes. |
-| `addon/src/types.ts` | TypeScript shapes for the Trading 212 payloads we consume + internal `T212Settings`/`T212Connection`/`SyncResult`/`MultiSyncResult`. |
-| `addon/src/lib/proxy-client.ts` | HTTP client to the proxy: builds the auth header, retries on `429`, exposes per-endpoint + cursor-paging methods. One instance per connection. |
-| `addon/src/lib/symbol-resolver.ts` | Maps a Trading 212 ticker to a Wealthfolio symbol via `market.searchTicker`, with in-memory + persisted caching. Shared across all connections (mapping is account-independent). |
-| `addon/src/lib/mapper.ts` | Pure functions: Trading 212 order/dividend/transaction → `ActivityImport` (take `accountId` as a param). |
-| `addon/src/hooks/use-config.ts` | All keyring reads/writes (shared settings, the connections list, per-connection sync state, shared symbol map) + one-time legacy migration. |
-| `addon/src/hooks/use-sync.ts` | Sync orchestration: `syncAll()` loops connections sequentially → fetch → resolve → map → `checkImport` → `import`. |
-| `addon/src/pages/settings-page.tsx` | Shared proxy/env settings, connected-accounts list, "Add account" form (Invest/ISA picker → editable name), per-row remove/reset. |
-| `addon/src/pages/dashboard-page.tsx` | "Sync All" button + per-account status/result cards. |
+| `src/addon.tsx` | Sandbox entry. `registerPages` (dashboard + settings), kicks off the v1→v2 migration, starts the auto-sync scheduler, stops it in `ctx.onDisable`. Sidebar link + routes are declared in `manifest.json`. |
+| `src/constants.ts` | `ADDON_ID`, route ids, storage/secret key names (`syncKey`, `authSecretKey`), the v1 key names, API base URLs. |
+| `src/types.ts` | TypeScript shapes for the Trading 212 payloads we consume + internal `T212Settings`/`T212Connection`/`SyncResult`/`MultiSyncResult`. |
+| `src/lib/t212-client.ts` | The API client on the kit's `brokeredRequest`: per-endpoint + cursor-paging methods, 429/transport retry, export lifecycle with **2 MB window splitting**, signed-URL download. One instance per connection. |
+| `src/lib/symbol-resolver.ts` | Maps a Trading 212 ticker to a Wealthfolio symbol via `market.searchTicker`, with in-memory + persisted caching. Shared across all connections (mapping is account-independent). |
+| `src/lib/mapper.ts` / `csv.ts` | Pure functions: Trading 212 order/dividend/transaction (JSON) and export CSV rows → `ActivityImport` (take `accountId` as a param). Final-cash and FX rules live here. |
+| `src/lib/auto-sync.ts` | Background scheduler (startup, hourly, `onUpdateComplete`). |
+| `src/hooks/use-config.ts` | All storage/secret reads/writes (shared settings, connections list, credentials, per-connection sync state, shared symbol map) + the one-time v1→v2 migration (`ensureMigrated`). |
+| `src/hooks/use-sync.ts` | Sync orchestration: `runSyncAll()` loops connections sequentially → fetch → resolve → map → `checkImport` → `import`; `useSync` wraps it for React. |
+| `src/pages/settings-page.tsx` | Shared env/auto-sync/card settings, connected-accounts list (health, update key, reset, remove), "Add account" form (Invest/ISA picker → editable name, key ID + secret). |
+| `src/pages/dashboard-page.tsx` | "Sync All" button, "needs credentials" banner, per-account status/result cards. |
+| `@wf-addons/kit` (+ `/ui`) | Shared: `registerPages`/`addonRoute`, `brokeredRequest`/`withQuery`/`retryDelayMs`, `jsonStore`/`migrateSecretsToStorage`, `cashSymbol`/`round2`, `appendStep`/`markLastDone`, `PageShell`/`StatTiles`/`SyncActivity`, `relativeTime`. |
 
 ## Trading 212 API specifics
 
-Base URLs (chosen by the `env` query param the add-on sends to the proxy):
-`https://live.trading212.com` and `https://demo.trading212.com`. All endpoints
-are under `/api/v0/equity`.
+Base URLs (chosen by the connection's environment): `https://live.trading212.com` and
+`https://demo.trading212.com`. All endpoints are under `/api/v0/equity`.
 
-**Authentication** — two schemes, both supported. `proxy-client.ts#buildAuthHeader`
-emits HTTP Basic (`base64(keyId:secret)`) when an API secret is present, otherwise
-the raw key (legacy). The proxy forwards whichever header it receives.
+**Authentication** — HTTP Basic from API key ID + secret, injected by the host from the
+connection's `t212_auth_<id>` secret (see above). A 401 is mapped to `UNAUTHORIZED`
+("Trading 212 rejected this API key"); keys are environment-specific (Live vs Demo).
 
-**Endpoints consumed** (all GET, all read-only scopes):
+**Endpoints consumed** (read-only scopes; paths relative to `/api/v0/equity`):
 
-| Proxy path | Upstream | Used for |
-|------------|----------|----------|
-| `/account/summary` | `equity/account/summary` | Account id + primary currency (connect/account-create). |
-| `/positions` | `equity/positions` | (Reserved — not used in the sync path.) |
-| `/instruments` | `equity/metadata/instruments` | (Reserved — heavy/cached; not used in the sync path.) |
-| `/orders` | `equity/history/orders` | Filled trades → BUY/SELL. |
-| `/dividends` | `equity/history/dividends` | Dividends + interest. |
-| `/transactions` | `equity/history/transactions` | Deposits/withdrawals/fees/transfers. |
+| Path | Used for |
+|------|----------|
+| `GET account/summary` | Account id + primary currency (connect/account-create, health probe, HOLDINGS cash). |
+| `GET positions` | HOLDINGS snapshot. |
+| `GET metadata/instruments` | Optional HOLDINGS enrichment only. ~5 MB upstream → **exceeds the 2 MB cap**, so it fails with "too large"; only attempted when a position lacks ISIN/currency, and a failure is just logged. |
+| `GET history/orders` | Filled trades → BUY/SELL. |
+| `GET history/dividends` | Dividends + interest. |
+| `GET history/transactions` | Deposits/withdrawals/fees/transfers. |
+| `GET/POST history/exports` | CSV export lifecycle (full-history backfill + card rows). The finished report's `downloadLink` is a signed storage URL downloaded **without** `auth`. |
 
-**Rate limits** are strict and per-endpoint (instruments 1/50s, history 6/min,
-account 1/5s). `proxy-client.ts` retries once on `429`, honoring `Retry-After` /
-`x-ratelimit-reset`. A first sync over a long history can therefore take a while.
+**Rate limits** are strict and per-endpoint (instruments 1/50s, history 6/min, account 1/5s,
+export POST 1/30s, export list 1/min). The kit's `brokeredRequest` waits out a `429` (up to 12
+times) using `retry-after` or `x-ratelimit-reset`, and retries transient transport errors with
+backoff; policy errors from the host ("not approved", "too large", secret problems) are not
+retried. A first sync over a long history can therefore take a while. Timeouts: 30 s for JSON
+endpoints, 60 s for export endpoints and the CSV download.
+
+**The 2 MB response cap and export window splitting.** A one-year CSV for an active trader can
+exceed 2 MB. `Trading212Client.runExport` catches the host's "too large" error, **splits the
+window in half** and exports each half separately (recursively, down to ≥ 7 days per window),
+merging the CSVs under one header (rows on the split boundary repeat; callers dedupe by
+activity id). A report whose CSV was too large is remembered for the call and never reused for
+the halves (otherwise a covering report would loop). Below ~14 days the window can't be
+halved and the sync reports a clear error (a failed first window falls back to JSON paging).
+
+**Export download host.** The `downloadLink` host isn't documented, so `*.amazonaws.com`
+is declared alongside `*.trading212.com`. If the broker rejects the host as not approved, the
+error names it (`Trading 212 export download host "x" is not approved…`) so it can be added to
+`network.allowedHosts`. Because the broker follows no redirects, the client follows up to 3 `3xx`
+hops itself — still without credentials.
 
 **Pagination** is cursor-based: each list response carries `items[]` and a
 `nextPagePath` string. `cursorFromNextPage()` extracts the `cursor` query value to
@@ -90,8 +120,11 @@ account without aborting the rest. After the loop the symbol cache is written **
 
 `syncOne(ctx, settings, conn, resolver)`:
 
-1. Build a `Trading212ProxyClient` from `connectionConfig(settings, conn)`; load this
-   connection's `lastSync` watermark + imported-ref set from `t212_sync_{id}`.
+0. A connection flagged `needsCredentials` (legacy single-key, see migration) is skipped with a
+   "re-enter key ID + secret" result — no network calls.
+1. Build a `Trading212Client` from `connectionConfig(settings, conn)` (env + the connection's
+   secret name); load this connection's `lastSync` watermark + imported-ref set from
+   `t212_sync_{id}` (add-on storage).
 2. **Orders** and **dividends**: page newest-first via `collectSince`, stopping once
    a record predates `lastSync`. **Transactions**: use the server-side `time` filter
    from `lastSync`, then follow the cursor.
@@ -113,7 +146,8 @@ setup** (the "Sync mode" picker; default **Holdings**) and stored on the connect
 
 - **TRANSACTIONS** — the full flow above: CSV-export backfill on the first sync, JSON
   incrementals thereafter. Gives complete history/performance.
-- **HOLDINGS** — `syncHoldings()` fetches `account/summary` + `positions` and writes a
+- **HOLDINGS** — `syncHoldings()` fetches `account/summary` + `positions` (and, only if a
+  position lacks ISIN/currency, tries the over-cap instruments feed) and writes a
   single **snapshot** via `snapshots.save(accountId, holdings, cashBalances)` — instant,
   no history, no rate-limited backfill. Positions whose symbol can't be resolved are
   counted as `unresolved` and omitted.
@@ -149,46 +183,61 @@ connection due when it has a prior `lastSync` *and* that sync was on an earlier 
 Both modes participate (HOLDINGS gets a fresh daily snapshot; TRANSACTIONS a cheap JSON
 incremental). The core sync was lifted out of the React hook into the framework-agnostic
 `runSyncAll(ctx, { onlyConnectionIds })` so both the dashboard button and the scheduler share
-it. Background runs pass an empty `confirmedModeSwitches`, so a drifted account is **skipped**
+it. Connections flagged `needsCredentials` are never due. Background runs pass an empty `confirmedModeSwitches`, so a drifted account is **skipped**
 (never cleared) until the user confirms in the dashboard. A re-entrancy guard and the
 `autoSync` setting (opt-out, default on, toggled in Settings) gate the whole thing.
 
 ### UI (`pages/`, `components/`)
 
-The two pages render through a shared `PageShell` (Phosphor icon + heading + actions slot) and
+The two pages render through the kit's shared `PageShell` (Phosphor icon + heading + actions slot) and
 use `@wealthfolio/ui` primitives (`Switch`, `ToggleGroup`, `Tabs`, `Tooltip`, `ScrollArea`,
 `EmptyPlaceholder`, `AlertFeedback`, `ActionConfirm`, semantic `Badge` variants) to match the
 first-party look.
 
-- **`SyncActivity`** (`components/sync-activity.tsx`) renders the live sync view: a 4-node phase
+- **`SyncActivity`** (kit, `@wf-addons/kit/ui`, given the four T212 phases) renders the live sync view: a 4-node phase
   stepper (Export → Match → Import → Done) driven by the current `SyncProgress.phase`, the
   determinate/indeterminate `Progress` bar, and a scrolling **activity feed** of every step the
-  sync emitted. The feed is built from `useSync`'s `steps: SyncStep[]`, populated by appending
-  each `onProgress` event (consecutive duplicates coalesced so chunked imports show as one row
-  with a live `current/total`).
-- **`ConnectionCard`** shows per-account results with `StatTiles` (Imported / Duplicates /
+  sync emitted. The feed is built from `useSync`'s `steps: SyncStep[]`, populated by the kit's `appendStep`
+  for each `onProgress` event (consecutive duplicates coalesced so chunked imports show as one row
+  with a live `current/total`; the account name is prefixed onto the message).
+- **`ConnectionCard`** shows per-account results with the kit's `StatTiles` (Imported / Duplicates /
   Unmatched / Card) on top and a **Summary / Symbols / Log** tab block. *Summary* is the per-
   type activity breakdown (`SyncResult.breakdown`, populated from the existing `tally`).
   *Symbols* renders the persisted **symbol map** (account-independent; from `getSymbolMap`) as
   matched ticker → symbol@exchange rows plus the known unresolved set, so the user can see what
   resolved and what didn't without reading the raw log. *Log* keeps the raw verbose lines.
-- **`ConnectionHealth`** runs the existing `getAccountSummary` probe and surfaces `ok`/`auth`/
-  `err` as semantic Badge variants (`success`/`destructive`/`warning`) with a coloured dot.
-- Relative timestamps (`relativeTime`, `lib/format.ts`) are used everywhere a last-sync time is
+- **`ConnectionHealth`** runs the `getAccountSummary` probe and surfaces `ok`/`auth`/`err` (and
+  `creds` for a flagged connection, without a request) as semantic Badge variants with a
+  coloured dot.
+- Relative timestamps (`relativeTime`, from the kit) are used everywhere a last-sync time is
   shown, with the absolute time on a `Tooltip`.
 
-### Activity mapping (`mapper.ts`)
+### Activity mapping (`mapper.ts`, `csv.ts`) and Wealthfolio 3.8 "final cash"
 
-| Trading 212 source | `activityType` | Notes |
-|--------------------|----------------|-------|
-| Filled order, `side: BUY` | `BUY` | `quantity`/`unitPrice` from the fill; `fee` = Σ taxes; non-`TRADE` fills (splits/distributions) are skipped. |
-| Filled order, `side: SELL` | `SELL` | |
-| Dividend, `type !== INTEREST` | `DIVIDEND` | symbol resolved from the embedded instrument. |
-| Dividend, `type === INTEREST` | `INTEREST` | no symbol. |
-| Transaction `DEPOSIT` | `DEPOSIT` | |
-| Transaction `WITHDRAW` | `WITHDRAWAL` | amount stored positive. |
-| Transaction `FEE` | `FEE` | |
-| Transaction `TRANSFER` | `TRANSFER_IN` / `TRANSFER_OUT` | by sign of amount. |
+Since 3.8 an activity's `amount` is the **final cash** (fees/taxes included) and runtime code
+uses it as-is — nothing re-derives it. What each mapping emits:
+
+| Trading 212 source | `activityType` | `amount` | Notes |
+|--------------------|----------------|----------|-------|
+| Filled order, `side: BUY` | `BUY` | **omitted** | `quantity`/`unitPrice` from the fill; `fee` = Σ charges. Wealthfolio derives `amount` = qty × price + fee. Non-`TRADE` fills (splits/distributions) are skipped. |
+| Filled order, `side: SELL` | `SELL` | **omitted** | derived qty × price − fee. |
+| Dividend, `type !== INTEREST` | `DIVIDEND` | cash paid (net of withholding) | symbol resolved from the embedded instrument. |
+| Dividend, `type === INTEREST` | `INTEREST` | cash paid | `cashSymbol(ccy)`. |
+| Transaction `DEPOSIT` | `DEPOSIT` | ledger amount | no separate `fee` is ever emitted for plain cash rows (a fee no longer reduces the balance). |
+| Transaction `WITHDRAW` | `WITHDRAWAL` | ledger amount (positive) | |
+| Transaction `FEE` | `FEE` | the fee | |
+| Transaction `TRANSFER` | `TRANSFER_IN` / `TRANSFER_OUT` | ledger amount (by sign) | |
+
+Trades deliberately omit `amount` rather than send a total, so the writer's own derivation is
+the single source of truth and charges can't be double-counted. All monetary fields are in the
+**activity currency**, so for a cross-currency trade (instrument currency ≠ account currency)
+the account-currency charges Trading 212 reports are converted into the activity currency, and
+`fxRate` is set to *account-currency units per activity-currency unit* (what Wealthfolio's
+`fx_rate` means; it then settles the trade's cash in the account currency). Trading 212's own
+rate direction differs between the exports we have seen, so `accountPerActivityRate` picks `rate`
+or `1/rate` by comparing with the rate implied by the trade's account-currency total, and
+returns no rate (the trade stays in its own currency) if it can't tell. Same-currency trades get
+no `fxRate`. Cash rows use the kit's `cashSymbol` (`$CASH-GBP`) and `round2`.
 
 Stable id scheme (drives idempotency): `t212-order-{orderId}`,
 `t212-div-{reference}`, `t212-txn-{reference}`.
@@ -274,7 +323,7 @@ without this the second leg would silently overwrite the first and its value
 would vanish; merging preserves the total.
 
 `SymbolResolver` caches each lookup (including known misses, stored as `""`) for
-the duration of a sync and persists the map to the keyring. Values are encoded
+the duration of a sync and persists the map to add-on storage. Values are encoded
 `"SYMBOL"` (no MIC) or `"SYMBOL|MIC"`; back-compat read-only for pre-v1.7.2
 entries. "Reset sync history" clears it.
 
@@ -299,57 +348,86 @@ T212 accounts ever shared a reference id and Wealthfolio's `checkImport` dedup t
 out to be global, the second could be dropped. T212 ids are effectively per-user-unique,
 so this is a documented, low-risk limitation rather than an observed problem.
 
+**Why not content reconciliation?** Other add-ons in the monorepo dedupe by matching row content
+(the kit's `selectNewActivities`). That doesn't work for trades here: Wealthfolio may store a
+*canonical* symbol different from the one imported (the resolver's pick vs the asset it settles
+on), so a content comparison would miss already-imported trades and double-import them. The
+stable-id watermark + per-connection imported refs + host `checkImport` model is kept instead.
+
 ## Security model
 
-- API key/secret live only in Wealthfolio's keyring (`ctx.api.secrets`), entered via
-  password fields, never logged.
-- The proxy stores no credentials and only ever connects to the fixed `live`/`demo`
-  allow-list — a caller cannot point it at an arbitrary host (no SSRF).
-- `.env` is git-ignored; the proxy needs no env credentials (only an optional `PORT`).
+- API key ID/secret live only in Wealthfolio's keyring (`ctx.api.secrets`), entered via
+  password fields, never logged, and **never read back by the add-on**: requests reference the
+  secret by name (`auth.secretKey`) and the host injects the header. The signed CSV download is
+  sent with no `auth` at all.
+- New credentials are verified under a temporary secret (`t212_auth_pending_<id>`, always
+  deleted) so a typo can't clobber working ones.
+- The add-on can only reach hosts declared in `manifest.network.allowedHosts`
+  (`*.trading212.com`, `*.amazonaws.com`), over HTTPS; there is no server component.
+- Connection records in storage hold only a masked last-4 of the key ID.
 
-## Stored keyring keys (`use-config.ts`)
+## Stored keys
+
+Add-on **storage** (`ctx.api.storage`, non-secret):
 
 | Key | Contents |
 |-----|----------|
-| `t212_settings` | `{ proxyUrl, env }` — shared by all connections |
-| `t212_connections` | `T212Connection[]` = `{ id, name, apiKey, apiSecret?, accountId }` |
-| `t212_sync_{id}` | Per-connection `{ lastSync, importedRefs[] }` |
-| `t212_symbol_map_v6` | Shared `{ ticker: "SYMBOL\|MIC" }` cache (`""` = known miss; bare `"SYMBOL"` = MIC unknown). v1–v5 are deleted by migration. |
+| `t212_settings` | `{ env, autoSync?, extractCard?, cardAccountType? }` — shared by all connections |
+| `t212_connections` | `T212Connection[]` = `{ id, name, accountId, keyIdLast4?, needsCredentials?, trackingMode?, kind?, cardAccountId? }` — **no key/secret** |
+| `t212_sync_{id}` | Per-connection `{ lastSync, importedRefs[], backfillCheckpoint?, cardLastSync? }` |
+| `t212_symbol_map_v6` | Shared `{ ticker: "SYMBOL\|MIC" }` cache (`""` = known miss; bare `"SYMBOL"` = MIC unknown). Older v1–v5 caches are deleted. |
 
-### Migration from the single-account layout
+**Secrets** (`ctx.api.secrets`, keyring):
 
-`migrateLegacyConfig()` runs once at page mount (dashboard + settings). If the legacy
-keys `t212_config` + `t212_account_id` exist and no `t212_connections`/`t212_settings`
-do, it writes `t212_settings`, creates one connection named `"Trading 212 (Invest)"`
-linked to the legacy account, copies `t212_last_sync`/`t212_imported_refs` into
-`t212_sync_{id}`, deletes the four legacy keys, and drops any prior symbol
-caches (`t212_symbol_map`, `t212_symbol_map_v2`, `t212_symbol_map_v3`,
-`t212_symbol_map_v4`, `t212_symbol_map_v5`) so v6 starts fresh. It is idempotent.
+| Key | Contents |
+|-----|----------|
+| `t212_auth_{id}` | base64(`keyId:secret`) for connection `{id}`; used only through `auth: { type: "basic", secretKey }` |
+| `t212_auth_pending_{id}` | transient, while verifying new credentials (deleted immediately) |
+
+### Migration v1 → v2 (`migrateV1ToV2`, run once per start via `ensureMigrated`)
+
+v1 stored *everything* in secrets (including a proxy URL). The migration, on enable (and awaited
+by the pages and the auto-sync tick), is idempotent and crash-safe — each write is skipped when
+its destination already has a value, and the `t212_connections` / `t212_settings` secrets (the
+"not migrated" markers) are deleted last:
+
+1. For each v1 connection with key **and** secret → write secret `t212_auth_{id}` =
+   base64(`key:secret`).
+2. Connections list → storage without credentials (`keyIdLast4` kept). **A connection with only
+   a legacy single key (no secret) is kept but flagged `needsCredentials`**, shown in Settings
+   and on the dashboard, and skipped by sync/auto-sync until key ID + secret are entered.
+3. Shared settings → storage minus `proxyUrl`; `t212_sync_{id}` and `t212_symbol_map_v6` →
+   storage (copied only if storage has none, then deleted from secrets via the kit's
+   `migrateSecretsToStorage`).
+4. The even older single-account layout (`t212_config` + `t212_account_id` + `t212_last_sync` +
+   `t212_imported_refs`) is folded in the same way (one "Trading 212 (Invest)" connection; flagged
+   if it had no secret), and superseded `t212_symbol_map[_v2…_v5]` caches are dropped.
 
 ## Build, test, release
 
 ```bash
-cd addon
-npm install
-npm run test         # vitest — mapper, symbol resolver, sync orchestration
-npm run type-check   # tsc --noEmit (strict)
-npm run bundle       # vite build → dist/addon.js + zip
+pnpm test          # vitest — mapper, csv, client, symbol resolver, config/migration, sync
+pnpm type-check    # tsc --noEmit (strict)
+pnpm bundle        # clean + vite build → dist/addon.js + dist/trading212-addon-<version>.zip
 ```
 
-Releases are cut by `.github/workflows/release.yml` on a `v*` tag (or manual
-dispatch): it installs, tests, type-checks, builds, and attaches
-`trading212-addon.zip` to a GitHub Release. Note this workflow runs only on tags,
-not on PRs.
+Run from `addons/trading212` (or the repo root with `pnpm -r`). `manifest.json` and `package.json`
+versions must match or packaging refuses. The bundle imports only host-provided packages
+(`react`, `react/jsx-runtime`, `@tanstack/react-query`, `@wealthfolio/ui`; the SDK is type-only).
 
 ## Extension points & known limitations
 
 - **Stock splits / distributions**: non-`TRADE` fills are currently skipped. Mapping
   them to `SPLIT` is the natural next step (`mapper.ts`).
-- **Instruments metadata / positions**: the proxy exposes these and `types.ts`/the
-  client model them, but the sync path relies on the instrument data embedded in
-  each order/dividend instead (avoids the 5 MB, 1-req/50s instruments call). They're
-  available if a future feature needs a position snapshot or a metadata fallback.
-- **Auth scheme**: confirm key+secret vs legacy single-key against the user's actual
-  key on first connect (the settings form supports both).
+- **Instruments metadata**: the ~5 MB feed can't pass the 2 MB cap, so HOLDINGS relies on the
+  instrument data embedded in positions/orders. A future metadata fallback would need a
+  different source.
+- **Export download host**: the signed `downloadLink` host is unconfirmed (`*.amazonaws.com`
+  is declared); see the error text if the broker refuses it.
+- **Legacy single-key auth is unsupported** (the broker only builds Basic auth from a stored
+  base64 `keyId:secret`).
+- **Trade charges beyond `Charge amount` / `Currency conversion fee`** (e.g. stamp duty columns
+  in the CSV) aren't added to `fee`, so Wealthfolio's derived total can differ from Trading 212's
+  by those taxes.
 - **History depth**: bounded by what Trading 212's history endpoints return; there is
   no separate backfill of pre-API-era data via these endpoints.

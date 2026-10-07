@@ -17,9 +17,9 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@wealthfolio/ui";
+import { relativeTime } from "@wf-addons/kit";
+import { StatTiles, type Stat } from "@wf-addons/kit/ui";
 import type { SyncResult } from "../types";
-import { relativeTime } from "../lib/format";
-import { StatTiles, type Stat } from "./stat-tiles";
 
 interface StatusCardProps {
   connected: boolean;
@@ -49,7 +49,7 @@ export function StatusCard({ connected, lastSyncIso, result, isSyncing }: Status
         {!result && !isSyncing && connected && (
           <p className="text-muted-foreground flex items-center gap-1.5 text-sm">
             <Icons.Clock size={14} weight="duotone" />
-            Ready to sync — Monzo imports the last 90 days of transactions.
+            Ready to sync. Monzo only shares up to 90 days of history; use CSV import for anything older.
           </p>
         )}
         {stats.length > 0 && <StatTiles stats={stats} />}
@@ -84,7 +84,7 @@ function LastSync({ iso }: { iso: string | null }) {
 function buildStats(r: SyncResult): Stat[] {
   const out: Stat[] = [
     { label: "Imported", value: r.imported, icon: "CheckCircle", tone: "success" },
-    { label: "Duplicates", value: r.duplicates, icon: "Copy", tone: "muted" },
+    { label: "Already imported", value: r.duplicates, icon: "Copy", tone: "muted" },
   ];
   if (r.skipped > 0) out.push({ label: "Skipped", value: r.skipped, icon: "AlertTriangle", tone: "warning" });
   return out;

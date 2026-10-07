@@ -21,14 +21,15 @@ import {
 } from "@wealthfolio/ui";
 import { useQuery } from "@tanstack/react-query";
 import { getSymbolMap, getSyncState } from "../hooks/use-config";
-import type { SyncResult, T212Connection } from "../types";
-import { exchangeLabel, parseSymbolMap, relativeTime } from "../lib/format";
+import type { SyncResult, T212Connection, T212Settings } from "../types";
+import { relativeTime } from "@wf-addons/kit";
+import { StatTiles, type Stat } from "@wf-addons/kit/ui";
+import { exchangeLabel, parseSymbolMap } from "../lib/format";
 import { ConnectionHealth } from "./connection-status";
-import { StatTiles, type Stat } from "./stat-tiles";
 
 interface ConnectionCardProps {
   ctx: AddonContext;
-  settings: { proxyUrl: string; env: "live" | "demo" } | undefined;
+  settings: T212Settings | undefined;
   conn: T212Connection;
   result?: SyncResult;
   isSyncing: boolean;
@@ -78,13 +79,22 @@ export function ConnectionCard({ ctx, settings, conn, result, isSyncing }: Conne
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
+        {conn.needsCredentials && !result?.error && (
+          <div className="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/5 p-3 text-sm text-amber-700 dark:text-amber-500">
+            <Icons.AlertTriangle size={16} className="mt-0.5 shrink-0" weight="duotone" />
+            <span>
+              This connection used a legacy single API key, which Trading 212 sync no longer
+              supports. Re-enter the API key ID and secret in Settings; it is skipped until then.
+            </span>
+          </div>
+        )}
         {result?.error && (
           <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">
             <Icons.AlertTriangle size={16} className="mt-0.5 shrink-0" weight="duotone" />
             <span>{result.error}</span>
           </div>
         )}
-        {!result && !isSyncing && (
+        {!result && !isSyncing && !conn.needsCredentials && (
           <p className="text-muted-foreground flex items-center gap-1.5 text-sm">
             <Icons.Clock size={14} weight="duotone" />
             Ready to sync.

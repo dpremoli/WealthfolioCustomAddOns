@@ -1,9 +1,12 @@
-export interface MonzoTokens {
+/** Response body of `POST /oauth2/token` (both grant types). */
+export interface MonzoTokenResponse {
   access_token: string;
-  refresh_token: string;
-  expires_at: number; // ms since epoch
-  token_type: string;
-  user_id: string;
+  refresh_token?: string;
+  /** Seconds until the access token expires (Monzo issues 6 hours). */
+  expires_in?: number;
+  token_type?: string;
+  client_id?: string;
+  user_id?: string;
 }
 
 export interface MonzoAccount {
@@ -22,8 +25,10 @@ export interface MonzoMerchant {
   name?: string;
   category?: string;
   address?: {
+    address?: string;
     city?: string;
     country?: string;
+    postcode?: string;
   };
 }
 
@@ -38,7 +43,8 @@ export interface MonzoTransaction {
   description: string;
   notes: string;
   category: string;
-  merchant?: MonzoMerchant | null;
+  /** An object when requested with `expand[]=merchant`; otherwise just the merchant id. */
+  merchant?: MonzoMerchant | string | null;
   is_load: boolean;
   metadata: Record<string, string>;
   decline_reason?: string | null;
@@ -60,17 +66,5 @@ export interface SyncResult {
   finishedAt?: string;
 }
 
-/** Live progress emitted during a sync so the UI can show the current step. */
-export interface SyncProgress {
-  phase: "fetch" | "import" | "done";
-  message: string;
-  // When both are set the UI can show a determinate bar; otherwise indeterminate.
-  current?: number;
-  total?: number;
-}
-
-/** One entry in the live sync timeline (every progress event becomes a step). */
-export interface SyncStep extends SyncProgress {
-  ts: string;
-  status: "active" | "done";
-}
+/** Phases of a live sync, as rendered by the kit's `<SyncActivity>`. */
+export type SyncPhaseId = "fetch" | "import" | "done";

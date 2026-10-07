@@ -74,10 +74,10 @@ export class MonzoClient {
 
   /** Open accounts, without the Flex backing-loan pseudo account. */
   async getAccounts(): Promise<MonzoAccount[]> {
-    const data = await this.get<{ accounts?: MonzoAccount[] }>(`${API_BASE}/accounts`);
-    return (data.accounts ?? []).filter(
-      (a) => !a.closed && a.account_type !== "uk_monzo_flex_backing_loan",
-    );
+    const data = await this.get<{ accounts?: Partial<MonzoAccount>[] }>(`${API_BASE}/accounts`);
+    return (data.accounts ?? [])
+      .map((a) => ({ ...a, account_type: a.type ?? a.account_type ?? "" }) as MonzoAccount)
+      .filter((a) => !a.closed && a.account_type !== "uk_monzo_flex_backing_loan");
   }
 
   /**

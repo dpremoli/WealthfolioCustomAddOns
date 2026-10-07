@@ -15,6 +15,14 @@ export function accountTypeLabel(acc: MonzoAccount): string {
   }
 }
 
+/**
+ * Wealthfolio account type for a Monzo account: Flex is a credit line (a liability you
+ * repay), so it is a credit card account; current and joint accounts hold cash.
+ */
+export function monzoAccountType(acc: MonzoAccount): "CASH" | "CREDIT_CARD" {
+  return acc.account_type === "uk_monzo_flex" ? "CREDIT_CARD" : "CASH";
+}
+
 /** Monzo accounts with no mapping, or whose mapped Wealthfolio account no longer exists. */
 export function findUnmapped(
   monzoAccounts: MonzoAccount[],
@@ -63,7 +71,7 @@ export async function ensureAccountMapping(
     try {
       const account = await ctx.api.accounts.create({
         name,
-        accountType: "CASH",
+        accountType: monzoAccountType(acc),
         currency: acc.currency || "GBP",
         isDefault: false,
         isActive: true,

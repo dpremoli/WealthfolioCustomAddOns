@@ -2,6 +2,8 @@ import type { ActivityImport, AddonContext } from "@wealthfolio/addon-sdk";
 import {
   jsonStore,
   selectNewActivities,
+  spendingRulesNote,
+  syncSpendingRules,
   type ExistingActivityLike,
   type SyncProgress,
 } from "@wf-addons/kit";
@@ -18,6 +20,7 @@ import {
 } from "./mapper";
 import { MonzoClient } from "./monzo-client";
 import { ensureMigrated } from "./migrate";
+import { monzoSpendingRules } from "./spending-rules";
 
 export type SyncProgressHandler = (p: SyncProgress<SyncPhaseId>) => void;
 
@@ -235,6 +238,12 @@ export async function runSync(
   await store.set(KEY_LAST_SYNC, watermark);
   await store.set(KEY_LAST_RUN, finishedAt);
   log.push(`Import: ${imported} imported, ${duplicates} already present, ${skipped} skipped.`);
+
+  // Keep Wealthfolio's Spending categories in step with Monzo's (rules keyed on the category
+  // label in each comment). Best effort: never fails the sync.
+  onProgress({ phase: "import", message: "Updating spending categories…" });
+  const note = spendingRulesNote(await syncSpendingRules(ctx, monzoSpendingRules(categoryLabels)));
+  if (note) log.push(note);
   if (watermark !== startedAt.toISOString()) {
     log.push(`Next sync re-checks from ${watermark} (a transaction was still pending).`);
   }

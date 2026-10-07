@@ -65,7 +65,16 @@ export function parsePastedAuth(input: string): PastedAuth {
     throw new OAuthInputError(`Monzo reported an error: ${detail ? `${error} (${detail})` : error}.`);
   }
   const code = params.get("code");
-  if (!code) throw new OAuthInputError("No authorisation code found in what you pasted.");
+  if (!code) {
+    if (/auth\.monzo\.com/i.test(raw) || params.get("response_type") === "code") {
+      throw new OAuthInputError(
+        "That is the Monzo login link itself. Open it in your browser, log in via the email " +
+          "Monzo sends you, then paste the address your browser ends up on (your redirect URL " +
+          "with ?code=… in it).",
+      );
+    }
+    throw new OAuthInputError("No authorisation code found in what you pasted.");
+  }
   return { code, state: params.get("state") ?? undefined, structured: true };
 }
 

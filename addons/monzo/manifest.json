@@ -1,7 +1,7 @@
 {
   "id": "monzo-addon",
   "name": "Monzo Bank Sync",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "Sync Monzo Bank transactions straight into your Wealthfolio cash accounts, for the spending module. No proxy server needed.",
   "author": "dpremoli",
   "license": "GPL-3.0-only",
@@ -42,7 +42,7 @@
     {
       "category": "accounts",
       "functions": ["getAll", "create"],
-      "purpose": "List your accounts and create a cash account for each Monzo account"
+      "purpose": "List your accounts and create a Wealthfolio account for each Monzo account (cash for current/joint, credit card for Flex)"
     },
     {
       "category": "activities",
@@ -53,6 +53,11 @@
       "category": "secrets",
       "functions": ["set", "get", "delete", "use"],
       "purpose": "Store your Monzo client secret and OAuth tokens in the keyring, and let the host attach the access token to Monzo API requests"
+    },
+    {
+      "category": "spending",
+      "functions": ["getCategories", "saveRule", "rerunRules"],
+      "purpose": "Create rules that file Monzo transactions under the matching Wealthfolio spending categories (Groceries, Eating Out, …)"
     },
     {
       "category": "network",

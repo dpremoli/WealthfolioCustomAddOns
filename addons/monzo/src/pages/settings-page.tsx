@@ -26,6 +26,7 @@ import {
 } from "../constants";
 import { accountTypeLabel, ensureAccountMapping } from "../lib/accounts";
 import {
+  MonzoAuthError,
   beginAuthorisation,
   completeAuthorisation,
   disconnect,
@@ -38,6 +39,7 @@ import { copyText } from "../lib/clipboard";
 import { DEFAULT_CATEGORY_LABELS, MONZO_CATEGORIES } from "../lib/category-map";
 import { ensureMigrated } from "../lib/migrate";
 import { MonzoClient } from "../lib/monzo-client";
+import { useSync } from "../hooks/use-sync";
 import { buildAuthUrl } from "../lib/oauth";
 import type { AccountMapping, MonzoAccount } from "../types";
 
@@ -78,6 +80,10 @@ export default function SettingsPage({ ctx }: AddonPageProps) {
   const [categoriesSaved, setCategoriesSaved] = useState(false);
   const autoCreatingRef = useRef(false);
   const handledRef = useRef<Set<string>>(new Set());
+  // Set when a connection completes on this page: once Monzo approval lands and accounts are
+  // mapped, the first sync runs straight away to catch Monzo's 5-minute full-history window.
+  const [firstSyncDue, setFirstSyncDue] = useState(false);
+  const firstSync = useSync(ctx);
 
   const { data } = useQuery<SettingsData>({
     queryKey: ["monzo_settings"],
@@ -119,7 +125,11 @@ export default function SettingsPage({ ctx }: AddonPageProps) {
     queryFn: () => new MonzoClient(ctx).getAccounts(),
     enabled: connected,
     retry: false,
+    // Monzo answers 403 until the access request is approved in the app, which usually
+    // arrives a little after the login: keep checking so the page picks it up by itself.
+    refetchInterval: (query) => (isAwaitingApproval(query.state.error) ? 5_000 : false),
   });
+  const awaitingApproval = isAwaitingApproval(accountsError);
 
   const { data: wfAccounts = [] } = useQuery({
     queryKey: ["wf_accounts"],
@@ -180,6 +190,20 @@ export default function SettingsPage({ ctx }: AddonPageProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [monzoAccounts, wfAccounts, savedMapping]);
 
+  // Run the first sync as soon as approval has landed and the accounts are mapped.
+  useEffect(() => {
+    if (!firstSyncDue || firstSync.isSyncing || awaitingApproval) return;
+    if (!monzoAccounts.length || !savedMapping || Object.keys(savedMapping).length === 0) return;
+    setFirstSyncDue(false);
+    (async () => {
+      // Only a connection that has never synced: otherwise the normal incremental sync applies.
+      if ((await store.get<string | null>(KEY_LAST_SYNC, null)) !== null) return;
+      await firstSync.sync();
+      queryClient.invalidateQueries({ queryKey: ["monzo_last_run"] });
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [firstSyncDue, awaitingApproval, monzoAccounts, savedMapping, firstSync.isSyncing]);
+
   const refreshStatus = () => queryClient.invalidateQueries({ queryKey: ["monzo_settings"] });
 
   async function saveCredentials() {
@@ -226,12 +250,15 @@ export default function SettingsPage({ ctx }: AddonPageProps) {
     setConnectError(null);
     try {
       await completeAuthorisation(ctx, pasted);
+      setFirstSyncDue(true);
       setAuthUrl(null);
       setPasted("");
       setCopyNote(null);
       handledRef.current.clear();
       await refreshStatus();
-      queryClient.invalidateQueries({ queryKey: ["monzo_accounts"] });
+      // Drop accounts cached from an earlier connection: until the new one is approved they
+      // must not count as "approved", or the first sync would start too early.
+      queryClient.resetQueries({ queryKey: ["monzo_accounts"] });
     } catch (err) {
       setConnectError((err as Error).message);
     } finally {
@@ -462,9 +489,36 @@ export default function SettingsPage({ ctx }: AddonPageProps) {
               {lastRunIso && (
                 <p className="text-muted-foreground text-xs">Last sync: {relativeTime(lastRunIso)}</p>
               )}
-              {accountsError && (
-                <AlertFeedback variant="error" title="Could not load your Monzo accounts">
-                  {accountsError.message}
+              {awaitingApproval ? (
+                <AlertFeedback variant="warning" title="Waiting for approval in the Monzo app">
+                  <p className="text-sm">
+                    Open the Monzo app and approve the access request (it can take a minute to
+                    appear). This page checks every few seconds and carries on by itself
+                    {firstSyncDue ? ", then imports your full history" : ""}.
+                  </p>
+                </AlertFeedback>
+              ) : (
+                accountsError && (
+                  <AlertFeedback variant="error" title="Could not load your Monzo accounts">
+                    {accountsError.message}
+                  </AlertFeedback>
+                )
+              )}
+              {firstSync.isSyncing && (
+                <p className="text-muted-foreground flex items-center gap-1.5 text-sm">
+                  <Icons.Spinner size={14} className="animate-spin" />
+                  {firstSync.progress?.message ?? "Importing your Monzo history…"}
+                </p>
+              )}
+              {firstSync.lastResult && (
+                <AlertFeedback variant="success" title="First sync complete">
+                  Imported {firstSync.lastResult.imported} transaction
+                  {firstSync.lastResult.imported === 1 ? "" : "s"}. See the dashboard for details.
+                </AlertFeedback>
+              )}
+              {firstSync.error && (
+                <AlertFeedback variant="error" title="First sync failed">
+                  {firstSync.error} Run Sync Now from the dashboard to try again.
                 </AlertFeedback>
               )}
               {autoCreateStatus && (
@@ -475,14 +529,17 @@ export default function SettingsPage({ ctx }: AddonPageProps) {
             </>
           )}
 
-          <AlertFeedback variant="warning" title="Approve access in the Monzo app">
-            <p className="text-sm">
-              After logging in, Monzo asks you to approve this client in the <strong>Monzo app</strong>{" "}
-              (strong customer authentication). Until you do, API calls return 403 and nothing
-              syncs. Approve it there, then come back and sync <strong>within 5 minutes</strong> to
-              import your full history; after that Monzo only shares the last 90 days.
-            </p>
-          </AlertFeedback>
+          {(!connected || awaitingApproval || authUrl) && (
+            <AlertFeedback variant="warning" title="Approve access in the Monzo app">
+              <p className="text-sm">
+                After logging in, Monzo asks you to approve this client in the <strong>Monzo app</strong>{" "}
+                (strong customer authentication). Until you do, API calls return 403 and nothing
+                syncs. Approve it there, then come back and sync <strong>within 5 minutes</strong> to
+                import your full history; after that Monzo only shares the last 90 days. This page
+                does that first sync for you as soon as the approval comes through.
+              </p>
+            </AlertFeedback>
+          )}
 
           {!authUrl ? (
             <div className="space-y-2">
@@ -649,4 +706,9 @@ export default function SettingsPage({ ctx }: AddonPageProps) {
       </Card>
     </PageShell>
   );
+}
+
+/** 403 from Monzo: the access request has not been approved in the Monzo app (yet). */
+function isAwaitingApproval(err: unknown): boolean {
+  return err instanceof MonzoAuthError && err.kind === "approval";
 }

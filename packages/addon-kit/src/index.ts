@@ -20,3 +20,11 @@ export { jsonStore, migrateSecretsToStorage } from "./storage";
 export { relativeTime, maskKey } from "./format";
 export { registerPages, addonRoute, type AddonPage, type AddonPageProps } from "./pages";
 export { appendStep, markLastDone, type SyncProgress, type SyncStep } from "./sync-steps";
+export {
+  syncSpendingRules,
+  spendingRulesNote,
+  pickSpendCategory,
+  escapeRegex,
+  type SpendingRuleSpec,
+  type SpendingRulesOutcome,
+} from "./spending";

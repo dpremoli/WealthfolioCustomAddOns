@@ -107,9 +107,11 @@ are verified before they replace the stored ones.
 > creates a dedicated **"&lt;name&gt; Card"** cash account and routes your card spending,
 > refunds and cashback there (instead of mixing them into the investing account), tagging each
 > with the Trading 212 merchant category mapped to a Wealthfolio spending label
-> (`"SAINSBURYS · Shopping"`) so Wealthfolio's Spending module can categorise it. Works in both
-> Holdings and Transactions modes. (The add-on can't set a structured category via the API yet,
-> so the label rides in the comment; Wealthfolio's own categorisation stays in charge.)
+> (`"SAINSBURYS · Shopping"`). Each sync also keeps one categorisation rule per label
+> (Settings → Spending → Rules, "Trading 212 card: Shopping" and so on) that files those rows
+> under the matching Wealthfolio spending category, and re-runs rules over uncategorised
+> activities. Categories you set by hand are never overwritten. Works in both Holdings and
+> Transactions modes.
 >
 > You can also choose the **card account type** (Cash or Credit Card) right below the toggle.
 > *Cash* is accurate for the debit card; *Credit Card* models it as a liability so Wealthfolio

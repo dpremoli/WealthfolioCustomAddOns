@@ -16,7 +16,13 @@ export interface MonzoAccount {
   account_number?: string;
   sort_code?: string;
   currency?: string;
+  /**
+   * uk_retail, uk_retail_joint, uk_monzo_flex, uk_monzo_flex_backing_loan, … The API sends
+   * this as `type` (`account_type` is only the name of the list filter); the client copies
+   * it here so the rest of the add-on has one field to read.
+   */
   account_type: string;
+  type?: string;
   closed?: boolean;
 }
 

@@ -17,16 +17,25 @@ Monzo, paste its details into the add-on, and connect.
   card** account for Flex (a credit line you repay). The type is set when the account is
   created; to retype one made by an older version, use Wealthfolio's **Update Account**
   dialog.
-- Imports debits as `WITHDRAWAL` and credits as `DEPOSIT` cash activities, using
-  Wealthfolio's `$CASH-<currency>` cash symbol. The merchant, Monzo category, location,
-  foreign-currency amount and your notes are kept in the activity comment.
+- Imports debits as `WITHDRAWAL` and credits as `DEPOSIT` cash activities (money back on a
+  spending category, such as a refund, as a `CREDIT` refund so it reduces that spending
+  instead of counting as income), using
+  Wealthfolio's `$CASH-<currency>` cash symbol. The comment reads like the Monzo app: who
+  you paid or who paid you (the merchant, or for transfers the payee/payer's name rather
+  than the payment reference), the Monzo category, location, foreign-currency amount, a
+  transfer's reference when it is more than your own name, and your notes.
 - **Files transactions under Wealthfolio's spending categories.** Each sync keeps one
   categorisation rule per Monzo category (Settings → Spending → Rules, named
   "Monzo: Groceries" and so on) pointing at the matching Wealthfolio category (Groceries,
   Restaurants, Transport, …), then re-runs rules over uncategorised activities, so new and
-  already-imported transactions get their category. Categories you set by hand are never
-  overwritten; "General" and transfers are left for you or Wealthfolio to categorise. Spending
-  must be turned on for the account in Wealthfolio for the categories to show up there.
+  already-imported transactions get their category. Wealthfolio's own merchant rules take
+  precedence where they match (they are more specific); "General" goes to Other Expenses as a
+  last resort, Monzo's "Income" to Other Income, and transfers are left alone. Categories you
+  set by hand are never overwritten. Spending must be turned on for the account in
+  Wealthfolio for the categories to show up there.
+- Keeps already-imported transactions up to date: when a re-fetched transaction differs from
+  its Wealthfolio row (new notes, a better payee name, a settled amount), the row is
+  rewritten in place rather than imported again.
 - Skips what should not count as spending: declined and zero-value transactions, pending
   transactions (Flex purchases are the exception, they never "settle"), pot transfers, the monthly Flex repayment (the purchases
   are already on the Flex account) and savings-category moves such as investment transfers.
@@ -99,11 +108,13 @@ link that did not come from your own Connect click is rejected.
   account, filters them, and imports what is new.
 - Re-syncing is safe. Instead of relying on Wealthfolio's content-hash duplicate detection
   (which would silently drop two genuinely identical same-day transactions, such as two
-  coffees at the same price), the add-on tags each activity's comment with its Monzo
-  transaction id (`[ref:tx_…]`) and skips ids the account already holds, so a transaction
-  whose notes or category changed in Monzo is still recognised. Rows imported before these
-  tags existed are matched by content, by count. The same applies to CSV imports, which use
-  the same transaction ids, so a CSV and the API sync can overlap freely.
+  coffees at the same price), the add-on keeps its own ledger (in add-on storage) of the
+  Monzo transaction ids it has imported, so a transaction whose notes, category or payee name
+  changed is still recognised, and a new identical one is never mistaken for it. Rows
+  imported by versions before the ledger are matched by content, by count. The same applies
+  to CSV imports, which use the same transaction ids, so a CSV and the API sync can overlap
+  freely. (v2.1–2.2 wrote the id into the comment as `[ref:tx_…]`; the next sync moves it to
+  the ledger and removes the tag.)
 - A transaction that is still **pending** when you sync is not lost: the next sync starts
   from the oldest recent pending transaction, so it is picked up once it settles.
 - **Disconnect** revokes the tokens at Monzo (`/oauth2/logout`) as well as forgetting them.

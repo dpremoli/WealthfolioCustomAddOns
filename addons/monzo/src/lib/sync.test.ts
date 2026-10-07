@@ -139,7 +139,7 @@ describe("runSync reconcile", () => {
     await runSync(t.ctx);
     const comments = t.importCalls[0].map((a) => a.comment);
     expect(comments[0]).toContain("Tesco | Eating Out | Leeds, GB");
-    expect(comments[1]).toMatch(/^Unexpanded \| Eating Out \[ref:tx_\w+\]$/);
+    expect(comments[1]).toBe("Unexpanded | Eating Out");
   });
 
   it("applies saved category labels to comments and the breakdown", async () => {
@@ -205,20 +205,91 @@ describe("runSync watermark", () => {
 
   it("does not import the same transaction twice after its notes change", async () => {
     const before = tx({ id: "tx_same", notes: "" });
-    const t = setup([{ ...before, notes: "split with Sam" }]);
+    const t = setup([before]);
+    await runSync(t.ctx);
+    t.state.handler = (req) =>
+      new URL(req.url).pathname === "/accounts"
+        ? json(200, { accounts: [{ id: MONZO_ACC, type: "uk_retail" }] })
+        : json(200, { transactions: [{ ...before, notes: "split with Sam" }] });
+    const result = await runSync(t.ctx);
+    expect(result.imported).toBe(0);
+    // The existing row is rewritten with the new note instead.
+    expect(t.activities.get(WF_ACC)).toHaveLength(1);
+    expect(t.activities.get(WF_ACC)![0].comment).toBe("Coffee | Eating Out | Note: split with Sam");
+    expect(result.log?.join("\n")).toMatch(/1 updated/);
+  });
+
+  it("turns a refund an older version imported as a deposit into a REFUND credit", async () => {
+    const refund = tx({ amount: 285, category: "holidays", description: "TRAINLINE", merchant: { name: "Trainline" } });
+    const t = setup([refund]);
     t.activities.set(WF_ACC, [
       {
-        activityType: "WITHDRAWAL",
-        date: new Date(before.created),
-        amount: String(Math.abs(before.amount) / 100),
+        id: "act-1",
+        accountId: WF_ACC,
+        activityType: "DEPOSIT",
+        date: new Date(refund.created),
+        amount: "2.85",
         currency: "GBP",
-        comment: mapTransactionToActivity(before, WF_ACC).comment,
+        comment: "Trainline | Holidays [ref:" + refund.id + "]",
+        assetSymbol: "$CASH-GBP",
+      },
+    ]);
+    const updates: { activityType?: string; subtype?: string | null }[] = [];
+    const saveMany = t.ctx.api.activities.saveMany.bind(t.ctx.api.activities);
+    (t.ctx.api.activities as unknown as Record<string, unknown>).saveMany = async (req: { updates?: [] }) => {
+      updates.push(...(req.updates ?? []));
+      return saveMany(req as never);
+    };
+    const result = await runSync(t.ctx);
+    expect(result.imported).toBe(0);
+    expect(updates.at(-1)).toMatchObject({ activityType: "CREDIT", subtype: "REFUND" });
+  });
+
+  it("renames a transfer imported by an older version after its payee, without importing it twice", async () => {
+    const transfer = tx({
+      description: "Dennis Premoli",
+      category: "personal_care",
+      merchant: null,
+      counterparty: { name: "Sheffield Springers Volleyball Club" },
+    });
+    const t = setup([transfer]);
+    t.activities.set(WF_ACC, [
+      {
+        id: "act-1",
+        accountId: WF_ACC,
+        activityType: "WITHDRAWAL",
+        date: new Date(transfer.created),
+        amount: String(Math.abs(transfer.amount) / 100),
+        currency: "GBP",
+        comment: "Dennis Premoli | Personal Care",
         assetSymbol: "$CASH-GBP",
       },
     ]);
     const result = await runSync(t.ctx);
     expect(result.imported).toBe(0);
-    expect(result.duplicates).toBe(1);
+    expect(t.activities.get(WF_ACC)).toHaveLength(1);
+    expect(t.activities.get(WF_ACC)![0].comment).toMatch(/^Sheffield Springers Volleyball Club \| Personal Care/);
+  });
+
+  it("strips the [ref:…] tags older versions wrote, and still recognises those rows", async () => {
+    const old = tx({ id: "tx_old" });
+    const t = setup([old]);
+    t.activities.set(WF_ACC, [
+      {
+        id: "act-1",
+        accountId: WF_ACC,
+        activityType: "WITHDRAWAL",
+        date: new Date(old.created),
+        amount: String(Math.abs(old.amount) / 100),
+        currency: "GBP",
+        comment: "Coffee | Eating Out [ref:tx_old]",
+        assetSymbol: "$CASH-GBP",
+      },
+    ]);
+    const result = await runSync(t.ctx);
+    expect(t.activities.get(WF_ACC)![0].comment).toBe("Coffee | Eating Out");
+    expect(result.imported).toBe(0);
+    expect(result.log?.join("\n")).toMatch(/Removed the \[ref:…\] tag from 1/);
   });
 
   it("holds the watermark back to a still-pending transaction so it is picked up once settled", async () => {
@@ -235,6 +306,31 @@ describe("runSync watermark", () => {
     const live = tx({ settled: "", created: "2026-05-18T00:00:00.000Z" });
     expect(pendingHoldBack([stale, declined], now)).toBeNull();
     expect(pendingHoldBack([stale, declined, live], now)).toBe("2026-05-18T00:00:00.000Z");
+  });
+});
+
+describe("runSync payee names", () => {
+  it("drops a reference that is just the account holder's own name", async () => {
+    const t = setup([
+      tx({
+        description: "Dennis Premoli",
+        category: "personal_care",
+        merchant: null,
+        counterparty: { name: "Sheffield Springers Volleyball Club" },
+      }),
+    ]);
+    t.state.handler = (req) =>
+      new URL(req.url).pathname === "/accounts"
+        ? json(200, {
+            accounts: [{ id: MONZO_ACC, type: "uk_retail", owners: [{ user_id: "user_1", preferred_name: "Dennis Premoli" }] }],
+          })
+        : json(200, {
+            transactions: [
+              tx({ description: "Dennis Premoli", category: "personal_care", merchant: null, counterparty: { name: "Sheffield Springers Volleyball Club" } }),
+            ],
+          });
+    await runSync(t.ctx);
+    expect(t.importCalls[0][0].comment).toBe("Sheffield Springers Volleyball Club | Personal Care");
   });
 });
 

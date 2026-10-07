@@ -1,7 +1,7 @@
 {
   "id": "monzo-addon",
   "name": "Monzo Bank Sync",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "description": "Sync Monzo Bank transactions straight into your Wealthfolio cash accounts, for the spending module. No proxy server needed.",
   "author": "dpremoli",
   "license": "GPL-3.0-only",
@@ -46,8 +46,8 @@
     },
     {
       "category": "activities",
-      "functions": ["getAll", "import"],
-      "purpose": "Import Monzo transactions and reconcile against existing ones so re-syncs add nothing"
+      "functions": ["getAll", "import", "saveMany"],
+      "purpose": "Import Monzo transactions, reconcile against existing ones so re-syncs add nothing, and tidy the comments of transactions imported by v2.1-2.2"
     },
     {
       "category": "secrets",

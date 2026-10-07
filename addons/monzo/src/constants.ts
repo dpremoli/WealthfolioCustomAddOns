@@ -32,6 +32,12 @@ export const KEY_MAPPING = "monzo_account_mapping";
 export const KEY_LAST_SYNC = "monzo_last_sync";
 /** JSON: ISO timestamp the last successful sync actually finished (display only). */
 export const KEY_LAST_RUN = "monzo_last_run";
+/**
+ * JSON: import ledger, Monzo transaction id -> "<Wealthfolio account id>:<content hash>" of
+ * the activity it became (kit `ImportLedger`). Lets a re-fetched transaction be recognised
+ * even when its comment changed, without writing the id into the comment.
+ */
+export const KEY_IMPORTED_IDS = "monzo_imported_ids";
 /** JSON: category id -> custom label. */
 export const KEY_CATEGORY_LABELS = "monzo_category_labels";
 

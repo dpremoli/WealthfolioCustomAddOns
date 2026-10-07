@@ -1,6 +1,7 @@
 import type { ActivityImport } from "@wealthfolio/addon-sdk";
 import {
   contentKey,
+  reconcileWithLedger,
   selectNewActivities,
   sourceRefOf,
   withSourceRef,
@@ -118,5 +119,70 @@ describe("contentKey", () => {
       currency: "USD",
     } as ExistingActivityLike;
     expect(contentKey(trade)).toBe(contentKey(existing));
+  });
+});
+
+describe("reconcileWithLedger", () => {
+  const withId = (id: string, a: ActivityImport): ActivityImport => ({ ...a, id });
+
+  it("imports a second identical transaction after the first was imported earlier that day", () => {
+    const first = withId("tx_1", cash(3, "Coffee"));
+    const r1 = reconcileWithLedger([first], [], {}, "acc");
+    expect(r1.toImport).toHaveLength(1);
+    // Next sync only fetches the new, identical coffee (the first is before the watermark).
+    const second = withId("tx_2", cash(3, "Coffee"));
+    const r2 = reconcileWithLedger([second], [stored(first)], r1.ledger, "acc");
+    expect(r2.toImport.map((a) => a.id)).toEqual(["tx_2"]);
+    expect(r2.toImport[0].forceImport).toBe(true);
+  });
+
+  it("recognises an imported id even when its comment changed since", () => {
+    const before = withId("tx_1", cash(3, "Coffee"));
+    const { ledger } = reconcileWithLedger([before], [], {}, "acc");
+    const after = withId("tx_1", cash(3, "Coffee | Note: with Sam"));
+    const r = reconcileWithLedger([after], [stored(before)], ledger, "acc");
+    expect(r.toImport).toHaveLength(0);
+    expect(r.present).toHaveLength(1);
+  });
+
+  it("matches rows imported before the ledger existed by content and count, and records them", () => {
+    const legacy = [cash(3, "Coffee"), cash(3, "Coffee")].map(stored);
+    const desired = ["tx_1", "tx_2", "tx_3"].map((id) => withId(id, cash(3, "Coffee")));
+    const r = reconcileWithLedger(desired, legacy, {}, "acc");
+    expect(r.toImport.map((a) => a.id)).toEqual(["tx_3"]);
+    expect(Object.keys(r.ledger).sort()).toEqual(["tx_1", "tx_2", "tx_3"]);
+  });
+
+  it("treats a legacy [ref:…] comment tag as imported", () => {
+    const tagged = stored(cash(3, withSourceRef("Coffee", "tx_9")));
+    const r = reconcileWithLedger([withId("tx_9", cash(3, "Coffee | Note: x"))], [tagged], {}, "acc");
+    expect(r.toImport).toHaveLength(0);
+    expect(r.ledger.tx_9).toMatch(/^acc:/);
+  });
+
+  it("reports an imported row whose details changed as stale, with the row to rewrite", () => {
+    const before = withId("tx_1", cash(3, "Dennis | Personal Care"));
+    const { ledger } = reconcileWithLedger([before], [], {}, "acc");
+    const row = { ...stored(before), id: "act-1" };
+    const after = withId("tx_1", cash(3, "Volleyball Club | Personal Care"));
+    const r = reconcileWithLedger([after], [row], ledger, "acc");
+    expect(r.toImport).toHaveLength(0);
+    expect(r.stale).toEqual([{ row, activity: after }]);
+  });
+
+  it("matches an older comment format through `legacy`, and reports it as stale", () => {
+    const row = { ...stored(cash(3, "Dennis | Personal Care")), id: "act-1" };
+    const now = withId("tx_1", cash(3, "Volleyball Club | Personal Care"));
+    const legacy = (a: ActivityImport) => ({ ...a, comment: "Dennis | Personal Care" });
+    const r = reconcileWithLedger([now], [row], {}, "acc", { legacy });
+    expect(r.toImport).toHaveLength(0);
+    expect(r.stale).toEqual([{ row, activity: now }]);
+    // Without the legacy form it would have been imported again.
+    expect(reconcileWithLedger([now], [row], {}, "acc").toImport).toHaveLength(1);
+  });
+
+  it("imports one row per id when the same id appears twice in a batch", () => {
+    const a = withId("tx_1", cash(3, "Coffee"));
+    expect(reconcileWithLedger([a, a], [], {}, "acc").toImport).toHaveLength(1);
   });
 });

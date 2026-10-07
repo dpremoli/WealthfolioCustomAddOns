@@ -3,35 +3,37 @@ import { escapeRegex, type SpendingRuleSpec } from "@wf-addons/kit";
 import { resolveCategory } from "./category-map";
 
 /**
- * Monzo category -> Wealthfolio spend categories to try (key or name, best first). Category
- * keys differ between Wealthfolio installs, so the first one that exists is used; a Monzo
- * category with no match is left for Wealthfolio's own engine (or the user) to categorise.
- * `general`, `transfers` and `savings` deliberately get no rule.
+ * Monzo spending category -> Wealthfolio spend categories to try (key or name, best first).
+ * Keys are those Wealthfolio seeds (`food_restaurants`, `housing_rent`, …), with names as a
+ * fallback for installs that renamed them; a category with no match gets no rule.
+ * `transfers` and `savings` are not spending and get no rule.
  */
-const EXPENSE_CANDIDATES: Record<string, string[]> = {
-  eating_out: ["restaurants", "dining", "eating out", "food and dining", "food & dining"],
+export const SPENDING_CATEGORY_CANDIDATES: Record<string, string[]> = {
+  eating_out: ["food_restaurants", "restaurants", "food", "food & dining"],
   entertainment: ["entertainment"],
-  groceries: ["groceries", "supermarket"],
-  personal_care: ["personal care", "beauty"],
+  groceries: ["groceries"],
+  personal_care: ["personal", "personal care"],
   shopping: ["shopping"],
-  transport: ["transport", "transportation", "auto and transport", "auto & transport"],
+  transport: ["transport", "transportation"],
   travel: ["travel"],
-  holidays: ["holidays", "travel", "vacation"],
-  utilities: ["utilities", "bills and utilities", "bills & utilities", "bills"],
-  bills: ["bills", "bills and utilities", "bills & utilities", "utilities"],
-  cash: ["cash", "atm", "cash and atm", "cash & atm"],
-  charity: ["charity", "donations", "gifts and donations", "gifts & donations"],
+  holidays: ["travel"],
+  utilities: ["housing_utilities", "utilities", "bills"],
+  bills: ["bills", "bills & utilities"],
+  // No cash category in Wealthfolio: a withdrawal is spending of an unknown kind.
+  cash: ["other_expense", "other expenses"],
+  charity: ["gifts", "gifts & donations"],
   education: ["education"],
-  expenses: ["business expenses", "business", "expenses"],
-  family: ["family", "kids", "childcare"],
-  gifts: ["gifts", "gifts and donations", "gifts & donations"],
-  health: ["health", "healthcare", "medical", "health and fitness", "health & fitness"],
-  rent: ["rent", "housing", "rent and mortgage", "mortgage"],
-  taxes: ["taxes", "tax"],
-  loan_repayments: ["loan repayments", "loans", "loan", "debt"],
+  expenses: ["other_expense", "other expenses"],
+  family: ["other_expense", "other expenses"],
+  gifts: ["gifts", "gifts & donations"],
+  health: ["health", "health & wellness"],
+  rent: ["housing_rent", "rent/mortgage", "housing"],
+  taxes: ["fees", "fees & charges", "other_expense"],
+  loan_repayments: ["other_expense", "other expenses"],
+  general: ["other_expense", "other expenses"],
 };
 
-const INCOME_CANDIDATES = ["salary", "income", "wages", "paycheck"];
+const INCOME_CANDIDATES = ["income_other", "other income", "income"];
 
 /**
  * The comment the mapper writes is `<name> | <category label> | …`, with optional `[ref:…]`
@@ -43,9 +45,14 @@ function labelPattern(label: string): string {
   return `^[^|]*\\| ${escapeRegex(label)}(?: \\||\\s*\\[|$)`;
 }
 
-/** Categorisation rules for Monzo activities, using the user's category labels. */
+/**
+ * Categorisation rules for Monzo activities, using the user's category labels. Spending rules
+ * match any activity type, so a refund (a `CREDIT`) lands in the same category and reduces
+ * that spending. They sit below Wealthfolio's own merchant presets (priority 80), which are
+ * more specific; "General" is only a last resort.
+ */
 export function monzoSpendingRules(categoryLabels: Record<string, string>): SpendingRuleSpec[] {
-  const rules: SpendingRuleSpec[] = Object.entries(EXPENSE_CANDIDATES).map(([cat, categories]) => {
+  const rules: SpendingRuleSpec[] = Object.entries(SPENDING_CATEGORY_CANDIDATES).map(([cat, categories]) => {
     const label = resolveCategory(cat, categoryLabels);
     return {
       ruleKey: `monzo-${cat}`,
@@ -54,7 +61,7 @@ export function monzoSpendingRules(categoryLabels: Record<string, string>): Spen
       matchType: "regex",
       kind: "expense",
       categories,
-      activityType: "WITHDRAWAL" as ActivityType,
+      priority: cat === "general" ? -10 : 0,
     };
   });
   const income = resolveCategory("income", categoryLabels);

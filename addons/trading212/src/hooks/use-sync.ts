@@ -41,6 +41,7 @@ import { SymbolResolver, type ResolveDiag } from "../lib/symbol-resolver";
 import {
   addImportedRefs,
   clearAccountData,
+  connectionKind,
   setBackfillStartedAt,
   connectionConfig,
   ensureCardAccount,
@@ -85,6 +86,9 @@ const IMPORT_CHUNK_SIZE = 20;
 // Trading 212 caps each CSV export at ~1 year, so a full backfill walks back in
 // one-year windows. Caps the walk so a sparse history can't loop forever.
 const MAX_EXPORT_WINDOWS = 15;
+
+/** Card history is refreshed at most this often (each refresh is a slow CSV export). */
+const CARD_REFRESH_MS = 3 * 60 * 60 * 1000;
 
 /** Whether an RFC 3339 timestamp is at or before the watermark (compared as instants). */
 function atOrBefore(d: string, since: string): boolean {
@@ -234,7 +238,7 @@ async function fetchCardActivities(
   importedRefs: Set<string>,
   log: string[],
   onProgress: ProgressFn,
-): Promise<ActivityImport[]> {
+): Promise<{ activities: ActivityImport[]; complete: boolean }> {
   // Build the window list: a single recent window when we already have a watermark,
   // otherwise a chain of one-year windows walked back from now (first-time backfill).
   const now = new Date();
@@ -268,6 +272,7 @@ async function fetchCardActivities(
 
   const out: ActivityImport[] = [];
   const seen = new Set<string>();
+  let complete = true;
   let emptyStreak = 0;
   for (const { start, end } of windows) {
     const label = `${start.toISOString().slice(0, 10)}→${end.toISOString().slice(0, 10)}`;
@@ -282,6 +287,7 @@ async function fetchCardActivities(
       });
     } catch (e) {
       log.push(`Card window ${label}: export failed (${errDetail(e)})`);
+      complete = false;
       break;
     }
     const rows = parseCsv(csv);
@@ -302,7 +308,7 @@ async function fetchCardActivities(
     }
   }
   if (out.length > 0) log.push(`Card sync: ${out.length} card row(s) to import.`);
-  return out;
+  return { activities: out, complete };
 }
 
 /**
@@ -358,8 +364,18 @@ async function syncCardAccount(
   // The card windows end "now", so the watermark is when this run started, not finished.
   const startedAt = new Date().toISOString();
   const { cardLastSync } = await getSyncState(ctx, conn.id);
+  // Card rows only exist in CSV exports, and each export takes Trading 212 15-80 s to
+  // prepare under its rate limits, so recent card history is refreshed at most every few hours.
+  const sinceCard = cardLastSync ? Date.now() - Date.parse(cardLastSync) : Infinity;
+  if (sinceCard < CARD_REFRESH_MS) {
+    log.push(
+      `Card history refreshed ${Math.round(sinceCard / 60_000)} min ago; next refresh in ` +
+        `${Math.ceil((CARD_REFRESH_MS - sinceCard) / 60_000)} min.`,
+    );
+    return { imported: 0, duplicates: 0 };
+  }
   const importedRefs = await getImportedRefs(ctx, conn.id);
-  const acts = await fetchCardActivities(
+  const { activities: acts, complete } = await fetchCardActivities(
     client,
     resolver,
     mainAccountId,
@@ -419,15 +435,13 @@ async function syncCardAccount(
   }
 
   if (accounted.length > 0) await addImportedRefs(ctx, conn.id, accounted);
-  // Only advance the watermark once we've actually seen card data — otherwise a first
-  // sync that returned an empty CSV would pin the window to "now→now" forever, silently
-  // skipping any rows the user adds afterwards. With no rows AND no prior watermark, leave
-  // it unset so the next sync re-runs the full backfill walk.
-  const hadPriorWatermark = !!(await getSyncState(ctx, conn.id)).cardLastSync;
-  if (acts.length > 0 || hadPriorWatermark) {
+  // Advance the watermark once every window was read, even when they were all empty (an
+  // account with no card spending): otherwise every sync would repeat the multi-year walk.
+  // After a failed export, leave it so the next sync retries the same windows.
+  if (complete) {
     await setCardLastSync(ctx, conn.id, startedAt);
   } else {
-    log.push("Card account: no rows found yet — leaving the backfill window open for next sync.");
+    log.push("Card history incomplete (an export failed); the next sync retries it.");
   }
   if (imported > 0 || duplicates > 0) log.push(`Card account: ${imported} imported, ${duplicates} duplicates.`);
   return { imported, duplicates };
@@ -636,7 +650,7 @@ async function syncOne(
     // TRANSACTIONS) `syncCardAccount` imports them via its own CSV window. `undefined` ⇒ off.
     // Skipped for ISA — Trading 212's Stocks ISA has no card, so creating the side account
     // would just create an empty stub.
-    const isIsa = conn.kind === "isa";
+    const isIsa = connectionKind(conn) === "isa";
     if (settings.extractCard && isIsa) {
       log.push("Card extraction skipped: ISA accounts don't have a card.");
     }

@@ -43,6 +43,24 @@ const NON_RETRYABLE = /not approved|not allowed|must use|must include|cannot inc
 
 const TRANSIENT_STATUS = new Set([500, 502, 503, 504]);
 
+/** Raised when Wealthfolio has not approved a network host for the add-on. */
+export class HostNotApprovedError extends Error {
+  constructor(readonly host: string) {
+    super(
+      `Wealthfolio has not approved network access to ${host} for this add-on. Open ` +
+        "Settings → Add-ons → this add-on → Permissions, tick the network host that covers " +
+        `${host} (installing an update can untick them), save, and try again.`,
+    );
+    this.name = "HostNotApprovedError";
+  }
+}
+
+/** Turns the host's "Addon network host 'x' is not approved" refusal into an actionable error. */
+export function unapprovedHostError(message: string): HostNotApprovedError | null {
+  const m = /network host '([^']+)' is not approved/i.exec(message);
+  return m ? new HostNotApprovedError(m[1]) : null;
+}
+
 /** Lower-cases header names: the host returns them as received. */
 export function header(res: NetworkResponse, name: string): string | undefined {
   const want = name.toLowerCase();
@@ -89,6 +107,8 @@ export async function brokeredRequest(
       res = await ctx.api.network.request(req);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      const unapproved = unapprovedHostError(message);
+      if (unapproved) throw unapproved;
       if (NON_RETRYABLE.test(message) || transport >= maxTransport) {
         throw err instanceof Error ? err : new Error(message);
       }

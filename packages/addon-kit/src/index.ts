@@ -15,6 +15,8 @@ export {
   brokeredRequest,
   brokeredJson,
   HttpError,
+  HostNotApprovedError,
+  unapprovedHostError,
   header,
   retryDelayMs,
   withQuery,

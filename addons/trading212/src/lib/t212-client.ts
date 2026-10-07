@@ -1,5 +1,6 @@
 import type { AddonContext } from "@wealthfolio/addon-sdk";
 import {
+  HostNotApprovedError,
   HttpError,
   brokeredRequest,
   header,
@@ -396,6 +397,7 @@ function nextPageQuery(nextPagePath: string, q: number): URLSearchParams {
 
 /** Turns a broker refusal for the download host into an actionable message naming the host. */
 function describeDownloadError(err: unknown, url: string): Error {
+  if (err instanceof HostNotApprovedError) return err; // already says what to do
   const message = err instanceof Error ? err.message : String(err);
   if (TOO_LARGE.test(message)) return err instanceof Error ? err : new Error(message);
   if (/approved|allowed|declared/i.test(message)) {

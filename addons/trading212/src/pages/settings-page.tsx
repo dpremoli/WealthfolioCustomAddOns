@@ -30,6 +30,7 @@ import { isUnauthorized } from "../lib/t212-client";
 import type { T212Connection, T212Env, T212Settings, T212TrackingMode } from "../types";
 import {
   addConnection,
+  connectionKind,
   ensureMigrated,
   ensureProviderAccount,
   getConnections,
@@ -124,7 +125,7 @@ function ConnectionRow({
     }
   }
 
-  const kind = conn.kind ?? "invest";
+  const kind = connectionKind(conn);
   return (
     <div className="flex flex-col gap-3 rounded-lg border bg-card p-3">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">

@@ -1,6 +1,6 @@
 {
   "name": "monzo-addon",
-  "version": "2.3.0",
+  "version": "2.3.1",
   "private": true,
   "description": "Sync Monzo Bank transactions into Wealthfolio cash accounts (direct API, no proxy)",
   "type": "module",

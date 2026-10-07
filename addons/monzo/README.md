@@ -184,6 +184,7 @@ Only rows near the sync boundary could be affected, and only if Monzo returns th
 | Symptom | Cause / fix |
 |---|---|
 | Monzo says it "couldn't identify who you'd like to connect" | The redirect URL does not match the one on your Monzo client exactly. Fix one of them, save, and click Connect again. |
+| "Wealthfolio has not approved network access to api.monzo.com" | Wealthfolio only lets an add-on reach the hosts you ticked in its permission dialog, and installing an update can leave them unticked. Open **Settings → Add-ons → Monzo Bank Sync → Permissions**, tick `api.monzo.com`, save, and try again. |
 | **403** / "Monzo refused access" | The connection has not been approved in the **Monzo app** yet. Approve it there, then sync again. If you already did, disconnect and reconnect. |
 | "Monzo rejected the code" | The code was used already, expired, or the client ID/secret/redirect URL differ from the registered ones. Press **Connect Monzo** (or **New link**) and paste a fresh result straight away. If the redirect URL points at a server that is still running (such as the v1 proxy's `/callback`), that server redeems the code first: stop it or use a redirect URL nothing answers. |
 | "That is the Monzo login link itself" | You pasted the `auth.monzo.com` link. Open it, log in via the email, then paste the address you land on. |

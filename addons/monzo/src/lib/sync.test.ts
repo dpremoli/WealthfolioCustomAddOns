@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   KEY_CATEGORY_LABELS,
   KEY_EXPIRES_AT,
@@ -29,7 +29,7 @@ function setup(txs: MonzoTransaction[], accountType = "uk_retail") {
     wfAccounts: [{ id: WF_ACC, name: "Monzo Current" }],
     handler: (req) => {
       const u = new URL(req.url);
-      if (u.pathname === "/accounts") return json(200, { accounts: [{ id: MONZO_ACC, account_type: accountType }] });
+      if (u.pathname === "/accounts") return json(200, { accounts: [{ id: MONZO_ACC, type: accountType }] });
       return json(200, { transactions: txs });
     },
   });
@@ -81,7 +81,7 @@ describe("runSync reconcile", () => {
     t.state.handler = (req) => {
       const u = new URL(req.url);
       return u.pathname === "/accounts"
-        ? json(200, { accounts: [{ id: MONZO_ACC, account_type: "uk_retail" }] })
+        ? json(200, { accounts: [{ id: MONZO_ACC, type: "uk_retail" }] })
         : json(200, { transactions: handlerTxs });
     };
     const result = await runSync(t.ctx);
@@ -182,7 +182,7 @@ describe("runSync watermark", () => {
       wfAccounts: [{ id: WF_ACC, name: "Monzo Current" }],
       handler: (req) => {
         const u = new URL(req.url);
-        if (u.pathname === "/accounts") return json(200, { accounts: [{ id: MONZO_ACC, account_type: "uk_retail" }] });
+        if (u.pathname === "/accounts") return json(200, { accounts: [{ id: MONZO_ACC, type: "uk_retail" }] });
         if (first && !u.searchParams.get("since")) {
           first = false;
           return json(403, { code: "forbidden.verification_required" });
@@ -235,6 +235,32 @@ describe("runSync watermark", () => {
     const live = tx({ settled: "", created: "2026-05-18T00:00:00.000Z" });
     expect(pendingHoldBack([stale, declined], now)).toBeNull();
     expect(pendingHoldBack([stale, declined, live], now)).toBe("2026-05-18T00:00:00.000Z");
+  });
+});
+
+describe("runSync spending categories", () => {
+  it("keeps Wealthfolio's categorisation rules in step after importing", async () => {
+    const t = setup([tx({ category: "groceries" })]);
+    const saveRule = vi.fn(async (r: unknown) => r);
+    const rerunRules = vi.fn(async () => 1);
+    (t.ctx.api as unknown as Record<string, unknown>).spending = {
+      getCategories: async () => [
+        { kind: "expense", taxonomyId: "e", categoryId: "c-groc", key: "groceries", name: "Groceries", path: "Groceries" },
+      ],
+      saveRule,
+      rerunRules,
+    };
+    const result = await runSync(t.ctx);
+    expect(saveRule).toHaveBeenCalledWith(expect.objectContaining({ ruleKey: "monzo-groceries", categoryId: "c-groc" }));
+    expect(rerunRules).toHaveBeenCalledWith(true);
+    expect(result.log?.join("\n")).toMatch(/1 activity categorised/);
+  });
+
+  it("still syncs when the Spending API is unavailable", async () => {
+    const t = setup([tx()]);
+    const result = await runSync(t.ctx);
+    expect(result.imported).toBe(1);
+    expect(result.log?.join("\n")).toMatch(/Spending categories not updated/);
   });
 });
 

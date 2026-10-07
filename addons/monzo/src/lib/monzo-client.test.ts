@@ -31,15 +31,17 @@ describe("MonzoClient.getAccounts", () => {
       handler: () =>
         json(200, {
           accounts: [
-            { id: "acc_1", account_type: "uk_retail" },
-            { id: "acc_2", account_type: "uk_monzo_flex" },
-            { id: "acc_3", account_type: "uk_retail", closed: true },
-            { id: "acc_4", account_type: "uk_monzo_flex_backing_loan" },
+            { id: "acc_1", type: "uk_retail" },
+            { id: "acc_2", type: "uk_monzo_flex" },
+            { id: "acc_3", type: "uk_retail", closed: true },
+            { id: "acc_4", type: "uk_monzo_flex_backing_loan" },
           ],
         }),
     });
     const accounts = await new MonzoClient(t.ctx).getAccounts();
     expect(accounts.map((a) => a.id)).toEqual(["acc_1", "acc_2"]);
+    // The API names the field `type`; it is copied to `account_type` for the rest of the add-on.
+    expect(accounts.map((a) => a.account_type)).toEqual(["uk_retail", "uk_monzo_flex"]);
     const req = t.requests[0];
     expect(req.url).toBe("https://api.monzo.com/accounts");
     expect(req.auth).toEqual({ type: "bearer", secretKey: "monzo_access_token" });
@@ -114,7 +116,7 @@ describe("MonzoClient auth handling", () => {
         if (req.url.endsWith("/oauth2/token")) {
           return json(200, { access_token: "acc-2", refresh_token: "ref-2", expires_in: 21600 });
         }
-        return apiCalls++ === 0 ? json(401, { code: "unauthorized" }) : json(200, { accounts: [{ id: "a", account_type: "uk_retail" }] });
+        return apiCalls++ === 0 ? json(401, { code: "unauthorized" }) : json(200, { accounts: [{ id: "a", type: "uk_retail" }] });
       },
     });
     const accounts = await new MonzoClient(t.ctx).getAccounts();

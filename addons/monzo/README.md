@@ -12,12 +12,21 @@ Monzo, paste its details into the add-on, and connect.
 
 - Connects to Monzo with OAuth (a confidential client that you own) and keeps the
   connection alive by refreshing the access token automatically.
-- Creates a Wealthfolio **cash account** for each of your Monzo accounts (current, joint,
-  Flex, ...) and syncs new transactions into them, incrementally.
+- Creates a Wealthfolio account for each of your Monzo accounts and syncs new transactions
+  into them, incrementally: a **cash** account for current and joint accounts, a **credit
+  card** account for Flex (a credit line you repay). The type is set when the account is
+  created; to retype one made by an older version, use Wealthfolio's **Update Account**
+  dialog.
 - Imports debits as `WITHDRAWAL` and credits as `DEPOSIT` cash activities, using
   Wealthfolio's `$CASH-<currency>` cash symbol. The merchant, Monzo category, location,
-  foreign-currency amount and your notes are kept in the activity comment, so
-  **Wealthfolio's Spending module can categorise these cash activities** for you.
+  foreign-currency amount and your notes are kept in the activity comment.
+- **Files transactions under Wealthfolio's spending categories.** Each sync keeps one
+  categorisation rule per Monzo category (Settings → Spending → Rules, named
+  "Monzo: Groceries" and so on) pointing at the matching Wealthfolio category (Groceries,
+  Restaurants, Transport, …), then re-runs rules over uncategorised activities, so new and
+  already-imported transactions get their category. Categories you set by hand are never
+  overwritten; "General" and transfers are left for you or Wealthfolio to categorise. Spending
+  must be turned on for the account in Wealthfolio for the categories to show up there.
 - Skips what should not count as spending: declined and zero-value transactions, pending
   transactions (Flex purchases are the exception, they never "settle"), pot transfers, the monthly Flex repayment (the purchases
   are already on the Flex account) and savings-category moves such as investment transfers.
@@ -47,7 +56,7 @@ Build the package (or use a release zip):
 
 ```bash
 cd addons/monzo
-pnpm bundle          # creates dist/monzo-addon-2.0.0.zip
+pnpm bundle          # creates dist/monzo-addon-<version>.zip
 ```
 
 In Wealthfolio: **Settings -> Add-ons -> Install from ZIP**, pick the zip, and review the
@@ -74,10 +83,12 @@ permissions. The add-on asks for:
 6. Press **Complete connection**.
 7. **Approve access in the Monzo app.** Monzo requires strong customer authentication: until
    you approve the new connection in the app, every API call returns **403** and nothing
-   syncs.
+   syncs. The request can take a minute to show up in the app; keep the Settings page open,
+   it checks every few seconds.
 
-Wealthfolio cash accounts are then created automatically. Return to the dashboard and press
-**Sync Now**.
+As soon as the approval comes through, the Settings page creates the Wealthfolio cash
+accounts and runs the first sync by itself, inside the 5 minutes in which Monzo shares your
+full history. After that, use **Sync Now** on the dashboard.
 
 The add-on checks the `state` value in the pasted URL against the one it generated, so a
 link that did not come from your own Connect click is rejected.
@@ -122,20 +133,28 @@ dated just before your first imported transaction.
 
 v2 replaces the proxy, so most of the old setup can be thrown away.
 
-1. **Reinstall the zip.** Install `monzo-addon-2.0.0.zip` over the old version
+1. **Reinstall the zip.** Install the latest `monzo-addon-<version>.zip` over the old version
    (Settings -> Add-ons). Approve the new permissions.
 2. **Your data is migrated automatically** the first time the add-on enables: the account
    mapping, last-sync time and category labels move from the keyring to add-on storage, the
    old tokens are split into the new keys, and the saved proxy URL is deleted.
-3. **Enter your Client ID and Client Secret** in Settings (the same ones the proxy used, from
+3. **Stop and remove the proxy container first** (`docker stop monzo-proxy && docker rm
+   monzo-proxy`, or `docker compose down` in its folder) and delete its checkout. Do this
+   before reconnecting: your client's redirect URL probably points at the proxy's
+   `/callback`, and while the proxy runs it redeems every login code itself (codes are
+   single-use), so the add-on's own exchange is then rejected. Once it is stopped, that
+   redirect URL can stay as it is: the page simply fails to load, and the code stays in the
+   address bar for you to copy.
+4. **Enter your Client ID and Client Secret** in Settings (the same ones the proxy used, from
    developers.monzo.com) and set the **Redirect URL** to the one registered on that client.
    v1 kept the credentials in the proxy, so Wealthfolio does not have them. Until you enter
    them, the carried-over connection works until its access token expires (up to 6 hours),
    then cannot be renewed.
-4. If renewal is rejected, or anything looks off, press **Reconnect Monzo** and go through
+5. If renewal is rejected, or anything looks off, press **Reconnect Monzo** and go through
    the paste-the-URL step again. Your account mapping and history are kept.
-5. Stop and remove the proxy container (`monzo-proxy`) and delete its checkout. It is no
-   longer used and the `proxies/monzo` directory no longer exists in this repo.
+6. Accounts created by v1 or v2.0/2.1 may be named after Monzo's raw ids (`user_…`,
+   `monzoflex_…`): those versions read the account type from the wrong field. Rename them
+   in Wealthfolio if you like; the mapping is by id, so syncing is unaffected.
 
 ### Fixing cash imported by v1
 
@@ -155,7 +174,8 @@ Only rows near the sync boundary could be affected, and only if Monzo returns th
 |---|---|
 | Monzo says it "couldn't identify who you'd like to connect" | The redirect URL does not match the one on your Monzo client exactly. Fix one of them, save, and click Connect again. |
 | **403** / "Monzo refused access" | The connection has not been approved in the **Monzo app** yet. Approve it there, then sync again. If you already did, disconnect and reconnect. |
-| "Monzo rejected the code" | The code was used already, expired, or the client ID/secret/redirect URL differ from the registered ones. Press **Connect Monzo** (or **New link**) and paste a fresh result straight away. |
+| "Monzo rejected the code" | The code was used already, expired, or the client ID/secret/redirect URL differ from the registered ones. Press **Connect Monzo** (or **New link**) and paste a fresh result straight away. If the redirect URL points at a server that is still running (such as the v1 proxy's `/callback`), that server redeems the code first: stop it or use a redirect URL nothing answers. |
+| "That is the Monzo login link itself" | You pasted the `auth.monzo.com` link. Open it, log in via the email, then paste the address you land on. |
 | "state does not match" | The pasted URL is from an older attempt. Use the newest link, or paste only the `code`. |
 | "Monzo rejected the saved refresh token" | The tokens are no longer valid or the client details do not match. Check Settings, or reconnect. |
 | "Enter your Monzo client ID and secret" | Upgrading from v1: see the upgrade notes. |

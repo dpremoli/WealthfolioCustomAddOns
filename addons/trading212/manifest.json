@@ -1,7 +1,7 @@
 {
   "id": "trading212-addon",
   "name": "Trading 212 Sync",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "Sync your Trading 212 investment account (trades, dividends, deposits, withdrawals, fees and interest) into Wealthfolio, directly from the Trading 212 API.",
   "author": "dpremoli",
   "license": "GPL-3.0-only",
@@ -62,6 +62,11 @@
       "category": "secrets",
       "functions": ["set", "get", "delete", "use"],
       "purpose": "Store each Trading 212 API key ID and secret in the keyring and let the host attach it to Trading 212 requests; also moves v1.x settings out of the keyring"
+    },
+    {
+      "category": "spending",
+      "functions": ["getCategories", "saveRule", "rerunRules"],
+      "purpose": "When card extraction is on, create rules that file Trading 212 card spending under the matching Wealthfolio spending categories"
     },
     {
       "category": "network",

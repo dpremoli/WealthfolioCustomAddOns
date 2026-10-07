@@ -43,12 +43,14 @@ describe("ensureAccountMapping", () => {
     expect(t.created).toHaveLength(0);
   });
 
-  it("creates cash accounts for the rest, once each, in the account currency", async () => {
+  it("creates accounts for the rest (cash, or credit card for Flex), once each, in the account currency", async () => {
     const t = makeCtx();
     const handled = new Set<string>();
     const first = await ensureAccountMapping(t.ctx, [current, flex], t.wfAccounts, {}, handled);
     expect(first.created).toEqual(["Monzo Current (12345678)", "Monzo Flex"]);
     expect(t.created[0]).toMatchObject({ accountType: "CASH", currency: "GBP", trackingMode: "TRANSACTIONS" });
+    // Flex is a credit line, so it becomes a credit card account.
+    expect(t.created[1]).toMatchObject({ name: "Monzo Flex", accountType: "CREDIT_CARD" });
 
     // A second pass (e.g. a re-render) must not create duplicates.
     const second = await ensureAccountMapping(t.ctx, [current, flex], t.wfAccounts, first.mapping, handled);

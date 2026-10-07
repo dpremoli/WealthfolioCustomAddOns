@@ -82,6 +82,16 @@ describe("parsePastedAuth", () => {
   });
 });
 
+describe("parsePastedAuth — login link pasted by mistake", () => {
+  it("explains that the login link must be opened first", () => {
+    expect(() =>
+      parsePastedAuth(
+        "https://auth.monzo.com/?client_id=oauth2client_x&redirect_uri=https%3A%2F%2Flocalhost%2Fcb&response_type=code&state=s",
+      ),
+    ).toThrow(/login link itself/);
+  });
+});
+
 describe("verifyState", () => {
   it("passes when the pasted state matches", () => {
     expect(() => verifyState({ code: "c", state: "s" }, "s")).not.toThrow();

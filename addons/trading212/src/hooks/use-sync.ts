@@ -5,6 +5,8 @@ import {
   markLastDone,
   round2,
   selectNewActivities,
+  spendingRulesNote,
+  syncSpendingRules,
   type SyncProgress as KitSyncProgress,
   type SyncStep as KitSyncStep,
 } from "@wf-addons/kit";
@@ -34,6 +36,7 @@ import {
   mergeHoldingsBySymbol,
 } from "../lib/mapper";
 import { parseCsv, mapCsvRow } from "../lib/csv";
+import { cardSpendingRules } from "../lib/spending-category";
 import { SymbolResolver, type ResolveDiag } from "../lib/symbol-resolver";
 import {
   addImportedRefs,
@@ -300,6 +303,15 @@ async function fetchCardActivities(
   }
   if (out.length > 0) log.push(`Card sync: ${out.length} card row(s) to import.`);
   return out;
+}
+
+/**
+ * Files card spending under Wealthfolio's spend categories: keeps one categorisation rule per
+ * card label in place and re-runs rules over uncategorised activities. Best effort.
+ */
+async function categoriseCardSpending(ctx: AddonContext, log: string[]): Promise<void> {
+  const note = spendingRulesNote(await syncSpendingRules(ctx, cardSpendingRules()));
+  if (note) log.push(note);
 }
 
 /** Marks a row to bypass Wealthfolio's content-hash dedupe (see {@link reconcileWithAccount}). */
@@ -640,6 +652,7 @@ async function syncOne(
         out.imported += card.imported;
         out.duplicates += card.duplicates;
         out.card = card;
+        await categoriseCardSpending(ctx, log);
         // Surface the card import in the Summary tab too — HOLDINGS only has Holdings + Card.
         if (card.imported > 0) {
           out.breakdown = { ...(out.breakdown ?? {}), Card: card.imported };
@@ -925,6 +938,7 @@ async function syncOne(
     }
 
     if (cardResult) tally.Card = (tally.Card ?? 0) + cardResult.imported;
+    if (cardAccountId) await categoriseCardSpending(ctx, log);
 
     const breakdownLine =
       Object.entries(tally)

@@ -1,0 +1,37 @@
+{
+  "name": "@wf-addons/kit",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Shared building blocks for the Wealthfolio add-ons in this repo (source-only; bundled into each add-on)",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./ui": "./src/ui/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "type-check": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@tanstack/react-query": "catalog:",
+    "@wealthfolio/addon-sdk": "catalog:",
+    "@wealthfolio/ui": "catalog:",
+    "react": "catalog:"
+  },
+  "devDependencies": {
+    "@tanstack/react-query": "catalog:",
+    "@testing-library/react": "catalog:",
+    "@types/node": "catalog:",
+    "@types/react": "catalog:",
+    "@types/react-dom": "catalog:",
+    "@vitejs/plugin-react": "catalog:",
+    "@wealthfolio/addon-sdk": "catalog:",
+    "@wealthfolio/ui": "catalog:",
+    "jsdom": "catalog:",
+    "react": "catalog:",
+    "react-dom": "catalog:",
+    "typescript": "catalog:",
+    "vite": "catalog:",
+    "vitest": "catalog:"
+  }
+}

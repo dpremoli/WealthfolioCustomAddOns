@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import type { AddonContext } from "@wealthfolio/addon-sdk";
 import {
   Badge,
   Button,
@@ -10,17 +9,14 @@ import {
   CardHeader,
   CardTitle,
 } from "@wealthfolio/ui";
+import { addonRoute, jsonStore, selectNewActivities, type AddonPageProps } from "@wf-addons/kit";
+import { ACCOUNTS_KEY, ADDON_ID } from "../constants";
 import { parseRevolutCsv } from "../lib/csv-parser";
-import {
-  mapTransactionToActivity,
-  openingBalanceActivity,
-  selectNewActivities,
-} from "../lib/mapper";
+import { mapTransactionToActivity, openingBalanceActivity } from "../lib/mapper";
 import type { RevolutTransaction } from "../types";
 
-const ACCOUNTS_KEY = "revolut_accounts";
-
-export default function CsvImportPage({ ctx }: { ctx: AddonContext }) {
+export default function CsvImportPage({ ctx }: AddonPageProps) {
+  const store = jsonStore(ctx.api.storage);
   const fileRef = useRef<HTMLInputElement>(null);
   const [transactions, setTransactions] = useState<RevolutTransaction[]>([]);
   const [fileName, setFileName] = useState<string | null>(null);
@@ -47,23 +43,17 @@ export default function CsvImportPage({ ctx }: { ctx: AddonContext }) {
   useEffect(() => {
     if (wfAccounts.length === 0 || Object.keys(mapping).length > 0) return;
     (async () => {
-      const raw = await ctx.api.secrets.get(ACCOUNTS_KEY);
-      if (!raw) return;
-      try {
-        const saved = JSON.parse(raw) as Record<string, string>;
-        const valid = Object.fromEntries(
-          Object.entries(saved).filter(([, id]) => wfAccounts.some((a) => a.id === id)),
-        );
-        if (Object.keys(valid).length > 0) setMapping(valid);
-      } catch {
-        // ignore a corrupt secret — the user can re-map
-      }
+      const saved = await store.get<Record<string, string>>(ACCOUNTS_KEY, {});
+      const valid = Object.fromEntries(
+        Object.entries(saved).filter(([, id]) => wfAccounts.some((a) => a.id === id)),
+      );
+      if (Object.keys(valid).length > 0) setMapping(valid);
     })();
-  }, [wfAccounts, mapping, ctx]);
+  }, [wfAccounts, mapping]);
 
   async function persistMapping(next: Record<string, string>) {
     setMapping(next);
-    await ctx.api.secrets.set(ACCOUNTS_KEY, JSON.stringify(next));
+    await store.set(ACCOUNTS_KEY, next);
   }
 
   async function createAccountForCurrency(currency: string) {
@@ -100,7 +90,7 @@ export default function CsvImportPage({ ctx }: { ctx: AddonContext }) {
     setIsImporting(true);
     setError(null);
     try {
-      await ctx.api.secrets.set(ACCOUNTS_KEY, JSON.stringify(mapping));
+      await store.set(ACCOUNTS_KEY, mapping);
       let imported = 0;
       let duplicates = 0;
       // Import each currency's rows into its own account so every account reconciles to
@@ -114,15 +104,12 @@ export default function CsvImportPage({ ctx }: { ctx: AddonContext }) {
         const opening = openingBalanceActivity(subset, accountId);
         const desired = opening ? [opening, ...movements] : movements;
 
-        // Wealthfolio's importer merges any two activities sharing (account, day, type, amount),
-        // ignoring the comment and our id, which silently drops genuinely-distinct same-day
-        // transactions. We force every row in and de-duplicate ourselves by reconciling against
-        // what's already in the account — so re-imports add nothing while real duplicates survive.
+        // Wealthfolio drops rows whose content matches an existing activity or another row
+        // in the batch, so genuine repeats (two identical transfers on one day) would vanish.
+        // The kit reconciles against what's already in the account and force-imports the rest,
+        // so re-imports add nothing while real duplicates survive.
         const existing = await ctx.api.activities.getAll(accountId);
-        const toImport = selectNewActivities(desired, existing).map((a) => ({
-          ...a,
-          forceImport: true,
-        }));
+        const toImport = selectNewActivities(desired, existing);
         duplicates += desired.length - toImport.length;
         if (toImport.length > 0) {
           const r = await ctx.api.activities.import(toImport);
@@ -146,7 +133,7 @@ export default function CsvImportPage({ ctx }: { ctx: AddonContext }) {
             Import transactions from a Revolut account statement.
           </p>
         </div>
-        <Button variant="outline" onClick={() => ctx.api.navigation.navigate("/addons/revolut")}>
+        <Button variant="outline" onClick={() => ctx.api.navigation.navigate(addonRoute(ADDON_ID))}>
           ← Back
         </Button>
       </div>

@@ -1,49 +1,50 @@
 {
   "name": "monzo-addon",
   "version": "1.2.0",
+  "private": true,
   "description": "Sync Monzo Bank transactions into Wealthfolio cash accounts",
   "type": "module",
   "main": "dist/addon.js",
   "author": "dpremoli",
-  "license": "SEE LICENSE IN LICENSE",
+  "license": "GPL-3.0-only",
   "scripts": {
     "build": "vite build",
     "dev": "vite build --watch",
     "dev:server": "wealthfolio dev",
     "clean": "rm -rf dist",
-    "package": "mkdir -p dist && zip -r dist/$npm_package_name-$npm_package_version.zip manifest.json dist/ README.md",
-    "bundle": "npm run clean && npm run build && npm run package",
+    "package": "node ../../tooling/package-addon.mjs",
+    "bundle": "pnpm clean && pnpm build && pnpm package",
     "type-check": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@tanstack/react-query": "^5.90.20",
-    "@wealthfolio/addon-sdk": "^3.3.0",
-    "@wealthfolio/ui": "^3.3.0"
-  },
-  "devDependencies": {
-    "@tailwindcss/vite": "^4.1.18",
-    "@testing-library/react": "^16.0.0",
-    "@types/node": "^20.19.33",
-    "@types/react": "^19.2.13",
-    "@types/react-dom": "^19.2.3",
-    "@vitejs/plugin-react": "^5.1.4",
-    "jsdom": "^24.0.0",
-    "rollup-plugin-external-globals": "^0.13.0",
-    "tailwind-merge": "^3.4.0",
-    "tailwindcss": "^4.1.18",
-    "typescript": "^5.9.3",
-    "vite": "^7.3.1",
-    "vitest": "^2.1.0"
+    "@wf-addons/kit": "workspace:*"
   },
   "peerDependencies": {
-    "react": "^19.2.4",
-    "react-dom": "^19.2.4"
+    "@tanstack/react-query": "catalog:",
+    "@wealthfolio/addon-sdk": "catalog:",
+    "@wealthfolio/ui": "catalog:",
+    "react": "catalog:",
+    "react-dom": "catalog:"
   },
-  "files": [
-    "dist/",
-    "manifest.json",
-    "README.md"
-  ]
+  "devDependencies": {
+    "@tailwindcss/vite": "catalog:",
+    "@tanstack/react-query": "catalog:",
+    "@testing-library/react": "catalog:",
+    "@types/node": "catalog:",
+    "@types/react": "catalog:",
+    "@types/react-dom": "catalog:",
+    "@vitejs/plugin-react": "catalog:",
+    "@wealthfolio/addon-dev-tools": "^3.9.0",
+    "@wealthfolio/addon-sdk": "catalog:",
+    "@wealthfolio/ui": "catalog:",
+    "jsdom": "catalog:",
+    "react": "catalog:",
+    "react-dom": "catalog:",
+    "tailwindcss": "catalog:",
+    "typescript": "catalog:",
+    "vite": "catalog:",
+    "vitest": "catalog:"
+  }
 }

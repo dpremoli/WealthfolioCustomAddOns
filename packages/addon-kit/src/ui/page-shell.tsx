@@ -12,7 +12,7 @@ interface PageShellProps {
 }
 
 /**
- * Consistent page frame used by both Dashboard and Settings. Renders a Wealthfolio-style
+ * Consistent page frame shared by every add-on page. Renders a Wealthfolio-style
  * header (Phosphor icon + heading + subtitle + action slot) over the page content. Kept
  * deliberately light — doesn't use `@wealthfolio/ui`'s `Page`/`PageHeader` because those
  * assume the host app shell's scroll context and rendered oddly inside the addon outlet.

@@ -1,32 +1,59 @@
 {
   "id": "revolut-addon",
   "name": "Revolut CSV Import",
-  "version": "1.1.0",
-  "description": "Import Revolut account statements (CSV) into a Wealthfolio cash account for the spending module.",
+  "version": "2.0.0",
+  "description": "Import Revolut account statements (CSV) into Wealthfolio cash accounts, one per currency, for the spending module.",
   "author": "dpremoli",
-  "main": "addon.js",
-  "sdkVersion": "3.3.0",
+  "license": "GPL-3.0-only",
+  "main": "dist/addon.js",
+  "sdkVersion": "3.9.0",
+  "minWealthfolioVersion": "3.9.0",
   "enabled": true,
+  "keywords": ["revolut", "bank", "csv", "import", "spending"],
+  "contributes": {
+    "routes": [
+      { "id": "revolut" },
+      { "id": "revolut-import", "path": "import" }
+    ],
+    "links": {
+      "sidebar": [
+        {
+          "id": "revolut",
+          "route": "revolut",
+          "label": "Revolut Import",
+          "icon": "credit-card",
+          "order": 162
+        }
+      ]
+    }
+  },
+  "hostDependencies": {
+    "@tanstack/react-query": "^5.90.0",
+    "@wealthfolio/addon-sdk": "^3.9.0",
+    "@wealthfolio/ui": "^3.9.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
   "permissions": [
     {
       "category": "accounts",
       "functions": ["getAll", "create"],
-      "purpose": "Create and select a Wealthfolio cash account for Revolut"
+      "purpose": "List your accounts and create a dedicated cash account per Revolut currency"
     },
     {
       "category": "activities",
       "functions": ["import", "getAll"],
-      "purpose": "Import Revolut transactions and reconcile against existing ones to avoid duplicates"
+      "purpose": "Import Revolut transactions and reconcile against existing ones so re-imports add nothing"
     },
     {
       "category": "secrets",
-      "functions": ["set", "get"],
-      "purpose": "Remember the chosen Revolut account between imports"
+      "functions": ["get", "delete"],
+      "purpose": "Move the currency-to-account mapping saved by v1.x out of the keyring into add-on storage"
     },
     {
       "category": "ui",
-      "functions": ["sidebar.addItem", "router.add"],
-      "purpose": "Add Revolut navigation and import page"
+      "functions": ["router.add", "navigation.navigate"],
+      "purpose": "Show the Revolut dashboard and import pages"
     }
   ]
 }

@@ -1,4 +1,5 @@
 import type { ActivityImport } from "@wealthfolio/addon-sdk";
+import { cashSymbol, fnv1a, round2 } from "@wf-addons/kit";
 import type { RevolutTransaction } from "../types";
 
 const DEPOSIT = "DEPOSIT" as ActivityImport["activityType"];
@@ -26,21 +27,6 @@ export function mapType(revolutType: string, amount: number): ActivityImport["ac
   if (t === "transfer" || t === "exchange") return amount >= 0 ? TRANSFER_IN : TRANSFER_OUT;
   if (t === "topup") return DEPOSIT;
   return amount >= 0 ? DEPOSIT : WITHDRAWAL;
-}
-
-/** Rounds to 2 decimal places, avoiding binary float drift (e.g. 10.005 → 10.01). */
-function round2(n: number): number {
-  return Math.round((n + Number.EPSILON) * 100) / 100;
-}
-
-/** FNV-1a string hash → short hex, for a stable opening-balance id. */
-function hash(input: string): string {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < input.length; i++) {
-    h ^= input.charCodeAt(i);
-    h = Math.imul(h, 0x01000193);
-  }
-  return (h >>> 0).toString(16).padStart(8, "0");
 }
 
 /**
@@ -82,13 +68,13 @@ export function openingBalanceActivity(
   const date = `${day}T00:00:00.000Z`;
 
   return {
-    id: `revolut-opening-${hash(`${currency}|${opening}|${day}`)}`,
+    id: `revolut-opening-${fnv1a(`${currency}|${opening}|${day}`)}`,
     accountId: wealthfolioAccountId,
     activityType: opening >= 0 ? DEPOSIT : WITHDRAWAL,
     date,
     amount: Math.abs(opening),
     currency,
-    symbol: `$CASH-${currency}`,
+    symbol: cashSymbol(currency),
     isValid: true,
     isDraft: false,
     comment: "Opening balance",
@@ -110,12 +96,7 @@ export function mapTransactionToActivity(
   wealthfolioAccountId: string,
 ): ActivityImport[] {
   const currency = tx.currency || "GBP";
-  // Cash activities (DEPOSIT/WITHDRAWAL/TRANSFER_*/FEE) are cash-only and never reference a
-  // tradable asset. Wealthfolio represents the cash leg with the synthetic
-  // `$CASH-<CCY>` symbol (priced at 1.0); using a bare currency code like "GBP"
-  // makes the host treat it as a security and value it via an FX quote, which
-  // produces wildly inflated account totals.
-  const symbol = `$CASH-${currency}`;
+  const symbol = cashSymbol(currency);
 
   const activities: ActivityImport[] = [
     {
@@ -148,60 +129,4 @@ export function mapTransactionToActivity(
   }
 
   return activities;
-}
-
-/** Minimal shape of an already-imported activity, as returned by `activities.getAll`. */
-export interface ExistingActivity {
-  activityType: string;
-  date: Date | string;
-  amount: number | string | null;
-  comment?: string | null;
-}
-
-/** The merge key Wealthfolio collapses on at import time: day, type, amount (to 2dp), comment. */
-function dedupKey(
-  activityType: string,
-  date: Date | string,
-  amount: number | string | null | undefined,
-  comment: string | null | undefined,
-): string {
-  const iso = date instanceof Date ? date.toISOString() : String(date);
-  const day = iso.slice(0, 10);
-  const amt = Number(amount ?? 0).toFixed(2);
-  return `${day}|${activityType}|${amt}|${comment ?? ""}`;
-}
-
-/**
- * Picks the activities that aren't already in the account, so re-imports add nothing while
- * genuinely repeated transactions all land.
- *
- * Wealthfolio's import silently merges any two activities sharing (account, calendar day, type,
- * amount) — it ignores both the comment and our `id`. So two distinct transactions on the same
- * day for the same amount (e.g. two £1000 "Withdrawing savings") collapse into one, dropping real
- * money. The import call therefore runs with `forceImport` to bypass that merge — which means we
- * must supply idempotency ourselves, or a second import of the same file would double everything.
- *
- * This reconciles by *count* per (day, type, amount, comment): if the account already holds N rows
- * for a key, the first N desired rows for that key are skipped and the rest are kept. Re-importing
- * the same statement yields an empty set; importing an overlapping/extended statement adds only the
- * surplus. It does not depend on the host preserving our `id`.
- */
-export function selectNewActivities(
-  desired: ActivityImport[],
-  existing: ExistingActivity[],
-): ActivityImport[] {
-  const have = new Map<string, number>();
-  for (const e of existing) {
-    const k = dedupKey(e.activityType, e.date, e.amount, e.comment);
-    have.set(k, (have.get(k) ?? 0) + 1);
-  }
-  const seen = new Map<string, number>();
-  const out: ActivityImport[] = [];
-  for (const a of desired) {
-    const k = dedupKey(a.activityType, a.date ?? "", a.amount, a.comment);
-    const idx = seen.get(k) ?? 0;
-    seen.set(k, idx + 1);
-    if (idx >= (have.get(k) ?? 0)) out.push(a);
-  }
-  return out;
 }

@@ -1,35 +1,49 @@
 import { useQuery } from "@tanstack/react-query";
-import type { AddonContext } from "@wealthfolio/addon-sdk";
 import { Button, Card, CardContent, EmptyPlaceholder, Icons } from "@wealthfolio/ui";
-import { useSync } from "../hooks/use-sync";
-import { getTokens } from "../hooks/use-tokens";
-import { PageShell } from "../components/page-shell";
-import { SyncActivity } from "../components/sync-activity";
+import { addonRoute, jsonStore, type AddonPageProps } from "@wf-addons/kit";
+import { PageShell, SyncActivity, type SyncPhase } from "@wf-addons/kit/ui";
 import { StatusCard } from "../components/status-card";
+import { ADDON_ID, KEY_LAST_RUN, KEY_LAST_SYNC } from "../constants";
+import { getConnectionStatus } from "../lib/auth";
+import { ensureMigrated } from "../lib/migrate";
+import { useSync } from "../hooks/use-sync";
+import type { SyncPhaseId } from "../types";
 
-const LAST_SYNC_KEY = "monzo_last_sync";
+const PHASES: SyncPhase<SyncPhaseId>[] = [
+  { phase: "fetch", label: "Fetching", icon: "Download" },
+  { phase: "import", label: "Importing", icon: "Import" },
+  { phase: "done", label: "Done", icon: "CheckCircle" },
+];
 
-export default function DashboardPage({ ctx }: { ctx: AddonContext }) {
+export default function DashboardPage({ ctx }: AddonPageProps) {
   const { isSyncing, lastResult, error, progress, steps, sync } = useSync(ctx);
 
-  const { data: tokens } = useQuery({
-    queryKey: ["monzo_tokens"],
-    queryFn: () => getTokens(ctx),
-  });
-
-  const { data: lastSyncIso } = useQuery({
-    queryKey: ["monzo_last_sync", isSyncing],
+  const { data: status } = useQuery({
+    queryKey: ["monzo_status", isSyncing],
     queryFn: async () => {
-      const raw = await ctx.api.secrets.get(LAST_SYNC_KEY);
-      return raw ? (JSON.parse(raw) as string) : null;
+      await ensureMigrated(ctx);
+      return getConnectionStatus(ctx);
     },
   });
 
-  const openSettings = () => ctx.api.navigation.navigate("/addons/monzo/settings");
-  const openImport = () => ctx.api.navigation.navigate("/addons/monzo/import");
+  const { data: lastSyncIso } = useQuery({
+    queryKey: ["monzo_last_run", isSyncing],
+    queryFn: async () => {
+      const store = jsonStore(ctx.api.storage);
+      // KEY_LAST_RUN is when the sync finished; the watermark is the fallback (v1 data).
+      return (
+        (await store.get<string | null>(KEY_LAST_RUN, null)) ??
+        (await store.get<string | null>(KEY_LAST_SYNC, null))
+      );
+    },
+  });
 
-  const connected = !!tokens;
+  const openSettings = () => ctx.api.navigation.navigate(addonRoute(ADDON_ID, "settings"));
+  const openImport = () => ctx.api.navigation.navigate(addonRoute(ADDON_ID, "import"));
+
+  const connected = !!status?.connected;
   const canSync = connected && !isSyncing;
+  const needsSettings = /mapping|settings|reconnect|client|approve|connect/i.test(error ?? "");
 
   return (
     <PageShell
@@ -55,13 +69,13 @@ export default function DashboardPage({ ctx }: { ctx: AddonContext }) {
     >
       {error && (
         <Card className="border-destructive">
-          <CardContent className="pt-6 space-y-2 text-sm text-destructive">
+          <CardContent className="space-y-2 pt-6 text-sm text-destructive">
             <div className="flex items-start gap-2">
               <Icons.AlertTriangle size={18} className="shrink-0" weight="duotone" />
               <span>{error}</span>
             </div>
-            {error.includes("mapping") && (
-              <button className="text-xs underline text-muted-foreground" onClick={openSettings}>
+            {needsSettings && (
+              <button className="text-muted-foreground text-xs underline" onClick={openSettings}>
                 Go to Settings →
               </button>
             )}
@@ -69,7 +83,7 @@ export default function DashboardPage({ ctx }: { ctx: AddonContext }) {
         </Card>
       )}
 
-      <SyncActivity isSyncing={isSyncing} progress={progress} steps={steps} />
+      <SyncActivity phases={PHASES} isSyncing={isSyncing} progress={progress} steps={steps} />
 
       {!connected ? (
         <Card>
@@ -81,7 +95,7 @@ export default function DashboardPage({ ctx }: { ctx: AddonContext }) {
                 </div>
               }
               title="Connect your Monzo account"
-              description="Link Monzo in Settings to sync your transactions into Wealthfolio. Accounts are created automatically. You can also import a Monzo CSV export."
+              description="Add your Monzo OAuth client in Settings and link your account to sync transactions into Wealthfolio. Cash accounts are created automatically. You can also import a Monzo CSV export."
             >
               <div className="mt-4 flex gap-2">
                 <Button onClick={openSettings}>
@@ -97,7 +111,12 @@ export default function DashboardPage({ ctx }: { ctx: AddonContext }) {
           </CardContent>
         </Card>
       ) : (
-        <StatusCard connected={connected} lastSyncIso={lastSyncIso ?? null} result={lastResult} isSyncing={isSyncing} />
+        <StatusCard
+          connected={connected}
+          lastSyncIso={lastSyncIso ?? null}
+          result={lastResult}
+          isSyncing={isSyncing}
+        />
       )}
     </PageShell>
   );

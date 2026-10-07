@@ -1,6 +1,5 @@
 import { useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import type { AddonContext } from "@wealthfolio/addon-sdk";
 import {
   Badge,
   Button,
@@ -10,13 +9,15 @@ import {
   CardHeader,
   CardTitle,
 } from "@wealthfolio/ui";
+import { addonRoute, jsonStore, type AddonPageProps } from "@wf-addons/kit";
+import { ADDON_ID, KEY_CATEGORY_LABELS } from "../constants";
 import { parseMonzoCsv } from "../lib/csv-parser";
 import { isFlexRepayment, isPotTransfer, mapTransactionToActivity } from "../lib/mapper";
+import { ensureMigrated } from "../lib/migrate";
+import { importNew } from "../lib/sync";
 import type { MonzoTransaction } from "../types";
 
-const CATEGORY_LABELS_KEY = "monzo_category_labels";
-
-export default function CsvImportPage({ ctx }: { ctx: AddonContext }) {
+export default function CsvImportPage({ ctx }: AddonPageProps) {
   const fileRef = useRef<HTMLInputElement>(null);
   const [transactions, setTransactions] = useState<MonzoTransaction[]>([]);
   const [fileName, setFileName] = useState<string | null>(null);
@@ -34,8 +35,8 @@ export default function CsvImportPage({ ctx }: { ctx: AddonContext }) {
   const { data: categoryLabels = {} } = useQuery({
     queryKey: ["monzo_category_labels"],
     queryFn: async () => {
-      const raw = await ctx.api.secrets.get(CATEGORY_LABELS_KEY);
-      return raw ? (JSON.parse(raw) as Record<string, string>) : {};
+      await ensureMigrated(ctx);
+      return jsonStore(ctx.api.storage).get<Record<string, string>>(KEY_CATEGORY_LABELS, {});
     },
   });
 
@@ -54,15 +55,10 @@ export default function CsvImportPage({ ctx }: { ctx: AddonContext }) {
       const activities = filtered.map((tx) =>
         mapTransactionToActivity(tx, accountId, categoryLabels),
       );
-      const checked = await ctx.api.activities.checkImport(activities);
-      const toImport = checked.filter((a) => a.isValid !== false && !a.duplicateOfId);
-      const dupes = checked.length - toImport.length;
-      let imported = 0;
-      if (toImport.length > 0) {
-        const r = await ctx.api.activities.import(toImport);
-        imported = r.summary.imported;
-      }
-      setResult({ imported, duplicates: dupes });
+      // Reconcile against what the account already holds (by count, so genuine repeats
+      // survive) and force-import the rest. Safe to re-run or overlap with API syncs.
+      const outcome = await importNew(ctx, accountId, activities);
+      setResult({ imported: outcome.imported, duplicates: outcome.duplicates });
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -76,10 +72,11 @@ export default function CsvImportPage({ ctx }: { ctx: AddonContext }) {
         <div>
           <h1 className="text-2xl font-semibold">Import from CSV</h1>
           <p className="text-muted-foreground mt-1">
-            Import historical transactions from a Monzo CSV export.
+            Import historical transactions from a Monzo CSV export. This is the only way to go
+            back further than the 90 days the Monzo API shares.
           </p>
         </div>
-        <Button variant="outline" onClick={() => ctx.api.navigation.navigate("/addons/monzo")}>
+        <Button variant="outline" onClick={() => ctx.api.navigation.navigate(addonRoute(ADDON_ID))}>
           ← Back
         </Button>
       </div>
@@ -173,7 +170,7 @@ export default function CsvImportPage({ ctx }: { ctx: AddonContext }) {
             {result && !isImporting && (
               <div className="flex gap-2">
                 <Badge variant="outline">{result.imported} imported</Badge>
-                <Badge variant="outline">{result.duplicates} duplicates skipped</Badge>
+                <Badge variant="outline">{result.duplicates} already imported</Badge>
               </div>
             )}
           </CardContent>

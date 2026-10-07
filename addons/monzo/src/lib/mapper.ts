@@ -1,9 +1,20 @@
 import type { ActivityImport } from "@wealthfolio/addon-sdk";
-import type { MonzoTransaction } from "../types";
+import { cashSymbol, round2 } from "@wf-addons/kit";
+import type { MonzoMerchant, MonzoTransaction } from "../types";
 import { resolveCategory } from "./category-map";
 
 const DEPOSIT = "DEPOSIT" as ActivityImport["activityType"];
 const WITHDRAWAL = "WITHDRAWAL" as ActivityImport["activityType"];
+
+/**
+ * The merchant as an object, or null. Requests use `expand[]=merchant`, which makes it
+ * an object; without expansion Monzo sends only the merchant id (a string), which carries
+ * no name or address, so it is ignored here.
+ */
+export function merchantOf(tx: MonzoTransaction): MonzoMerchant | null {
+  const m = tx.merchant;
+  return m && typeof m === "object" ? m : null;
+}
 
 export function isPending(tx: MonzoTransaction): boolean {
   return tx.settled === "";
@@ -17,7 +28,7 @@ export function isFlexRepayment(tx: MonzoTransaction): boolean {
   // The monthly Flex repayment debited from the current account is an internal
   // transfer paying down the Flex balance, not new spending. The matching spend
   // is already imported on the Flex account, so importing this too double-counts.
-  const name = (tx.merchant?.name || tx.description || "").toLowerCase();
+  const name = (merchantOf(tx)?.name || tx.description || "").toLowerCase();
   return tx.category === "transfers" && name.includes("flex");
 }
 
@@ -47,7 +58,8 @@ function buildComment(
   const parts: string[] = [];
 
   // Primary description: prefer merchant name, fall back to description
-  const name = tx.merchant?.name || tx.description;
+  const merchant = merchantOf(tx);
+  const name = merchant?.name || tx.description;
   if (name) parts.push(name);
 
   // Category label (skip "General" as it's noise)
@@ -57,8 +69,8 @@ function buildComment(
   }
 
   // Merchant location
-  const city = tx.merchant?.address?.city;
-  const country = tx.merchant?.address?.country;
+  const city = merchant?.address?.city;
+  const country = merchant?.address?.country;
   if (city && country) parts.push(`${city}, ${country}`);
   else if (city) parts.push(city);
 
@@ -86,7 +98,7 @@ export function mapTransactionToActivity(
   categoryLabels: Record<string, string> = {},
 ): ActivityImport {
   const currency = tx.currency || "GBP";
-  const amountInMajorUnits = Math.round((Math.abs(tx.amount) / 100) * 100) / 100;
+  const amountInMajorUnits = round2(Math.abs(tx.amount) / 100);
 
   return {
     id: tx.id,
@@ -95,7 +107,9 @@ export function mapTransactionToActivity(
     date: tx.created,
     amount: amountInMajorUnits,
     currency,
-    symbol: currency,
+    // `$CASH-GBP`, not a bare "GBP": a bare code is valued as a security via an FX quote
+    // and inflates account totals.
+    symbol: cashSymbol(currency),
     isValid: true,
     isDraft: false,
     comment: buildComment(tx, categoryLabels) || undefined,

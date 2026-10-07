@@ -60,7 +60,7 @@ describe('mapTransactionToActivity', () => {
     expect(activity.activityType).toBe('WITHDRAWAL');
     expect(activity.amount).toBe(25.0);
     expect(activity.currency).toBe('GBP');
-    expect(activity.symbol).toBe('GBP');
+    expect(activity.symbol).toBe('$CASH-GBP');
     expect(activity.isValid).toBe(true);
     expect(activity.isDraft).toBe(false);
     // Must be full ISO timestamp, not just a date (fixes 1am display bug)
@@ -154,7 +154,61 @@ describe('mapTransactionToActivity', () => {
     const activity = mapTransactionToActivity(tx, 'acc-123');
 
     expect(activity.currency).toBe('GBP');
-    expect(activity.symbol).toBe('GBP');
+    expect(activity.symbol).toBe('$CASH-GBP');
+  });
+
+  it('uses the cash symbol of the transaction currency, never a bare code', () => {
+    const tx: MonzoTransaction = {
+      id: 'tx_eur',
+      created: '2026-05-05T10:00:00.000Z',
+      settled: '2026-05-05T10:00:00.000Z',
+      amount: -1000,
+      currency: 'eur',
+      description: 'Euro account',
+      notes: '',
+      category: 'general',
+      is_load: false,
+      metadata: {},
+    };
+    expect(mapTransactionToActivity(tx, 'acc-123').symbol).toBe('$CASH-EUR');
+  });
+
+  it('ignores an unexpanded merchant id (string) and keeps the comment unchanged', () => {
+    const tx: MonzoTransaction = {
+      id: 'tx_str',
+      created: '2026-05-05T10:00:00.000Z',
+      settled: '2026-05-05T10:00:00.000Z',
+      amount: -1000,
+      currency: 'GBP',
+      description: 'TESCO 1234',
+      notes: '',
+      category: 'groceries',
+      is_load: false,
+      metadata: {},
+      merchant: 'merch_0000abcdef',
+    };
+    expect(mapTransactionToActivity(tx, 'acc-123').comment).toBe('TESCO 1234 | Groceries');
+  });
+
+  it('keeps the comment format: name | category | city, country | FOREIGN amt | Note: notes', () => {
+    const tx: MonzoTransaction = {
+      id: 'tx_fmt',
+      created: '2026-05-05T10:00:00.000Z',
+      settled: '2026-05-05T10:00:00.000Z',
+      amount: -5000,
+      currency: 'GBP',
+      local_amount: -5900,
+      local_currency: 'EUR',
+      description: 'RAW',
+      notes: 'birthday',
+      category: 'eating_out',
+      is_load: false,
+      metadata: {},
+      merchant: { name: 'Bistro', address: { city: 'Paris', country: 'FR' } },
+    };
+    expect(mapTransactionToActivity(tx, 'acc-123').comment).toBe(
+      'Bistro | Eating Out | Paris, FR | EUR 59.00 | Note: birthday',
+    );
   });
 });
 

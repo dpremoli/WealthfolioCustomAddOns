@@ -1,5 +1,4 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import type { AddonContext } from "@wealthfolio/addon-sdk";
 import {
   ActionConfirm,
   AlertFeedback,
@@ -14,67 +13,112 @@ import {
   Input,
   Label,
 } from "@wealthfolio/ui";
+import { addonRoute, jsonStore, maskKey, relativeTime, type AddonPageProps } from "@wf-addons/kit";
+import { PageShell } from "@wf-addons/kit/ui";
 import { useEffect, useRef, useState } from "react";
-import { clearTokens, getTokens, setTokens } from "../hooks/use-tokens";
-import { MONZO_CATEGORIES, DEFAULT_CATEGORY_LABELS } from "../lib/category-map";
-import { MonzoProxyClient } from "../lib/proxy-client";
+import {
+  ADDON_ID,
+  KEY_CATEGORY_LABELS,
+  KEY_LAST_RUN,
+  KEY_LAST_SYNC,
+  KEY_MAPPING,
+  SUGGESTED_REDIRECT_URL,
+} from "../constants";
+import { accountTypeLabel, ensureAccountMapping } from "../lib/accounts";
+import {
+  beginAuthorisation,
+  completeAuthorisation,
+  disconnect,
+  getConnectionStatus,
+  loadCredentials,
+  pendingState,
+  saveSettings,
+} from "../lib/auth";
+import { copyText } from "../lib/clipboard";
+import { DEFAULT_CATEGORY_LABELS, MONZO_CATEGORIES } from "../lib/category-map";
+import { ensureMigrated } from "../lib/migrate";
+import { MonzoClient } from "../lib/monzo-client";
+import { buildAuthUrl } from "../lib/oauth";
 import type { AccountMapping, MonzoAccount } from "../types";
-import { PageShell } from "../components/page-shell";
 
-const PROXY_URL_KEY = "monzo_proxy_url";
-const MAPPING_KEY = "monzo_account_mapping";
-const LAST_SYNC_KEY = "monzo_last_sync";
-const CATEGORY_LABELS_KEY = "monzo_category_labels";
-
-function accountTypeLabel(acc: MonzoAccount): string {
-  switch (acc.account_type) {
-    case "uk_retail":       return acc.account_number ? `Monzo Current (${acc.account_number})` : "Monzo Current Account";
-    case "uk_retail_joint": return "Monzo Joint Account";
-    case "uk_monzo_flex":   return "Monzo Flex";
-    default:                return acc.description || acc.account_type;
-  }
+interface SettingsData {
+  clientId: string;
+  redirectUrl: string;
+  /** Masked stored client secret, or null when none is saved. */
+  maskedSecret: string | null;
+  status: Awaited<ReturnType<typeof getConnectionStatus>>;
+  /** Login URL rebuilt for an authorisation that was started earlier, if any. */
+  pendingUrl: string | null;
 }
 
-export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
+export default function SettingsPage({ ctx }: AddonPageProps) {
   const queryClient = useQueryClient();
-  const [proxyUrl, setProxyUrl] = useState("");
-  const [isSavingProxy, setIsSavingProxy] = useState(false);
-  const [proxySaved, setProxySaved] = useState(false);
-  const [isConnecting, setIsConnecting] = useState(false);
+  const store = jsonStore(ctx.api.storage);
+
+  const [clientId, setClientId] = useState("");
+  const [clientSecret, setClientSecret] = useState("");
+  const [redirectUrl, setRedirectUrl] = useState("");
+  const [formLoaded, setFormLoaded] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  const [authUrl, setAuthUrl] = useState<string | null>(null);
+  const [pasted, setPasted] = useState("");
+  const [isStarting, setIsStarting] = useState(false);
+  const [isCompleting, setIsCompleting] = useState(false);
   const [connectError, setConnectError] = useState<string | null>(null);
+  const [copyNote, setCopyNote] = useState<string | null>(null);
+  const urlRef = useRef<HTMLInputElement>(null);
+
   const [autoCreateStatus, setAutoCreateStatus] = useState<string | null>(null);
   const [resetStatus, setResetStatus] = useState<string | null>(null);
   const [categoryOverrides, setCategoryOverrides] = useState<Record<string, string>>({});
   const [isSavingCategories, setIsSavingCategories] = useState(false);
   const [categoriesSaved, setCategoriesSaved] = useState(false);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const autoCreatingRef = useRef(false);
   const handledRef = useRef<Set<string>>(new Set());
 
-  const { data: savedProxyUrl } = useQuery({
-    queryKey: ["monzo_proxy_url"],
-    queryFn: () => ctx.api.secrets.get(PROXY_URL_KEY),
-  });
-
-  useEffect(() => {
-    if (savedProxyUrl) setProxyUrl(savedProxyUrl);
-  }, [savedProxyUrl]);
-
-  const { data: tokens, refetch: refetchTokens } = useQuery({
-    queryKey: ["monzo_tokens"],
-    queryFn: () => getTokens(ctx),
-  });
-
-  const { data: monzoAccounts = [] } = useQuery<MonzoAccount[]>({
-    queryKey: ["monzo_accounts"],
+  const { data } = useQuery<SettingsData>({
+    queryKey: ["monzo_settings"],
     queryFn: async () => {
-      const t = await getTokens(ctx);
-      if (!t) return [];
-      const url = await ctx.api.secrets.get(PROXY_URL_KEY);
-      if (!url) return [];
-      return new MonzoProxyClient(url).getAccounts(t.access_token);
+      await ensureMigrated(ctx);
+      const [creds, status, state] = await Promise.all([
+        loadCredentials(ctx),
+        getConnectionStatus(ctx),
+        pendingState(ctx),
+      ]);
+      const pendingUrl =
+        state && creds.clientId && creds.redirectUrl
+          ? buildAuthUrl({ clientId: creds.clientId, redirectUrl: creds.redirectUrl, state })
+          : null;
+      return {
+        clientId: creds.clientId,
+        redirectUrl: creds.redirectUrl,
+        maskedSecret: creds.clientSecret ? maskKey(creds.clientSecret) : null,
+        status,
+        pendingUrl,
+      };
     },
-    enabled: !!tokens,
+  });
+
+  // Fill the form once from what is stored; later edits stay in local state.
+  useEffect(() => {
+    if (!data || formLoaded) return;
+    setClientId(data.clientId);
+    setRedirectUrl(data.redirectUrl || SUGGESTED_REDIRECT_URL);
+    if (data.pendingUrl) setAuthUrl(data.pendingUrl);
+    setFormLoaded(true);
+  }, [data, formLoaded]);
+
+  const connected = !!data?.status.connected;
+  const hasCredentials = !!data?.status.hasCredentials;
+
+  const { data: monzoAccounts = [], error: accountsError } = useQuery<MonzoAccount[], Error>({
+    queryKey: ["monzo_accounts", connected],
+    queryFn: () => new MonzoClient(ctx).getAccounts(),
+    enabled: connected,
+    retry: false,
   });
 
   const { data: wfAccounts = [] } = useQuery({
@@ -85,78 +129,46 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
   const { data: savedMapping } = useQuery({
     queryKey: ["monzo_mapping"],
     queryFn: async () => {
-      const raw = await ctx.api.secrets.get(MAPPING_KEY);
-      return raw ? (JSON.parse(raw) as AccountMapping) : ({} as AccountMapping);
+      await ensureMigrated(ctx);
+      return store.get<AccountMapping>(KEY_MAPPING, {});
     },
   });
 
   const { data: savedCategoryLabels } = useQuery({
     queryKey: ["monzo_category_labels"],
     queryFn: async () => {
-      const raw = await ctx.api.secrets.get(CATEGORY_LABELS_KEY);
-      return raw ? (JSON.parse(raw) as Record<string, string>) : ({} as Record<string, string>);
+      await ensureMigrated(ctx);
+      return store.get<Record<string, string>>(KEY_CATEGORY_LABELS, {});
     },
+  });
+
+  const { data: lastRunIso } = useQuery({
+    queryKey: ["monzo_last_run"],
+    queryFn: async () =>
+      (await store.get<string | null>(KEY_LAST_RUN, null)) ??
+      (await store.get<string | null>(KEY_LAST_SYNC, null)),
   });
 
   useEffect(() => {
     if (savedCategoryLabels) setCategoryOverrides(savedCategoryLabels);
   }, [savedCategoryLabels]);
 
-  // Auto-create Wealthfolio accounts for unmapped/stale Monzo accounts
+  // Create / map Wealthfolio accounts for Monzo accounts that have none (or a stale one).
   useEffect(() => {
     if (autoCreatingRef.current) return;
-    if (!monzoAccounts.length || !wfAccounts || savedMapping === undefined) return;
-
-    const wfAccountIds = new Set(wfAccounts.map((a) => a.id));
-    const wfAccountNames = new Set(wfAccounts.map((a) => a.name));
-
-    const unmapped = monzoAccounts.filter((acc) => {
-      if (handledRef.current.has(acc.id)) return false;
-      const mappedId = savedMapping[acc.id];
-      return !mappedId || !wfAccountIds.has(mappedId);
-    });
-
-    if (unmapped.length === 0) return;
-
+    if (!monzoAccounts.length || savedMapping === undefined) return;
     autoCreatingRef.current = true;
-
     (async () => {
       try {
-        const newMapping: AccountMapping = { ...savedMapping };
-        const created: string[] = [];
-
-        for (const acc of unmapped) {
-          handledRef.current.add(acc.id);
-          const name = accountTypeLabel(acc);
-          const currency = acc.currency || "GBP";
-
-          const existing = wfAccounts.find((a) => a.name === name);
-          if (existing) {
-            newMapping[acc.id] = existing.id;
-            continue;
-          }
-
-          if (wfAccountNames.has(name)) continue;
-
-          try {
-            const newAcc = await ctx.api.accounts.create({
-              name,
-              accountType: "CASH",
-              currency,
-              isDefault: false,
-              isActive: true,
-              trackingMode: "TRANSACTIONS",
-            });
-            newMapping[acc.id] = newAcc.id;
-            wfAccountNames.add(name);
-            created.push(name);
-          } catch (err) {
-            ctx.api.logger.error(`Failed to create account ${name}: ${(err as Error).message}`);
-          }
-        }
-
-        if (created.length > 0 || JSON.stringify(newMapping) !== JSON.stringify(savedMapping)) {
-          await ctx.api.secrets.set(MAPPING_KEY, JSON.stringify(newMapping));
+        const { mapping, created } = await ensureAccountMapping(
+          ctx,
+          monzoAccounts,
+          wfAccounts,
+          savedMapping,
+          handledRef.current,
+        );
+        if (created.length > 0 || JSON.stringify(mapping) !== JSON.stringify(savedMapping)) {
+          await store.set(KEY_MAPPING, mapping);
           queryClient.invalidateQueries({ queryKey: ["monzo_mapping"] });
           queryClient.invalidateQueries({ queryKey: ["wf_accounts"] });
           if (created.length > 0) setAutoCreateStatus(`Created: ${created.join(", ")}`);
@@ -165,13 +177,81 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
         autoCreatingRef.current = false;
       }
     })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [monzoAccounts, wfAccounts, savedMapping]);
+
+  const refreshStatus = () => queryClient.invalidateQueries({ queryKey: ["monzo_settings"] });
+
+  async function saveCredentials() {
+    setIsSaving(true);
+    setSaved(false);
+    setSaveError(null);
+    try {
+      await saveSettings(ctx, { clientId, clientSecret, redirectUrl });
+      setClientSecret("");
+      setSaved(true);
+      setAuthUrl(null); // saving invalidates any link generated with the old settings
+      setPasted("");
+      await refreshStatus();
+    } catch (err) {
+      setSaveError((err as Error).message);
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function startConnect() {
+    setIsStarting(true);
+    setConnectError(null);
+    setCopyNote(null);
+    try {
+      const { url } = await beginAuthorisation(ctx);
+      setAuthUrl(url);
+      setPasted("");
+    } catch (err) {
+      setConnectError((err as Error).message);
+    } finally {
+      setIsStarting(false);
+    }
+  }
+
+  async function copyUrl() {
+    if (!authUrl) return;
+    const result = await copyText(authUrl, urlRef.current);
+    setCopyNote(result === "copied" ? "Copied to the clipboard." : "Link selected: press Ctrl/Cmd+C to copy it.");
+  }
+
+  async function finishConnect() {
+    setIsCompleting(true);
+    setConnectError(null);
+    try {
+      await completeAuthorisation(ctx, pasted);
+      setAuthUrl(null);
+      setPasted("");
+      setCopyNote(null);
+      handledRef.current.clear();
+      await refreshStatus();
+      queryClient.invalidateQueries({ queryKey: ["monzo_accounts"] });
+    } catch (err) {
+      setConnectError((err as Error).message);
+    } finally {
+      setIsCompleting(false);
+    }
+  }
+
+  async function handleDisconnect() {
+    await disconnect(ctx);
+    handledRef.current.clear();
+    setAuthUrl(null);
+    await refreshStatus();
+    queryClient.invalidateQueries({ queryKey: ["monzo_accounts"] });
+  }
 
   async function saveCategoryLabels() {
     setIsSavingCategories(true);
     setCategoriesSaved(false);
     try {
-      await ctx.api.secrets.set(CATEGORY_LABELS_KEY, JSON.stringify(categoryOverrides));
+      await store.set(KEY_CATEGORY_LABELS, categoryOverrides);
       queryClient.invalidateQueries({ queryKey: ["monzo_category_labels"] });
       setCategoriesSaved(true);
     } finally {
@@ -184,145 +264,155 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
     setCategoryOverrides((prev) => {
       const next = { ...prev };
       const trimmed = value.trim();
-      if (!trimmed || trimmed === DEFAULT_CATEGORY_LABELS[cat]) {
-        delete next[cat];
-      } else {
-        next[cat] = trimmed;
-      }
+      if (!trimmed || trimmed === DEFAULT_CATEGORY_LABELS[cat]) delete next[cat];
+      else next[cat] = trimmed;
       return next;
     });
   }
 
-  async function saveProxyUrl() {
-    setIsSavingProxy(true);
-    setProxySaved(false);
-    try {
-      await ctx.api.secrets.set(PROXY_URL_KEY, proxyUrl.trim());
-      queryClient.invalidateQueries({ queryKey: ["monzo_proxy_url"] });
-      setProxySaved(true);
-    } finally {
-      setIsSavingProxy(false);
-    }
-  }
-
-  async function connectMonzo() {
-    setIsConnecting(true);
-    setConnectError(null);
-    try {
-      const client = new MonzoProxyClient(proxyUrl);
-      const { url, state } = await client.getAuthUrl();
-      window.open(url, "_blank", "width=600,height=700");
-
-      let attempts = 0;
-      const maxAttempts = 150;
-      pollRef.current = setInterval(async () => {
-        attempts++;
-        try {
-          const result = await client.pollTokenStatus(state);
-          if (result.ready && result.tokens) {
-            clearInterval(pollRef.current!);
-            pollRef.current = null;
-            await setTokens(ctx, result.tokens);
-            refetchTokens();
-            queryClient.invalidateQueries({ queryKey: ["monzo_accounts"] });
-            setIsConnecting(false);
-          } else if (attempts >= maxAttempts) {
-            clearInterval(pollRef.current!);
-            pollRef.current = null;
-            setIsConnecting(false);
-            setConnectError("Authentication timed out. Please try again.");
-          }
-        } catch {
-          clearInterval(pollRef.current!);
-          pollRef.current = null;
-          setIsConnecting(false);
-          setConnectError("Failed to complete authentication. Please try again.");
-        }
-      }, 2000);
-    } catch (err) {
-      setIsConnecting(false);
-      setConnectError((err as Error).message);
-    }
-  }
-
-  async function disconnect() {
-    await clearTokens(ctx);
-    handledRef.current.clear();
-    refetchTokens();
-    queryClient.invalidateQueries({ queryKey: ["monzo_accounts"] });
-  }
-
   async function resetSyncHistory() {
-    await ctx.api.secrets.delete(LAST_SYNC_KEY);
-    queryClient.invalidateQueries({ queryKey: ["monzo_last_sync"] });
-    setResetStatus("Sync history cleared. Next sync will re-import all 90 days of transactions.");
+    await ctx.api.storage.delete(KEY_LAST_SYNC);
+    queryClient.invalidateQueries({ queryKey: ["monzo_last_run"] });
+    setResetStatus(
+      "Sync history cleared. The next sync re-fetches everything Monzo allows (up to 90 days); transactions already imported are skipped.",
+    );
   }
 
-  useEffect(() => {
-    return () => {
-      if (pollRef.current) clearInterval(pollRef.current);
-    };
-  }, []);
-
-  const isFirstRun = !savedProxyUrl && !tokens;
+  const canSave = !!clientId.trim() && !!redirectUrl.trim() && (!!clientSecret.trim() || !!data?.maskedSecret);
+  const isFirstRun = !!data && !data.clientId && !connected;
+  const needsCredentialsForRefresh = connected && !hasCredentials;
+  const expiryText = data?.status.expiresAt
+    ? data.status.expiresAt > Date.now()
+      ? `Access token valid until ${new Date(data.status.expiresAt).toLocaleString()}`
+      : "Access token expired; it renews on the next sync"
+    : null;
 
   return (
     <PageShell
       iconName="Settings"
       heading="Monzo Settings"
-      description="Configure your Monzo Bank connection."
+      description="Connect Monzo straight from Wealthfolio. No proxy server needed."
       actions={
-        <Button variant="outline" size="lg" onClick={() => ctx.api.navigation.navigate("/addons/monzo")}>
+        <Button
+          variant="outline"
+          size="lg"
+          onClick={() => ctx.api.navigation.navigate(addonRoute(ADDON_ID))}
+        >
           <Icons.ArrowLeft size={16} className="mr-1" weight="bold" />
           Dashboard
         </Button>
       }
     >
       {isFirstRun && (
-        <AlertFeedback variant="success" title="Welcome 👋">
+        <AlertFeedback variant="success" title="Welcome">
           <div className="space-y-2 text-sm">
-            <p>Two steps to start syncing Monzo:</p>
+            <p>Three steps to start syncing Monzo:</p>
             <ol className="ml-4 list-decimal space-y-1">
-              <li>Run the proxy server and paste its URL below (it handles Monzo OAuth).</li>
-              <li>Click <strong>Connect Monzo</strong> and authorise in the browser, then approve in the Monzo app. Accounts are created automatically.</li>
+              <li>
+                Create a <strong>Confidential</strong> OAuth client at developers.monzo.com and
+                save its client ID, secret and redirect URL below.
+              </li>
+              <li>
+                Click <strong>Connect Monzo</strong>, open the link in your browser, approve via
+                the Monzo email, then paste the URL you land on.
+              </li>
+              <li>
+                Approve the access request in the <strong>Monzo app</strong>. Accounts are created
+                automatically.
+              </li>
             </ol>
           </div>
+        </AlertFeedback>
+      )}
+
+      {needsCredentialsForRefresh && (
+        <AlertFeedback variant="warning" title="Enter your client ID and secret">
+          <p className="text-sm">
+            Your Monzo connection was carried over from v1, which kept the client credentials in
+            the proxy. Enter the same client ID and client secret below so Wealthfolio can renew
+            it (Monzo access tokens last 6 hours). If renewal is rejected, just reconnect.
+          </p>
         </AlertFeedback>
       )}
 
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
-            <Icons.Link size={18} weight="duotone" />
-            Proxy server
+            <Icons.Lock size={18} weight="duotone" />
+            Monzo OAuth client
           </CardTitle>
           <CardDescription>
-            The local FastAPI proxy that handles Monzo OAuth and API requests.
+            Create a client at developers.monzo.com (Clients → New OAuth client) with
+            confidentiality set to <strong>Confidential</strong>, then copy its details here.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
           <div className="space-y-1.5">
-            <Label>Proxy URL</Label>
-            <div className="flex gap-2">
-              <Input
-                value={proxyUrl}
-                onChange={(e) => {
-                  setProxyUrl(e.target.value);
-                  setProxySaved(false);
-                }}
-                placeholder="http://YOUR_SERVER_IP:8001"
-                className="flex-1"
-              />
-              <Button onClick={saveProxyUrl} disabled={isSavingProxy || !proxyUrl.trim()}>
-                <Icons.Save size={16} className="mr-1" weight="bold" />
-                {isSavingProxy ? "Saving…" : "Save"}
-              </Button>
-            </div>
+            <Label htmlFor="monzo-client-id">Client ID</Label>
+            <Input
+              id="monzo-client-id"
+              value={clientId}
+              onChange={(e) => {
+                setClientId(e.target.value);
+                setSaved(false);
+              }}
+              placeholder="oauth2client_0000…"
+              autoComplete="off"
+              spellCheck={false}
+            />
           </div>
-          {proxySaved && (
-            <span className="text-green-600 dark:text-green-500 flex items-center gap-1 text-sm">
-              <Icons.CheckCircle size={14} weight="duotone" /> Saved.
-            </span>
+          <div className="space-y-1.5">
+            <Label htmlFor="monzo-client-secret">Client secret</Label>
+            <Input
+              id="monzo-client-secret"
+              type="password"
+              value={clientSecret}
+              onChange={(e) => {
+                setClientSecret(e.target.value);
+                setSaved(false);
+              }}
+              placeholder={data?.maskedSecret ? `${data.maskedSecret} (saved, leave blank to keep)` : "mnzconf.…"}
+              autoComplete="off"
+              spellCheck={false}
+            />
+            <p className="text-muted-foreground text-xs">
+              Stored in the OS keyring; it is only sent to api.monzo.com.
+            </p>
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="monzo-redirect">Redirect URL</Label>
+            <Input
+              id="monzo-redirect"
+              value={redirectUrl}
+              onChange={(e) => {
+                setRedirectUrl(e.target.value);
+                setSaved(false);
+              }}
+              placeholder={SUGGESTED_REDIRECT_URL}
+              autoComplete="off"
+              spellCheck={false}
+            />
+            <p className="text-muted-foreground text-xs">
+              Must match the redirect URL registered on your Monzo client exactly (even a trailing
+              slash). Use <code>{SUGGESTED_REDIRECT_URL}</code>: the page never needs to load, you
+              only copy the address your browser ends up on.
+            </p>
+          </div>
+          <div className="flex items-center gap-3">
+            <Button onClick={saveCredentials} disabled={isSaving || !canSave}>
+              <Icons.Save size={16} className="mr-1" weight="bold" />
+              {isSaving ? "Saving…" : "Save"}
+            </Button>
+            {saved && (
+              <span className="flex items-center gap-1 text-sm text-green-600 dark:text-green-500">
+                <Icons.CheckCircle size={14} weight="duotone" /> Saved.
+              </span>
+            )}
+          </div>
+          {saveError && (
+            <AlertFeedback variant="error" title="Could not save">
+              {saveError}
+            </AlertFeedback>
           )}
         </CardContent>
       </Card>
@@ -334,11 +424,11 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
             Monzo connection
           </CardTitle>
           <CardDescription>
-            Connect your Monzo account. Wealthfolio accounts are created automatically.
+            Link your Monzo account. Wealthfolio cash accounts are created automatically.
           </CardDescription>
         </CardHeader>
-        <CardContent className="space-y-3">
-          {tokens ? (
+        <CardContent className="space-y-4">
+          {connected && (
             <>
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div className="flex flex-wrap items-center gap-2">
@@ -347,18 +437,18 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
                     Connected
                   </Badge>
                   {monzoAccounts.length > 0 && (
-                    <span className="text-sm text-muted-foreground">
+                    <span className="text-muted-foreground text-sm">
                       {monzoAccounts.map(accountTypeLabel).join(" · ")}
                     </span>
                   )}
                 </div>
                 <ActionConfirm
                   confirmTitle="Disconnect Monzo?"
-                  confirmMessage="This forgets your Monzo access tokens. Your Wealthfolio accounts and already-imported transactions stay intact. You can reconnect any time."
+                  confirmMessage="This forgets your Monzo access and refresh tokens. Your OAuth client settings, Wealthfolio accounts and already-imported transactions stay intact. You can reconnect any time."
                   confirmButtonText="Disconnect"
                   confirmButtonVariant="destructive"
                   isPending={false}
-                  handleConfirm={disconnect}
+                  handleConfirm={handleDisconnect}
                   button={
                     <Button variant="outline" size="sm">
                       <Icons.Unlink size={14} className="mr-1" weight="bold" />
@@ -367,33 +457,108 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
                   }
                 />
               </div>
+              {expiryText && <p className="text-muted-foreground text-xs">{expiryText}</p>}
+              {lastRunIso && (
+                <p className="text-muted-foreground text-xs">Last sync: {relativeTime(lastRunIso)}</p>
+              )}
+              {accountsError && (
+                <AlertFeedback variant="error" title="Could not load your Monzo accounts">
+                  {accountsError.message}
+                </AlertFeedback>
+              )}
               {autoCreateStatus && (
-                <AlertFeedback variant="success" title="Accounts created">{autoCreateStatus}</AlertFeedback>
+                <AlertFeedback variant="success" title="Accounts created">
+                  {autoCreateStatus}
+                </AlertFeedback>
               )}
             </>
-          ) : (
+          )}
+
+          <AlertFeedback variant="warning" title="Approve access in the Monzo app">
+            <p className="text-sm">
+              After logging in, Monzo asks you to approve this client in the <strong>Monzo app</strong>{" "}
+              (strong customer authentication). Until you do, API calls return 403 and nothing
+              syncs. Approve it there, then come back and sync.
+            </p>
+          </AlertFeedback>
+
+          {!authUrl ? (
             <div className="space-y-2">
-              <Button onClick={connectMonzo} disabled={isConnecting || !savedProxyUrl}>
-                {isConnecting ? (
-                  <>
-                    <Icons.Spinner size={14} className="mr-1 animate-spin" />
-                    Waiting for authentication…
-                  </>
-                ) : (
-                  <>
-                    <Icons.Link size={14} className="mr-1" weight="bold" />
-                    Connect Monzo
-                  </>
-                )}
+              <Button onClick={startConnect} disabled={isStarting || !hasCredentials}>
+                <Icons.Link size={14} className="mr-1" weight="bold" />
+                {isStarting ? "Preparing…" : connected ? "Reconnect Monzo" : "Connect Monzo"}
               </Button>
-              {!savedProxyUrl && (
+              {!hasCredentials && (
                 <p className="text-muted-foreground flex items-center gap-1.5 text-sm">
                   <Icons.Info size={14} weight="duotone" />
-                  Save a proxy URL above first.
+                  Save your client ID, client secret and redirect URL above first.
                 </p>
               )}
-              {connectError && <AlertFeedback variant="error" title="Connection failed">{connectError}</AlertFeedback>}
             </div>
+          ) : (
+            <div className="space-y-4">
+              <ol className="ml-4 list-decimal space-y-1 text-sm">
+                <li>Copy the link below and open it in any browser.</li>
+                <li>Enter your email, then approve the login from the email Monzo sends you.</li>
+                <li>
+                  Your browser lands on the redirect URL (the page itself will likely fail to load,
+                  that is fine). Copy the <strong>full address</strong> from the address bar, or just
+                  the <code>code</code> value, and paste it below.
+                </li>
+              </ol>
+              <div className="space-y-1.5">
+                <Label htmlFor="monzo-auth-url">Monzo login link</Label>
+                <div className="flex gap-2">
+                  <Input
+                    id="monzo-auth-url"
+                    ref={urlRef}
+                    readOnly
+                    value={authUrl}
+                    onFocus={(e) => e.currentTarget.select()}
+                    className="flex-1 font-mono text-xs"
+                  />
+                  <Button variant="outline" onClick={copyUrl}>
+                    <Icons.Copy size={14} className="mr-1" weight="bold" />
+                    Copy
+                  </Button>
+                </div>
+                {copyNote && <p className="text-muted-foreground text-xs">{copyNote}</p>}
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="monzo-pasted">Paste the redirect URL (or code)</Label>
+                <Input
+                  id="monzo-pasted"
+                  value={pasted}
+                  onChange={(e) => setPasted(e.target.value)}
+                  placeholder={`${SUGGESTED_REDIRECT_URL}?code=…&state=…`}
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+                <p className="text-muted-foreground text-xs">
+                  The code is single-use and expires quickly: paste it straight away.
+                </p>
+              </div>
+              <div className="flex gap-2">
+                <Button onClick={finishConnect} disabled={isCompleting || !pasted.trim()}>
+                  {isCompleting ? (
+                    <>
+                      <Icons.Spinner size={14} className="mr-1 animate-spin" />
+                      Connecting…
+                    </>
+                  ) : (
+                    "Complete connection"
+                  )}
+                </Button>
+                <Button variant="outline" onClick={startConnect} disabled={isStarting}>
+                  New link
+                </Button>
+              </div>
+            </div>
+          )}
+          {connectError && (
+            <AlertFeedback variant="error" title="Connection failed">
+              {connectError}
+            </AlertFeedback>
           )}
         </CardContent>
       </Card>
@@ -413,7 +578,7 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
           <div className="grid grid-cols-1 gap-x-6 gap-y-2 sm:grid-cols-2">
             {MONZO_CATEGORIES.map((cat) => (
               <div key={cat} className="flex items-center gap-2">
-                <span className="text-xs text-muted-foreground w-28 shrink-0 truncate" title={cat}>
+                <span className="text-muted-foreground w-28 shrink-0 truncate text-xs" title={cat}>
                   {cat}
                 </span>
                 <Input
@@ -431,11 +596,15 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
               {isSavingCategories ? "Saving…" : "Save labels"}
             </Button>
             {categoriesSaved && (
-              <span className="text-green-600 dark:text-green-500 flex items-center gap-1 text-sm">
+              <span className="flex items-center gap-1 text-sm text-green-600 dark:text-green-500">
                 <Icons.CheckCircle size={14} weight="duotone" /> Saved.
               </span>
             )}
           </div>
+          <p className="text-muted-foreground text-xs">
+            Labels are part of each transaction&apos;s comment, which is how re-syncs recognise rows
+            already imported. Changing them only affects transactions imported from now on.
+          </p>
         </CardContent>
       </Card>
 
@@ -451,13 +620,13 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
           <div className="flex items-center justify-between gap-3">
             <div>
               <p className="text-sm font-medium">Reset sync history</p>
-              <p className="text-xs text-muted-foreground">
-                Forces the next sync to re-import all 90 days of transactions.
+              <p className="text-muted-foreground text-xs">
+                Forces the next sync to re-fetch everything Monzo allows (up to 90 days).
               </p>
             </div>
             <ActionConfirm
               confirmTitle="Reset sync history?"
-              confirmMessage="The next sync will re-fetch and re-check the last 90 days. Duplicates are skipped automatically, so this is safe — it just takes a little longer."
+              confirmMessage="The next sync will re-fetch the last 90 days. Transactions already in Wealthfolio are recognised and skipped, so this is safe; it just takes a little longer."
               confirmButtonText="Reset"
               isPending={false}
               handleConfirm={resetSyncHistory}
@@ -469,7 +638,11 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
               }
             />
           </div>
-          {resetStatus && <AlertFeedback variant="success" title="Done">{resetStatus}</AlertFeedback>}
+          {resetStatus && (
+            <AlertFeedback variant="success" title="Done">
+              {resetStatus}
+            </AlertFeedback>
+          )}
         </CardContent>
       </Card>
     </PageShell>

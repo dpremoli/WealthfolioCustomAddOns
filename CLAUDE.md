@@ -21,4 +21,8 @@ Sandbox rules that bite:
 - Wealthfolio dedupes imports by content hash; for cash importers use the kit's
   `selectNewActivities` (reconcile + `forceImport`) so identical same-day rows survive.
 
-Check before pushing: `pnpm check` (type-check, tests, bundle).
+Releasing: `pnpm bump <addon> <patch|minor|major>` and merge to main — `release.yml` publishes
+every add-on whose `<addon>-v<version>` tag is missing (see `tooling/release-plan.mjs`). Bump in
+the same PR as any user-facing add-on change you want shipped.
+
+Check before pushing: `pnpm check` (type-check, tests, tooling tests, bundle).

@@ -12,9 +12,12 @@
     "bundle": "pnpm -r --filter \"./addons/*\" bundle",
     "test": "pnpm -r test",
     "type-check": "pnpm -r type-check",
-    "check": "pnpm type-check && pnpm test && pnpm build",
+    "check": "pnpm type-check && pnpm test && pnpm test:tooling && pnpm build",
     "format": "prettier --write \"**/*.{ts,tsx,js,json,md,yml}\"",
-    "format:check": "prettier --check \"**/*.{ts,tsx,js,json,yml}\""
+    "format:check": "prettier --check \"**/*.{ts,tsx,js,json,yml}\"",
+    "test:tooling": "node --test tooling/tooling.test.mjs",
+    "bump": "node tooling/bump-version.mjs",
+    "release:plan": "node tooling/release-plan.mjs"
   },
   "devDependencies": {
     "prettier": "^3.6.2"

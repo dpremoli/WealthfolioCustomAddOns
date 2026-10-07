@@ -1,23 +1,58 @@
-name: Release add-on
+name: Release
 
-# Tag as <addon-dir>-v<version>, e.g. `monzo-v2.0.0`, `revolut-v2.0.1`,
-# `trading212-v2.1.0`. The version must match that add-on's manifest.json.
+# Releases are driven by the version in each add-on's manifest.json.
+#
+# - Push to main: every add-on whose `<addon>-v<version>` tag doesn't exist yet is
+#   tested, bundled and published as a GitHub release (which creates the tag). So a
+#   release is just `pnpm bump <addon> patch|minor|major` + merge.
+# - Push a tag `<addon>-v<version>` by hand, or run this workflow manually with a tag,
+#   to (re)release one add-on; the tag must match its manifest version.
+# - Run manually with no tag to publish anything still pending.
 on:
   push:
-    tags:
-      - "*-v*"
+    branches: [main]
+    tags: ["*-v*"]
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to release (e.g. revolut-v2.0.0)"
-        required: true
+        description: "Tag to release, e.g. revolut-v2.0.1 (empty = all pending add-ons)"
+        required: false
+        default: ""
 
 permissions:
   contents: write
 
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
-  release:
+  plan:
     runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      count: ${{ steps.plan.outputs.count }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - id: plan
+        env:
+          TAG: ${{ github.event.inputs.tag || (github.ref_type == 'tag' && github.ref_name) || '' }}
+        run: node tooling/release-plan.mjs "$TAG"
+
+  release:
+    needs: plan
+    if: needs.plan.outputs.count != '0'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    name: ${{ matrix.tag }}
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -25,25 +60,15 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-      - name: Resolve add-on from tag
-        id: tag
-        env:
-          TAG: ${{ github.event.inputs.tag || github.ref_name }}
-        run: |
-          addon="${TAG%-v*}"
-          version="${TAG##*-v}"
-          test -f "addons/$addon/manifest.json" || { echo "No add-on at addons/$addon"; exit 1; }
-          manifest_version=$(node -p "require('./addons/$addon/manifest.json').version")
-          [ "$manifest_version" = "$version" ] || { echo "Tag $version != manifest $manifest_version"; exit 1; }
-          echo "addon=$addon" >> "$GITHUB_OUTPUT"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
       - run: pnpm install --frozen-lockfile
-      - run: pnpm --filter "./addons/${{ steps.tag.outputs.addon }}" --filter @wf-addons/kit test
-      - run: pnpm --filter "./addons/${{ steps.tag.outputs.addon }}" type-check
-      - run: pnpm --filter "./addons/${{ steps.tag.outputs.addon }}" bundle
+      - run: pnpm --filter "./addons/${{ matrix.addon }}" --filter @wf-addons/kit test
+      - run: pnpm --filter "./addons/${{ matrix.addon }}" type-check
+      - run: pnpm --filter "./addons/${{ matrix.addon }}" bundle
       - uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.tag.outputs.tag }}
-          name: ${{ steps.tag.outputs.tag }}
-          files: addons/${{ steps.tag.outputs.addon }}/dist/*.zip
+          tag_name: ${{ matrix.tag }}
+          target_commitish: ${{ github.sha }}
+          name: ${{ matrix.tag }}
+          files: addons/${{ matrix.addon }}/dist/*.zip
+          fail_on_unmatched_files: true
           generate_release_notes: true

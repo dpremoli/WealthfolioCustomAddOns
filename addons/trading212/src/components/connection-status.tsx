@@ -1,31 +1,33 @@
 import type { AddonContext } from "@wealthfolio/addon-sdk";
 import { Badge, Icons, cn } from "@wealthfolio/ui";
 import { useQuery } from "@tanstack/react-query";
-import { Trading212ProxyClient } from "../lib/proxy-client";
+import { Trading212Client, isUnauthorized } from "../lib/t212-client";
 import { connectionConfig } from "../hooks/use-config";
 import type { T212Connection, T212Settings } from "../types";
 
-export type HealthState = "checking" | "ok" | "auth" | "err";
+export type HealthState = "checking" | "ok" | "auth" | "err" | "creds";
 
 /** Health probe — calls /account/summary and maps the outcome to a UI state. */
 export function useConnectionHealth(
-  _ctx: AddonContext,
+  ctx: AddonContext,
   settings: T212Settings | undefined,
   conn: T212Connection,
 ) {
   return useQuery({
-    queryKey: ["t212_status", conn.id],
+    // Credentials can change without the connection id changing, so key on the last 4 too.
+    queryKey: ["t212_status", conn.id, conn.keyIdLast4, !!conn.needsCredentials, settings?.env],
     queryFn: async (): Promise<HealthState> => {
+      if (conn.needsCredentials) return "creds";
       if (!settings) return "err";
       try {
-        await new Trading212ProxyClient(connectionConfig(settings, conn)).getAccountSummary();
+        await new Trading212Client(ctx, connectionConfig(settings, conn)).getAccountSummary();
         return "ok";
       } catch (err) {
-        return (err as Error).message === "UNAUTHORIZED" ? "auth" : "err";
+        return isUnauthorized(err) ? "auth" : "err";
       }
     },
-    enabled: !!settings,
-    // The proxy/account check is light and the result rarely changes — cache it briefly so
+    enabled: !!settings || !!conn.needsCredentials,
+    // The account check is light and the result rarely changes — cache it briefly so
     // navigating between Settings and Dashboard doesn't refetch unnecessarily.
     staleTime: 30_000,
   });
@@ -39,6 +41,7 @@ const CONFIG: Record<
   ok: { label: "Connected", variant: "success", dot: "bg-green-500" },
   auth: { label: "Auth failed", variant: "destructive", dot: "bg-red-500" },
   err: { label: "Unreachable", variant: "warning", dot: "bg-amber-500" },
+  creds: { label: "Needs credentials", variant: "warning", dot: "bg-amber-500" },
 };
 
 /** Coloured pill matching the health state, using semantic Badge variants. */

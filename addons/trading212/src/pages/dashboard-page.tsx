@@ -1,5 +1,4 @@
 import { useQuery } from "@tanstack/react-query";
-import type { AddonContext } from "@wealthfolio/addon-sdk";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -17,12 +16,20 @@ import {
   Icons,
 } from "@wealthfolio/ui";
 import { useEffect, useState } from "react";
+import { addonRoute, type AddonPageProps } from "@wf-addons/kit";
+import { PageShell, SyncActivity, type SyncPhase } from "@wf-addons/kit/ui";
+import { ADDON_ID } from "../constants";
 import { useSync } from "../hooks/use-sync";
-import { getConnections, getSettings, migrateLegacyConfig } from "../hooks/use-config";
-import type { SyncResult, T212TrackingMode } from "../types";
-import { PageShell } from "../components/page-shell";
-import { SyncActivity } from "../components/sync-activity";
+import { ensureMigrated, getConnections, getSettings } from "../hooks/use-config";
+import type { SyncPhaseId, SyncResult, T212TrackingMode } from "../types";
 import { ConnectionCard } from "../components/connection-card";
+
+const PHASES: SyncPhase<SyncPhaseId>[] = [
+  { phase: "export", label: "Fetching", icon: "Download" },
+  { phase: "map", label: "Matching", icon: "Search" },
+  { phase: "import", label: "Importing", icon: "Import" },
+  { phase: "done", label: "Done", icon: "CheckCircle" },
+];
 
 interface ModeDrift {
   id: string;
@@ -33,13 +40,16 @@ interface ModeDrift {
 
 const modeLabel = (m: T212TrackingMode) => (m === "HOLDINGS" ? "Holdings" : "Transactions");
 
-export default function DashboardPage({ ctx }: { ctx: AddonContext }) {
+export default function DashboardPage({ ctx }: AddonPageProps) {
   const { isSyncing, results, error, progress, steps, syncAll } = useSync(ctx);
   const [migrated, setMigrated] = useState(false);
   const [pendingDrifts, setPendingDrifts] = useState<ModeDrift[]>([]);
 
   useEffect(() => {
-    migrateLegacyConfig(ctx).finally(() => setMigrated(true));
+    // The v1 → v2 storage migration runs on enable; wait for it before reading storage.
+    ensureMigrated(ctx)
+      .catch(() => undefined)
+      .finally(() => setMigrated(true));
   }, [ctx]);
 
   const { data: connections } = useQuery({
@@ -55,12 +65,14 @@ export default function DashboardPage({ ctx }: { ctx: AddonContext }) {
   });
 
   const connected = (connections?.length ?? 0) > 0;
-  const canSync = connected && !isSyncing;
+  const needCredentials = (connections ?? []).filter((c) => c.needsCredentials);
+  const syncable = (connections ?? []).some((c) => !c.needsCredentials);
+  const canSync = connected && syncable && !isSyncing;
   const resultFor = (id: string): SyncResult | undefined =>
     results?.perAccount.find((r) => r.connectionId === id);
 
   function openSettings() {
-    ctx.api.navigation.navigate("/addons/trading212/settings");
+    ctx.api.navigation.navigate(addonRoute(ADDON_ID, "settings"));
   }
 
   // Detect accounts whose tracking mode was changed in Wealthfolio after setup. The
@@ -151,7 +163,26 @@ export default function DashboardPage({ ctx }: { ctx: AddonContext }) {
           </Card>
         )}
 
-        <SyncActivity isSyncing={isSyncing} progress={progress} steps={steps} />
+        {needCredentials.length > 0 && (
+          <Card className="border-amber-500/40">
+            <CardContent className="flex flex-wrap items-center justify-between gap-3 pt-6 text-sm">
+              <div className="flex items-start gap-2 text-amber-700 dark:text-amber-500">
+                <Icons.AlertTriangle size={18} className="mt-0.5 shrink-0" weight="duotone" />
+                <span>
+                  {needCredentials.map((c) => c.name).join(", ")}{" "}
+                  {needCredentials.length > 1 ? "need" : "needs"} credentials: re-enter the API key
+                  ID and secret in Settings. Legacy single-key access is no longer supported, so{" "}
+                  {needCredentials.length > 1 ? "these are" : "this is"} skipped until then.
+                </span>
+              </div>
+              <Button variant="outline" size="sm" onClick={openSettings}>
+                Open Settings
+              </Button>
+            </CardContent>
+          </Card>
+        )}
+
+        <SyncActivity phases={PHASES} isSyncing={isSyncing} progress={progress} steps={steps} />
 
         {!connected && migrated && (
           <Card>
@@ -163,7 +194,7 @@ export default function DashboardPage({ ctx }: { ctx: AddonContext }) {
                   </div>
                 }
                 title="Connect a Trading 212 account"
-                description="Add your API key in Settings to sync trades, dividends, deposits, withdrawals, fees and (optionally) card spending."
+                description="Add your API key ID and secret in Settings to sync trades, dividends, deposits, withdrawals, fees and (optionally) card spending."
               >
                 <Button className="mt-4" onClick={openSettings}>
                   <Icons.Plus size={16} className="mr-1" weight="bold" />

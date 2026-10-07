@@ -42,23 +42,28 @@ describe("startAutoSync scheduler", () => {
 
   function makeCtx(opts: {
     autoSync?: boolean;
-    connections: { id: string }[];
+    connections: { id: string; needsCredentials?: boolean }[];
     lastSyncByConn: Record<string, string | null>;
   }) {
-    const secrets = new Map<string, string>([
-      ["t212_settings", JSON.stringify({ proxyUrl: "http://p", env: "demo", autoSync: opts.autoSync })],
-      ["t212_connections", JSON.stringify(opts.connections.map((c) => ({ ...c, name: c.id, apiKey: "k", accountId: `acc-${c.id}` })))],
+    const storage = new Map<string, string>([
+      ["t212_settings", JSON.stringify({ env: "demo", autoSync: opts.autoSync })],
+      [
+        "t212_connections",
+        JSON.stringify(opts.connections.map((c) => ({ ...c, name: c.id, accountId: `acc-${c.id}` }))),
+      ],
     ]);
     for (const c of opts.connections) {
-      secrets.set(`t212_sync_${c.id}`, JSON.stringify({ lastSync: opts.lastSyncByConn[c.id] ?? null, importedRefs: [] }));
+      storage.set(`t212_sync_${c.id}`, JSON.stringify({ lastSync: opts.lastSyncByConn[c.id] ?? null, importedRefs: [] }));
     }
+    const kv = (m: Map<string, string>) => ({
+      get: async (k: string) => m.get(k) ?? null,
+      set: async (k: string, v: string) => void m.set(k, v),
+      delete: async (k: string) => void m.delete(k),
+    });
     return {
       api: {
-        secrets: {
-          get: async (k: string) => secrets.get(k) ?? null,
-          set: async (k: string, v: string) => void secrets.set(k, v),
-          delete: async (k: string) => void secrets.delete(k),
-        },
+        storage: kv(storage),
+        secrets: kv(new Map()), // empty keyring: nothing to migrate
         logger: { info: vi.fn(), error: vi.fn() },
         events: { portfolio: { onUpdateComplete: vi.fn(async () => () => {}) } },
       },
@@ -116,5 +121,19 @@ describe("startAutoSync scheduler", () => {
     await vi.advanceTimersByTimeAsync(STARTUP_DELAY_MS);
 
     expect(runSyncAllMock).not.toHaveBeenCalled();
+  });
+
+  it("skips connections that still need credentials (legacy single key)", async () => {
+    const yesterday = new Date(2026, 5, 7, 12, 0, 0).toISOString();
+    const ctx = makeCtx({
+      connections: [{ id: "c1", needsCredentials: true }, { id: "c2" }],
+      lastSyncByConn: { c1: yesterday, c2: yesterday },
+    });
+
+    handle = startAutoSync(ctx);
+    await vi.advanceTimersByTimeAsync(STARTUP_DELAY_MS);
+
+    expect(runSyncAllMock).toHaveBeenCalledTimes(1);
+    expect([...(runSyncAllMock.mock.calls[0][1]?.onlyConnectionIds ?? [])]).toEqual(["c2"]);
   });
 });

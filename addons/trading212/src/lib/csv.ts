@@ -1,4 +1,6 @@
 import type { ActivityImport } from "@wealthfolio/addon-sdk";
+import { cashSymbol } from "@wf-addons/kit";
+import { accountPerActivityRate, chargesInActivityCurrency } from "./mapper";
 import type { SymbolResolver } from "./symbol-resolver";
 import { mapSpendingCategory } from "./spending-category";
 
@@ -8,10 +10,6 @@ type ActivityType = ActivityImport["activityType"];
 function cardComment(merchant?: string, category?: string): string | undefined {
   const parts = [merchant, category].filter((p): p is string => !!p);
   return parts.length ? parts.join(" · ") : undefined;
-}
-
-function round2(n: number): number {
-  return Math.round(n * 100) / 100;
 }
 
 /** Splits one CSV line into field values, handling RFC 4180 double-quoted fields. */
@@ -115,6 +113,40 @@ function toIsoDate(s: string): string {
 }
 
 /**
+ * FX rate + charges for a BUY/SELL row, in Wealthfolio's final-cash terms: every monetary
+ * field is in the activity (price) currency and `fxRate` is account-per-activity units (see
+ * `accountPerActivityRate`). Only a cross-currency trade gets a rate; its charges, which the
+ * CSV reports in the account currency, are converted back into the activity currency.
+ */
+function tradeFxAndFee(
+  row: Record<string, string>,
+  qty: number,
+  unitPrice: number,
+  priceCurrency: string,
+  accountCurrency: string,
+): { fxRate: number | undefined; fee: number } {
+  const cross = priceCurrency.toUpperCase() !== accountCurrency.toUpperCase();
+  const total = Math.abs(parseAmount(col(row, "Total", "Result (GBP)", "Result")));
+  const implied = total > 0 && qty > 0 && unitPrice > 0 ? total / (qty * unitPrice) : undefined;
+  const fxRate = cross ? accountPerActivityRate(parseAmount(row["Exchange rate"]) || undefined, implied) : undefined;
+  const fee = chargesInActivityCurrency(
+    [
+      {
+        amount: Math.abs(parseAmount(row["Charge amount"])),
+        currency: col(row, "Currency (Charge amount)") || accountCurrency,
+      },
+      {
+        amount: Math.abs(parseAmount(row["Currency conversion fee"])),
+        currency: col(row, "Currency (Currency conversion fee)") || accountCurrency,
+      },
+    ],
+    priceCurrency,
+    fxRate,
+  );
+  return { fxRate, fee };
+}
+
+/**
  * Maps one T212 CSV row to a Wealthfolio ActivityImport.
  *
  * Returns null for unrecognised actions (stock splits, spin-offs, unknown rows),
@@ -173,12 +205,7 @@ export async function mapCsvRow(
     // exchange (e.g. a USD price picks TSM over the MXN-quoted TSMN).
     const symbol = await resolver.resolve(ticker, { isin, name, currency: priceCurrency });
     if (!symbol) return null;
-    const fxRateRaw = parseAmount(row["Exchange rate"]);
-    const fxRate = fxRateRaw && fxRateRaw !== 1 ? fxRateRaw : undefined;
-    const fee = round2(
-      Math.abs(parseAmount(row["Charge amount"])) +
-        Math.abs(parseAmount(row["Currency conversion fee"])),
-    );
+    const { fxRate, fee } = tradeFxAndFee(row, qty, unitPrice, priceCurrency, currency);
     return {
       id: `t212-order-${csvId}`,
       accountId,
@@ -205,12 +232,7 @@ export async function mapCsvRow(
     const priceCurrency = col(row, "Currency (Price / share)") || currency;
     const symbol = await resolver.resolve(ticker, { isin, name, currency: priceCurrency });
     if (!symbol) return null;
-    const fxRateRaw = parseAmount(row["Exchange rate"]);
-    const fxRate = fxRateRaw && fxRateRaw !== 1 ? fxRateRaw : undefined;
-    const fee = round2(
-      Math.abs(parseAmount(row["Charge amount"])) +
-        Math.abs(parseAmount(row["Currency conversion fee"])),
-    );
+    const { fxRate, fee } = tradeFxAndFee(row, qty, unitPrice, priceCurrency, currency);
     return {
       id: `t212-order-${csvId}`,
       accountId,
@@ -253,7 +275,7 @@ export async function mapCsvRow(
       accountId,
       activityType: "INTEREST" as ActivityType,
       date,
-      symbol: `$CASH-${currency}`,
+      symbol: cashSymbol(currency),
       amount: total,
       currency,
       isValid: true,
@@ -273,7 +295,7 @@ export async function mapCsvRow(
       accountId: cardAccount,
       activityType: "WITHDRAWAL" as ActivityType,
       date,
-      symbol: `$CASH-${currency}`,
+      symbol: cashSymbol(currency),
       amount: total,
       currency,
       isValid: true,
@@ -289,7 +311,7 @@ export async function mapCsvRow(
       accountId: cardAccount,
       activityType: "DEPOSIT" as ActivityType,
       date,
-      symbol: `$CASH-${currency}`,
+      symbol: cashSymbol(currency),
       amount: total,
       currency,
       isValid: true,
@@ -309,7 +331,7 @@ export async function mapCsvRow(
       accountId: isCashback ? cardAccount : accountId,
       activityType: "INTEREST" as ActivityType,
       date,
-      symbol: `$CASH-${currency}`,
+      symbol: cashSymbol(currency),
       amount: total,
       currency,
       isValid: true,
@@ -325,7 +347,7 @@ export async function mapCsvRow(
       accountId,
       activityType: "DEPOSIT" as ActivityType,
       date,
-      symbol: `$CASH-${currency}`,
+      symbol: cashSymbol(currency),
       amount: total,
       currency,
       isValid: true,
@@ -341,7 +363,7 @@ export async function mapCsvRow(
       accountId,
       activityType: "WITHDRAWAL" as ActivityType,
       date,
-      symbol: `$CASH-${currency}`,
+      symbol: cashSymbol(currency),
       amount: total,
       currency,
       isValid: true,
@@ -362,7 +384,7 @@ export async function mapCsvRow(
       accountId,
       activityType: "FEE" as ActivityType,
       date,
-      symbol: `$CASH-${currency}`,
+      symbol: cashSymbol(currency),
       amount: total,
       currency,
       isValid: true,

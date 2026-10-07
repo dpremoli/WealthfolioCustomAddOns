@@ -1,29 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { exchangeLabel, maskKey, parseSymbolMap, relativeTime } from "./format";
-
-describe("relativeTime", () => {
-  const now = new Date("2026-06-09T12:00:00.000Z");
-
-  it("returns 'Never' for null/undefined/empty", () => {
-    expect(relativeTime(null, now)).toBe("Never");
-    expect(relativeTime(undefined, now)).toBe("Never");
-  });
-
-  it("returns 'just now' for very recent timestamps", () => {
-    expect(relativeTime("2026-06-09T11:59:30.000Z", now)).toBe("just now");
-  });
-
-  it("formats minutes, hours, days", () => {
-    expect(relativeTime("2026-06-09T11:30:00.000Z", now)).toBe("30 mins ago");
-    expect(relativeTime("2026-06-09T11:00:00.000Z", now)).toBe("1 hour ago");
-    expect(relativeTime("2026-06-08T12:00:00.000Z", now)).toBe("1 day ago");
-    expect(relativeTime("2026-06-04T12:00:00.000Z", now)).toBe("5 days ago");
-  });
-
-  it("falls back to absolute for far past or invalid", () => {
-    expect(relativeTime("not-a-date", now)).toBe("Never");
-  });
-});
+import { exchangeLabel, maskedKeyId, parseSymbolMap } from "./format";
 
 describe("parseSymbolMap", () => {
   it("parses bare symbols, MIC-suffixed symbols, and known misses", () => {
@@ -49,9 +25,9 @@ describe("exchangeLabel", () => {
   });
 });
 
-describe("maskKey", () => {
-  it("masks long keys, keeps the trailing 4", () => {
-    expect(maskKey("abcdefghij")).toBe("••••ghij");
-    expect(maskKey("xy")).toBe("••••");
+describe("maskedKeyId", () => {
+  it("shows the stored last 4, or a bare mask when unknown", () => {
+    expect(maskedKeyId("ghij")).toBe("••••ghij");
+    expect(maskedKeyId(undefined)).toBe("••••");
   });
 });

@@ -129,7 +129,8 @@ describe("mapCsvRow", () => {
       expect(act!.unitPrice).toBe(170.5);
       expect(act!.symbol).toBe("AAPL");
       expect(act!.currency).toBe("USD");
-      expect(act!.fxRate).toBe(1.27);
+      // Cross-currency (USD shares, GBP account): account-per-activity, i.e. GBP per USD.
+      expect(act!.fxRate).toBeCloseTo(1 / 1.27, 6);
       expect(act!.date).toBe("2025-01-15T10:00:00.000Z");
       expect(act!.accountId).toBe(ACC);
     });
@@ -150,7 +151,46 @@ describe("mapCsvRow", () => {
         ACC,
         RESOLVER,
       );
-      expect(act!.fee).toBe(0.5);
+      // The £0.50 charge is re-expressed in the activity currency (USD): 0.5 × 1.27.
+      expect(act!.fee).toBeCloseTo(0.635, 6);
+    });
+
+    it("omits `amount` on trades so Wealthfolio derives the final cash from qty × price + fee", async () => {
+      const buy = await mapCsvRow(tradeRow("Market buy", { "Charge amount": "0.50" }), ACC, RESOLVER);
+      const sell = await mapCsvRow(tradeRow("Market sell", { ID: "S9" }), ACC, RESOLVER);
+      expect("amount" in buy!).toBe(false);
+      expect("amount" in sell!).toBe(false);
+    });
+
+    it("same-currency trade: no fx rate and the fee is unchanged", async () => {
+      const act = await mapCsvRow(
+        tradeRow("Market buy", {
+          "Currency (Price / share)": "GBP",
+          "Exchange rate": "1",
+          "Charge amount": "0.50",
+          "Currency conversion fee": "0.25",
+          ID: "O5",
+        }),
+        ACC,
+        RESOLVER,
+      );
+      expect(act!.fxRate).toBeUndefined();
+      expect(act!.fee).toBe(0.75);
+      expect(act!.currency).toBe("GBP");
+    });
+
+    it("works out the rate direction from the total, whichever way Trading 212 states it", async () => {
+      const act = await mapCsvRow(
+        tradeRow("Market buy", { "Exchange rate": "0.787402", ID: "O6" }),
+        ACC,
+        RESOLVER,
+      );
+      expect(act!.fxRate).toBeCloseTo(0.787402, 6);
+    });
+
+    it("cross-currency with no total: no guessed fx rate", async () => {
+      const act = await mapCsvRow(tradeRow("Market buy", { Total: "", ID: "O7" }), ACC, RESOLVER);
+      expect(act!.fxRate).toBeUndefined();
     });
 
     it("omits fee when both charge columns are zero", async () => {
@@ -438,5 +478,22 @@ describe("mapCsvRow", () => {
     it("returns null for missing Time", async () => {
       expect(await mapCsvRow(tradeRow("Market buy", { Time: "" }), ACC, RESOLVER)).toBeNull();
     });
+  });
+});
+
+describe("final-cash contract for plain cash rows", () => {
+  it.each([
+    ["Deposit", "DEPOSIT"],
+    ["Withdrawal", "WITHDRAWAL"],
+    ["Interest on cash", "INTEREST"],
+    ["Card debit", "WITHDRAWAL"],
+    ["Card credit", "DEPOSIT"],
+    ["Currency conversion fee", "FEE"],
+  ])("%s → %s: amount is the ledger, no separate fee, kit cash symbol", async (action, type) => {
+    const act = await mapCsvRow(cashRow(action, { Total: "-12.345", "Currency (Total)": "gbp" }), ACC, makeResolver());
+    expect(act!.activityType).toBe(type);
+    expect(act!.amount).toBe(12.345);
+    expect("fee" in act!).toBe(false);
+    expect(act!.symbol).toBe("$CASH-GBP");
   });
 });

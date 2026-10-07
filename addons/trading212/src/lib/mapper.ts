@@ -1,4 +1,5 @@
 import type { ActivityImport, SnapshotHoldingInput } from "@wealthfolio/addon-sdk";
+import { cashSymbol, round2 } from "@wf-addons/kit";
 import type { DividendItem, HistoricalOrder, Position, TransactionItem } from "../types";
 
 type ActivityType = ActivityImport["activityType"];
@@ -12,18 +13,63 @@ const FEE = "FEE" as ActivityType;
 const TRANSFER_IN = "TRANSFER_IN" as ActivityType;
 const TRANSFER_OUT = "TRANSFER_OUT" as ActivityType;
 
-function round2(n: number): number {
-  return Math.round(n * 100) / 100;
+/** Rounds to `dp` decimal places (fee conversions need more than cents to avoid drift). */
+function roundTo(n: number, dp: number): number {
+  const f = 10 ** dp;
+  return Math.round((n + Number.EPSILON) * f) / f;
 }
 
-function sumTaxes(order: HistoricalOrder): number {
-  const taxes = order.fill?.walletImpact?.taxes ?? [];
-  return taxes.reduce((acc, t) => acc + (t.quantity ?? 0), 0);
+/**
+ * Wealthfolio's `fx_rate` is account-currency units per ONE activity-currency unit (it
+ * settles BUY/SELL cash in the account currency as `amount × fx_rate`). Trading 212 reports
+ * its exchange rate between the instrument and account currencies, and the two exports we
+ * have seen disagree on which way round it points, so we do not trust the direction: given
+ * the trade's rough implied rate (`|account-currency total| / (quantity × price)`, which
+ * only needs to be roughly right because it merely picks a direction) we choose whichever of
+ * `rate` / `1/rate` is closer. Without an implied rate we cannot tell, so we return
+ * undefined and the trade stays in its own currency rather than risk a wrong conversion.
+ */
+export function accountPerActivityRate(
+  t212Rate: number | undefined,
+  implied: number | undefined,
+): number | undefined {
+  if (!t212Rate || !Number.isFinite(t212Rate) || t212Rate <= 0 || t212Rate === 1) return undefined;
+  if (!implied || !Number.isFinite(implied) || implied <= 0) return undefined;
+  const inverse = 1 / t212Rate;
+  const direct = Math.abs(Math.log(t212Rate / implied));
+  const inverted = Math.abs(Math.log(inverse / implied));
+  return roundTo(direct < inverted ? t212Rate : inverse, 10);
+}
+
+/**
+ * Sums trade charges in the ACTIVITY currency (Wealthfolio 3.8+: every monetary field of an
+ * activity is denominated in the activity currency). Trading 212 reports charges in the
+ * account (wallet) currency, so a charge in another currency is divided by the
+ * account-per-activity `fxRate` when we have one.
+ */
+export function chargesInActivityCurrency(
+  charges: { amount: number; currency?: string }[],
+  activityCurrency: string,
+  fxRate: number | undefined,
+): number {
+  const ccy = activityCurrency.toUpperCase();
+  const total = charges.reduce((acc, c) => {
+    const foreign = fxRate !== undefined && !!c.currency && c.currency.toUpperCase() !== ccy;
+    return acc + (foreign ? c.amount / (fxRate as number) : c.amount);
+  }, 0);
+  return fxRate !== undefined ? roundTo(total, 6) : round2(total);
 }
 
 /**
  * Maps a filled Trading 212 order to a BUY/SELL activity.
  * Returns null for non-trade fills (e.g. stock splits) or incomplete data.
+ *
+ * Wealthfolio 3.8+ treats `amount` as the saved FINAL cash (fees and taxes included) and
+ * never re-derives it at read time. For trades we deliberately OMIT `amount`: the import
+ * writer derives it as quantity × unitPrice ± charges (+ for BUY, − for SELL) from the
+ * `fee` we supply, which is exactly the final cash and avoids us double-counting charges.
+ * `fee` is expressed in the activity currency and `fxRate` (account per activity unit) is
+ * only supplied for a genuinely cross-currency trade — see {@link accountPerActivityRate}.
  */
 export function mapOrderToActivity(
   order: HistoricalOrder,
@@ -40,12 +86,23 @@ export function mapOrderToActivity(
   const unitPrice = fill?.price;
   if (quantity === undefined || quantity <= 0 || unitPrice === undefined) return null;
 
-  const currency =
-    o.currency || o.instrument?.currency || fill?.walletImpact?.currency || "GBP";
+  const wallet = fill?.walletImpact;
+  const currency = o.currency || o.instrument?.currency || wallet?.currency || "GBP";
   const date = fill?.filledAt || o.createdAt;
   if (!date) return null;
 
-  const fee = round2(sumTaxes(order));
+  const crossCurrency = !!wallet?.currency && wallet.currency.toUpperCase() !== currency.toUpperCase();
+  const implied =
+    wallet?.netValue !== undefined && wallet.netValue !== null
+      ? Math.abs(wallet.netValue) / (Math.abs(quantity) * unitPrice)
+      : undefined;
+  const fxRate = crossCurrency ? accountPerActivityRate(wallet?.fxRate, implied) : undefined;
+
+  const fee = chargesInActivityCurrency(
+    (wallet?.taxes ?? []).map((t) => ({ amount: t.quantity ?? 0, currency: t.currency ?? wallet?.currency })),
+    currency,
+    fxRate,
+  );
 
   return {
     id: `t212-order-${o.id}`,
@@ -57,14 +114,18 @@ export function mapOrderToActivity(
     unitPrice,
     fee: fee > 0 ? fee : undefined,
     currency,
-    fxRate: fill?.walletImpact?.fxRate,
+    fxRate,
     isValid: true,
     isDraft: false,
     comment: o.instrument?.name || undefined,
   };
 }
 
-/** Maps a Trading 212 dividend (or interest) payout to a DIVIDEND/INTEREST activity. */
+/**
+ * Maps a Trading 212 dividend (or interest) payout to a DIVIDEND/INTEREST activity.
+ * `amount` is what Trading 212 actually paid into the account (already net of any
+ * withholding tax), i.e. the final cash.
+ */
 export function mapDividendToActivity(
   div: DividendItem,
   accountId: string,
@@ -78,7 +139,7 @@ export function mapDividendToActivity(
     accountId,
     activityType: isInterest ? INTEREST : DIVIDEND,
     date: div.paidOn,
-    symbol: isInterest ? `$CASH-${currency}` : symbol || undefined,
+    symbol: isInterest ? cashSymbol(currency) : symbol || undefined,
     amount: round2(Math.abs(div.amount)),
     currency,
     isValid: true,
@@ -115,7 +176,8 @@ export function mapTransactionToActivity(
     accountId,
     activityType,
     date: txn.dateTime,
-    symbol: `$CASH-${currency}`,
+    symbol: cashSymbol(currency),
+    // Plain cash: the amount IS the ledger (3.8+) — no separate `fee` is emitted.
     amount: round2(Math.abs(txn.amount)),
     currency,
     isValid: true,

@@ -1,6 +1,8 @@
 // Trading 212 public API shapes (subset we consume).
 // Source: https://docs.trading212.com/api  (cross-checked against the OpenAPI spec).
 
+import type { SyncProgress as KitSyncProgress } from "@wf-addons/kit";
+
 export type T212Env = "live" | "demo";
 
 // How the add-on syncs a connection into its Wealthfolio account. Mirrors the
@@ -8,16 +10,15 @@ export type T212Env = "live" | "demo";
 // HOLDINGS writes a current positions/cash snapshot.
 export type T212TrackingMode = "TRANSACTIONS" | "HOLDINGS";
 
+/** What the API client needs to call Trading 212 for one connection. */
 export interface T212Config {
-  proxyUrl: string;
   env: T212Env;
-  apiKey: string; // API Key (ID)
-  apiSecret?: string; // API Secret — present for the modern Basic-auth scheme
+  /** Name of the secret holding base64(keyId:secret); the host injects it as Basic auth. */
+  secretKey: string;
 }
 
-// Shared connection settings (one proxy/env for all keys).
+// Shared connection settings (one environment for all keys).
 export interface T212Settings {
-  proxyUrl: string;
   env: T212Env;
   // Auto-refresh already-synced accounts in the background (≈ once a day, and when
   // Wealthfolio refreshes its portfolio) so HOLDINGS snapshots build a daily history
@@ -37,8 +38,12 @@ export interface T212Settings {
 export interface T212Connection {
   id: string; // stable random id, used to key per-connection sync state
   name: string; // Wealthfolio account name set at creation
-  apiKey: string;
-  apiSecret?: string;
+  // Last 4 characters of the API key ID, for display only. The credentials themselves
+  // live in the secret `t212_auth_<id>` and are used only via the network broker.
+  keyIdLast4?: string;
+  // True for a connection migrated from v1 that only had a legacy single API key (no
+  // secret). It is kept but skipped by sync until the user re-enters key ID + secret.
+  needsCredentials?: boolean;
   accountId: string; // linked Wealthfolio securities account id
   // Mode the linked account was created in / last synced in. Absent ⇒ TRANSACTIONS
   // (connections created before the mode picker existed keep their behaviour).
@@ -223,18 +228,9 @@ export interface MultiSyncResult {
   totals: { imported: number; duplicates: number; unresolved: number };
 }
 
-/** Live progress emitted during a sync so the UI can show the current step. */
-export interface SyncProgress {
-  accountName: string;
-  phase: "export" | "map" | "import" | "done";
-  message: string;
-  // When both are set the UI can show a determinate bar; otherwise indeterminate.
-  current?: number;
-  total?: number;
-}
+export type SyncPhaseId = "export" | "map" | "import" | "done";
 
-/** One entry in the live sync timeline (every `onProgress` becomes a step). */
-export interface SyncStep extends SyncProgress {
-  ts: string; // ISO timestamp the step landed
-  status: "active" | "done";
+/** Live progress emitted during a sync so the UI can show the current step. */
+export interface SyncProgress extends KitSyncProgress<SyncPhaseId> {
+  accountName: string;
 }

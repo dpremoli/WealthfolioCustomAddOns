@@ -58,14 +58,19 @@ for Monzo and Trading 212, the network hosts the add-on declares.
 
 ## Release
 
-Bump `version` in the add-on's `manifest.json` **and** `package.json` (packaging refuses
-when they differ), then push a tag `<addon>-v<version>`:
+Releases are automatic and driven by each add-on's version:
 
 ```bash
-git tag revolut-v2.0.1 && git push origin revolut-v2.0.1
+pnpm bump revolut patch      # or minor / major / 2.1.0 — updates manifest.json and package.json
 ```
 
-`.github/workflows/release.yml` tests, builds and attaches the zip to a GitHub release.
+Open a PR with the bump. CI shows a **Releases on merge to main** preview; once it merges,
+`.github/workflows/release.yml` tests, type-checks and bundles every add-on whose
+`<addon>-v<version>` tag doesn't exist yet, then publishes a GitHub release with the zip
+(creating the tag). Unbumped add-ons are left alone.
+
+To (re)release by hand, run the **Release** workflow from the Actions tab with a tag such as
+`revolut-v2.0.1`, or push that tag; it must match the add-on's manifest version.
 
 ## History
 

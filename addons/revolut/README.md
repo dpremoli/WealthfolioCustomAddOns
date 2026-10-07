@@ -3,10 +3,8 @@
 Import your **Revolut** account statements into [Wealthfolio](https://wealthfolio.app)
 and feed your card spending into the spending module — all from a CSV export.
 
-This add-on is built in the same style as the
-[Monzo](https://github.com/dpremoli/Wealthfolio-Monzo-AddOn) and
-[Trading 212](https://github.com/dpremoli/Wealthfolio-Trading212-Add-On) add-ons,
-but it is **CSV-only**.
+Part of the [Wealthfolio custom add-ons monorepo](../../README.md), alongside the Monzo
+and Trading 212 add-ons; unlike those it is **CSV-only**. Requires **Wealthfolio 3.9+**.
 
 ## Why CSV (and not an API)?
 
@@ -52,8 +50,8 @@ be extended like the Monzo/Trading 212 add-ons.)
   otherwise merges any two activities that share the same account, day, type and amount
   (e.g. two £1,000 transfers on one day, or a repeated charge), silently dropping real
   money. The add-on forces each row in and instead de-duplicates against what's already in
-  the account, so importing the same or an overlapping statement twice adds nothing while
-  genuinely repeated transactions are all kept.
+  the account (the shared kit's `selectNewActivities`), so importing the same or an
+  overlapping statement twice adds nothing while genuinely repeated transactions are all kept.
 
 ## How to export your statement from Revolut
 
@@ -64,9 +62,17 @@ be extended like the Monzo/Trading 212 add-ons.)
 
 ## Install
 
-1. Download `revolut-addon.zip` from the [latest release](../../releases/latest).
-2. In Wealthfolio: **Settings → Add-ons → Install from ZIP** and select the file.
+1. Download `revolut-addon-<version>.zip` from the monorepo's
+   [releases](https://github.com/dpremoli/WealthfolioCustomAddOns/releases) (tag `revolut-v…`), or build it (below).
+2. In Wealthfolio: **Settings → Add-ons → Install from file** and select the zip.
 3. Enable the add-on. A **Revolut Import** item appears in the sidebar.
+
+### Upgrading from 1.x
+
+Version 2.0 is rebuilt for Wealthfolio's sandboxed add-on runtime (3.6+), so 1.x no
+longer loads on current Wealthfolio. Install the 2.0 zip over it; your saved
+currency → account mapping moves from the keyring into add-on storage on first start.
+Nothing else changes, and re-importing a statement you already imported adds nothing.
 
 ## Import
 
@@ -79,19 +85,19 @@ be extended like the Monzo/Trading 212 add-ons.)
 
 ## Development
 
+From the monorepo root:
+
 ```bash
-cd addon
-npm install
-npm run test        # unit tests (vitest)
-npm run type-check  # tsc --noEmit
-npm run build       # produces dist/addon.js
-npm run bundle      # clean + build + zip → dist/revolut-addon-<version>.zip
+pnpm install
+pnpm --filter ./addons/revolut test         # unit tests (vitest)
+pnpm --filter ./addons/revolut type-check   # tsc --noEmit
+pnpm --filter ./addons/revolut bundle       # → addons/revolut/dist/revolut-addon-<version>.zip
 ```
 
-The add-on is a single-file ES module (`dist/addon.js`) built with Vite; React and
-ReactDOM are provided by the Wealthfolio host. Releases are produced automatically by
-`.github/workflows/release.yml` when a `v*` tag is pushed.
+The add-on is a single ES module (`dist/addon.js`) built with the shared Vite config;
+React, `@wealthfolio/ui`, the SDK and React Query are provided by the Wealthfolio
+sandbox. Shared parsing/reconcile code lives in `packages/addon-kit`.
 
 ## License
 
-GPL-3.0 — see [LICENSE](LICENSE).
+GPL-3.0 — see [LICENSE](../../LICENSE).

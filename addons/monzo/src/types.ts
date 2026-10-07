@@ -46,7 +46,10 @@ export interface MonzoTransaction {
   /** An object when requested with `expand[]=merchant`; otherwise just the merchant id. */
   merchant?: MonzoMerchant | string | null;
   is_load: boolean;
+  /** Payment scheme, e.g. "mastercard", "payport_faster_payments", "uk_retail_pot". */
+  scheme?: string;
   metadata: Record<string, string>;
+  /** Only present on declined transactions (INSUFFICIENT_FUNDS, CARD_INACTIVE, …). */
   decline_reason?: string | null;
 }
 

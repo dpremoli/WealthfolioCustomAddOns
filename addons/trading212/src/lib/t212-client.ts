@@ -1,5 +1,12 @@
 import type { AddonContext } from "@wealthfolio/addon-sdk";
-import { HttpError, brokeredRequest, header, withQuery, type BrokerOptions } from "@wf-addons/kit";
+import {
+  HttpError,
+  brokeredRequest,
+  header,
+  parseCsv,
+  withQuery,
+  type BrokerOptions,
+} from "@wf-addons/kit";
 import { API_BASE } from "../constants";
 import type {
   AccountSummary,
@@ -49,6 +56,11 @@ export function isUnauthorized(err: unknown): boolean {
   return err instanceof HttpError && err.status === 401;
 }
 
+/** True for a Trading 212 403: the API key lacks the permission (scope) an endpoint needs. */
+export function isForbidden(err: unknown): boolean {
+  return err instanceof HttpError && err.status === 403;
+}
+
 /**
  * Trading 212 REST client. Calls the broker (`ctx.api.network.request`) directly — no
  * proxy: the host performs the HTTP request, so CORS is irrelevant. Credentials never
@@ -92,6 +104,15 @@ export class Trading212Client {
       this.broker,
     );
     if (res.status === 401) throw new HttpError(401, res.body, "UNAUTHORIZED");
+    if (res.status === 403) {
+      throw new HttpError(
+        403,
+        res.body,
+        `Trading 212 refused ${path} (403): the API key is missing a permission it needs. ` +
+          "Create a key with the permissions listed in Settings (and no IP restriction that " +
+          `excludes this computer).${res.body ? ` ${res.body.slice(0, 200)}` : ""}`,
+      );
+    }
     if (res.status < 200 || res.status >= 300) {
       throw new HttpError(res.status, res.body, `Trading 212 request failed (${res.status}): ${res.body}`);
     }
@@ -170,7 +191,9 @@ export class Trading212Client {
         url = new URL(location, url).toString();
         continue;
       }
-      if (res.status < 200 || res.status >= 300) throw new Error(`Export download failed (${res.status})`);
+      if (res.status < 200 || res.status >= 300) {
+        throw new HttpError(res.status, "", `Export download failed (${res.status})`);
+      }
       return res.body;
     }
     throw new Error("Export download redirected too many times");
@@ -250,19 +273,36 @@ export class Trading212Client {
   ): Promise<string> {
     const wantFrom = opts.timeFrom ? Date.parse(opts.timeFrom) : NaN;
     const wantTo = opts.timeTo ? Date.parse(opts.timeTo) : NaN;
+    // Only reuse a report that covers the window AND includes every data type: one
+    // exported elsewhere with, say, orders only would silently drop dividends and cash.
     const covers = (r: ExportReport) =>
       !tooLargeReports.has(r.reportId) &&
+      includesAll(r) &&
       (!opts.timeFrom || Date.parse(r.timeFrom) <= wantFrom) &&
       (!opts.timeTo || Date.parse(r.timeTo) >= wantTo);
 
     const existing = opts.knownReports ?? (await this.listExports());
     const done = existing.find((r) => r.status === "Finished" && r.downloadLink && covers(r));
-    if (done) return this.downloadReport(done, tooLargeReports);
+    let reuseFailed = false;
+    if (done) {
+      try {
+        return await this.downloadReport(done, tooLargeReports);
+      } catch (err) {
+        // An older report's signed link may have expired (the storage host answers 4xx):
+        // request a fresh export instead. Anything else is a real failure.
+        const expired = err instanceof HttpError && err.status >= 400 && err.status < 500;
+        if (!expired) throw err;
+        opts.onNote?.(`Reusing export ${done.reportId} failed (${err instanceof Error ? err.message : String(err)}) — requesting a new one.`);
+        reuseFailed = true;
+      }
+    }
 
     // Wait on an in-progress report rather than POSTing a duplicate.
-    const inFlight = existing.find(
-      (r) => (r.status === "Queued" || r.status === "Processing" || r.status === "Running") && covers(r),
-    );
+    const inFlight = reuseFailed
+      ? undefined
+      : existing.find(
+          (r) => (r.status === "Queued" || r.status === "Processing" || r.status === "Running") && covers(r),
+        );
 
     let reportId: number;
     if (inFlight) {
@@ -301,14 +341,57 @@ export class Trading212Client {
   }
 }
 
-/** Concatenates two CSVs that share a header row, keeping a single header. */
+/** Whether a report was created with every data type (absent flags count as included). */
+function includesAll(r: ExportReport): boolean {
+  const d = r.dataIncluded;
+  if (!d) return true;
+  return (
+    d.includeDividends !== false &&
+    d.includeInterest !== false &&
+    d.includeOrders !== false &&
+    d.includeTransactions !== false
+  );
+}
+
+/**
+ * Concatenates two CSVs under a single header. Trading 212 only includes optional columns
+ * (e.g. a tax or merchant column) when a window has data for them, so two halves of a split
+ * window can have different headers: then both are re-written under the union of columns,
+ * so every value stays under its own column name.
+ */
 export function mergeCsv(a: string, b: string): string {
   if (!a.trim()) return b;
   if (!b.trim()) return a;
+  const headerA = a.split(/\r?\n/, 1)[0];
   const nl = b.indexOf("\n");
+  const headerB = (nl === -1 ? b : b.slice(0, nl)).replace(/\r$/, "");
   const body = nl === -1 ? "" : b.slice(nl + 1);
   if (!body.trim()) return a;
-  return a.endsWith("\n") ? a + body : `${a}\n${body}`;
+  if (headerA === headerB) return a.endsWith("\n") ? a + body : `${a}\n${body}`;
+
+  const [ha = [], ...rowsA] = parseCsv(a);
+  const [hb = [], ...rowsB] = parseCsv(b);
+  const columns = [...ha, ...hb.filter((h) => !ha.includes(h))];
+  const reorder = (head: string[], row: string[]) =>
+    columns.map((c) => {
+      const i = head.indexOf(c);
+      return i === -1 ? "" : (row[i] ?? "");
+    });
+  return [columns, ...rowsA.map((r) => reorder(ha, r)), ...rowsB.map((r) => reorder(hb, r))]
+    .map((row) => row.map(csvField).join(","))
+    .join("\n");
+}
+
+function csvField(v: string): string {
+  return /[",\r\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
+}
+
+/**
+ * The query string of a `nextPagePath`. A literal `+` there is a plus sign (e.g. a
+ * `+01:00` offset in `time`), not an encoded space, so keep it as one.
+ */
+function nextPageQuery(nextPagePath: string, q: number): URLSearchParams {
+  return new URLSearchParams(nextPagePath.slice(q + 1).replace(/\+/g, "%2B"));
 }
 
 /** Turns a broker refusal for the download host into an actionable message naming the host. */
@@ -336,7 +419,7 @@ export function cursorFromNextPage(nextPagePath: string | null | undefined): str
   if (!nextPagePath) return null;
   const q = nextPagePath.indexOf("?");
   if (q === -1) return null;
-  return new URLSearchParams(nextPagePath.slice(q + 1)).get("cursor");
+  return nextPageQuery(nextPagePath, q).get("cursor");
 }
 
 /**
@@ -350,7 +433,7 @@ export function transactionPageParams(
   if (!nextPagePath) return {};
   const q = nextPagePath.indexOf("?");
   if (q === -1) return {};
-  const sp = new URLSearchParams(nextPagePath.slice(q + 1));
+  const sp = nextPageQuery(nextPagePath, q);
   return {
     cursor: sp.get("cursor") ?? undefined,
     time: sp.get("time") ?? undefined,

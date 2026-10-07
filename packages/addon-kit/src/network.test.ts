@@ -49,6 +49,22 @@ describe("brokeredRequest", () => {
     const { ctx } = ctxWith([{ status: 401, headers: {}, body: "nope" }]);
     expect((await brokeredRequest(ctx, { url: "https://x.test" }, { sleep })).status).toBe(401);
   });
+
+  it("retries 5xx only when asked, then returns the last answer", async () => {
+    const r503: Res = { status: 503, headers: {}, body: "" };
+    const off = ctxWith([r503]);
+    expect((await brokeredRequest(off.ctx, { url: "https://x.test" }, { sleep })).status).toBe(503);
+    expect(off.request).toHaveBeenCalledTimes(1);
+
+    const on = ctxWith([r503, ok({})]);
+    const res = await brokeredRequest(on.ctx, { url: "https://x.test" }, { sleep, maxServerErrorRetries: 2 });
+    expect(res.status).toBe(200);
+
+    const exhausted = ctxWith([r503, r503]);
+    const last = await brokeredRequest(exhausted.ctx, { url: "https://x.test" }, { sleep, maxServerErrorRetries: 1 });
+    expect(last.status).toBe(503);
+    expect(exhausted.request).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe("brokeredJson", () => {

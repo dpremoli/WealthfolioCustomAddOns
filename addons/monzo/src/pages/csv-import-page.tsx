@@ -56,7 +56,8 @@ export default function CsvImportPage({ ctx }: AddonPageProps) {
         mapTransactionToActivity(tx, accountId, categoryLabels),
       );
       // Reconcile against what the account already holds (by count, so genuine repeats
-      // survive) and force-import the rest. Safe to re-run or overlap with API syncs.
+      // survive) and force-import the rest. Rows carry their Monzo transaction id, so this is
+      // safe to re-run or overlap with API syncs.
       const outcome = await importNew(ctx, accountId, activities);
       setResult({ imported: outcome.imported, duplicates: outcome.duplicates });
     } catch (err) {

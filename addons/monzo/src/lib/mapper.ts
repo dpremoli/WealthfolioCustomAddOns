@@ -1,5 +1,5 @@
 import type { ActivityImport } from "@wealthfolio/addon-sdk";
-import { cashSymbol, round2 } from "@wf-addons/kit";
+import { cashSymbol, round2, withSourceRef } from "@wf-addons/kit";
 import type { MonzoMerchant, MonzoTransaction } from "../types";
 import { resolveCategory } from "./category-map";
 
@@ -20,8 +20,18 @@ export function isPending(tx: MonzoTransaction): boolean {
   return tx.settled === "";
 }
 
+/** Money moved between the account and one of its pots (not spending or income). */
 export function isPotTransfer(tx: MonzoTransaction): boolean {
-  return tx.metadata?.provider_category === "uk_retail_pot";
+  return (
+    tx.scheme === "uk_retail_pot" ||
+    !!tx.metadata?.pot_id ||
+    tx.metadata?.provider_category === "uk_retail_pot"
+  );
+}
+
+/** Declined card attempts carry `decline_reason`; no money moved. */
+export function isDeclined(tx: MonzoTransaction): boolean {
+  return !!tx.decline_reason;
 }
 
 export function isFlexRepayment(tx: MonzoTransaction): boolean {
@@ -112,6 +122,8 @@ export function mapTransactionToActivity(
     symbol: cashSymbol(currency),
     isValid: true,
     isDraft: false,
-    comment: buildComment(tx, categoryLabels) || undefined,
+    // The transaction id rides along as `[ref:tx_…]` so a re-fetch (or a CSV import of the
+    // same transaction) is recognised even after its notes or category changed.
+    comment: withSourceRef(buildComment(tx, categoryLabels), tx.id),
   };
 }

@@ -271,6 +271,14 @@ export function setBackfillCheckpoint(
   return patchSyncState(ctx, id, { backfillCheckpoint: iso });
 }
 
+export function setBackfillStartedAt(
+  ctx: AddonContext,
+  id: string,
+  iso: string | null,
+): Promise<void> {
+  return patchSyncState(ctx, id, { backfillStartedAt: iso });
+}
+
 export function setCardLastSync(ctx: AddonContext, id: string, iso: string): Promise<void> {
   return patchSyncState(ctx, id, { cardLastSync: iso });
 }

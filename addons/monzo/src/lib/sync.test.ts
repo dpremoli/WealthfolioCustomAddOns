@@ -9,7 +9,15 @@ import {
 } from "../constants";
 import { json, makeCtx, tx } from "../test-utils";
 import type { MonzoTransaction } from "../types";
-import { isEligible, importNew, normaliseLegacyCash, pendingHoldBack, runSync } from "./sync";
+import {
+  HISTORY_LIMIT_MS,
+  isEligible,
+  importNew,
+  normaliseLegacyCash,
+  pendingHoldBack,
+  runSync,
+  syncSince,
+} from "./sync";
 import { mapTransactionToActivity } from "./mapper";
 
 const MONZO_ACC = "acc_00001";
@@ -100,13 +108,17 @@ describe("runSync reconcile", () => {
     expect(outcome.duplicates).toBe(1);
   });
 
-  it("skips pending, pot, Flex-repayment and savings transactions", async () => {
+  it("skips pending, declined, zero, pot, Flex-repayment and savings transactions", async () => {
     const t = setup([
       tx({ amount: -100 }),
       tx({ amount: -200, settled: "" }), // pending
       tx({ amount: -300, metadata: { provider_category: "uk_retail_pot" } }),
       tx({ amount: -400, category: "transfers", description: "Monzo Flex" }),
       tx({ amount: -500, category: "savings" }),
+      tx({ amount: -600, scheme: "uk_retail_pot" }),
+      tx({ amount: -700, metadata: { pot_id: "pot_1" } }),
+      tx({ amount: -800, decline_reason: "INSUFFICIENT_FUNDS" }),
+      tx({ amount: 0 }), // card check
     ]);
     const result = await runSync(t.ctx);
     expect(result.imported).toBe(1);
@@ -127,7 +139,7 @@ describe("runSync reconcile", () => {
     await runSync(t.ctx);
     const comments = t.importCalls[0].map((a) => a.comment);
     expect(comments[0]).toContain("Tesco | Eating Out | Leeds, GB");
-    expect(comments[1]).toBe("Unexpanded | Eating Out");
+    expect(comments[1]).toMatch(/^Unexpanded \| Eating Out \[ref:tx_\w+\]$/);
   });
 
   it("applies saved category labels to comments and the breakdown", async () => {
@@ -141,14 +153,72 @@ describe("runSync reconcile", () => {
 
 describe("runSync watermark", () => {
   it("sends the saved watermark as `since` and rewrites it", async () => {
+    const lastSync = new Date(Date.now() - 10 * 86_400_000).toISOString();
     const t = setup([tx()]);
-    t.storage.set(KEY_LAST_SYNC, JSON.stringify("2026-04-30T00:00:00.000Z"));
+    t.storage.set(KEY_LAST_SYNC, JSON.stringify(lastSync));
     await runSync(t.ctx);
     const txReq = t.requests.find((r) => r.url.includes("/transactions"))!;
-    expect(new URL(txReq.url).searchParams.get("since")).toBe("2026-04-30T00:00:00.000Z");
+    expect(new URL(txReq.url).searchParams.get("since")).toBe(lastSync);
     const written = JSON.parse(t.storage.get(KEY_LAST_SYNC)!);
-    expect(Date.parse(written)).toBeGreaterThan(Date.parse("2026-04-30T00:00:00.000Z"));
+    expect(Date.parse(written)).toBeGreaterThan(Date.parse(lastSync));
     expect(JSON.parse(t.storage.get(KEY_LAST_RUN)!)).toBeTruthy();
+  });
+
+  it("never asks for more than the 90 days Monzo allows on an incremental sync", () => {
+    const now = new Date("2026-10-01T00:00:00.000Z");
+    expect(syncSince(undefined, now)).toEqual({ since: undefined, clamped: false });
+    expect(syncSince("2026-09-01T00:00:00.000Z", now)).toEqual({
+      since: "2026-09-01T00:00:00.000Z",
+      clamped: false,
+    });
+    const old = syncSince("2026-01-01T00:00:00.000Z", now);
+    expect(old.clamped).toBe(true);
+    expect(old.since).toBe(new Date(now.getTime() - HISTORY_LIMIT_MS).toISOString());
+  });
+
+  it("tries for full history on a first sync and falls back to 90 days when refused", async () => {
+    let first = true;
+    const t = makeCtx({
+      wfAccounts: [{ id: WF_ACC, name: "Monzo Current" }],
+      handler: (req) => {
+        const u = new URL(req.url);
+        if (u.pathname === "/accounts") return json(200, { accounts: [{ id: MONZO_ACC, account_type: "uk_retail" }] });
+        if (first && !u.searchParams.get("since")) {
+          first = false;
+          return json(403, { code: "forbidden.verification_required" });
+        }
+        return json(200, { transactions: [tx()] });
+      },
+    });
+    t.secrets.set(SECRET_ACCESS_TOKEN, "acc");
+    t.storage.set(KEY_EXPIRES_AT, String(Date.now() + 3_600_000));
+    t.storage.set(KEY_MAPPING, JSON.stringify({ [MONZO_ACC]: WF_ACC }));
+    const result = await runSync(t.ctx);
+    expect(result.imported).toBe(1);
+    const sinces = t.requests
+      .filter((r) => r.url.includes("/transactions"))
+      .map((r) => new URL(r.url).searchParams.get("since"));
+    expect(sinces[0]).toBeNull();
+    expect(Date.parse(sinces[1]!)).toBeGreaterThan(Date.now() - 90 * 86_400_000);
+    expect(result.log?.join("\n")).toMatch(/refused full history/);
+  });
+
+  it("does not import the same transaction twice after its notes change", async () => {
+    const before = tx({ id: "tx_same", notes: "" });
+    const t = setup([{ ...before, notes: "split with Sam" }]);
+    t.activities.set(WF_ACC, [
+      {
+        activityType: "WITHDRAWAL",
+        date: new Date(before.created),
+        amount: String(Math.abs(before.amount) / 100),
+        currency: "GBP",
+        comment: mapTransactionToActivity(before, WF_ACC).comment,
+        assetSymbol: "$CASH-GBP",
+      },
+    ]);
+    const result = await runSync(t.ctx);
+    expect(result.imported).toBe(0);
+    expect(result.duplicates).toBe(1);
   });
 
   it("holds the watermark back to a still-pending transaction so it is picked up once settled", async () => {
@@ -194,6 +264,10 @@ describe("isEligible / normaliseLegacyCash", () => {
     expect(isEligible(tx({ category: "transfers", description: "Flex" }), false)).toBe(false);
     expect(isEligible(tx({ category: "shopping", settled: "" }), true)).toBe(true);
     expect(isEligible(tx({ category: "shopping", settled: "" }), false)).toBe(false);
+  });
+
+  it("never treats a declined Flex attempt as spending", () => {
+    expect(isEligible(tx({ settled: "", decline_reason: "CARD_BLOCKED" }), true)).toBe(false);
   });
 
   it("only rewrites symbols that equal the row's own currency", () => {

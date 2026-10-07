@@ -49,7 +49,8 @@ export function StatusCard({ connected, lastSyncIso, result, isSyncing }: Status
         {!result && !isSyncing && connected && (
           <p className="text-muted-foreground flex items-center gap-1.5 text-sm">
             <Icons.Clock size={14} weight="duotone" />
-            Ready to sync. Monzo only shares up to 90 days of history; use CSV import for anything older.
+            Ready to sync. Monzo shares your full history only for 5 minutes after you connect, then
+            just the last 90 days; use CSV import for anything older.
           </p>
         )}
         {stats.length > 0 && <StatTiles stats={stats} />}

@@ -36,8 +36,10 @@ export function buildAuthUrl({ clientId, redirectUrl, state }: AuthUrlParams): s
 
 export interface PastedAuth {
   code: string;
-  /** Present when the user pasted the whole redirect URL (or query string). */
+  /** The redirect's `state`, when the user pasted the whole redirect URL (or query string). */
   state?: string;
+  /** True when a URL or query string was pasted (which must then carry `state`). */
+  structured?: boolean;
 }
 
 /**
@@ -64,15 +66,22 @@ export function parsePastedAuth(input: string): PastedAuth {
   }
   const code = params.get("code");
   if (!code) throw new OAuthInputError("No authorisation code found in what you pasted.");
-  return { code, state: params.get("state") ?? undefined };
+  return { code, state: params.get("state") ?? undefined, structured: true };
 }
 
 /**
  * Checks a pasted `state` against the one generated for this attempt. A bare code carries
- * no state, so there is nothing to compare; a pasted state must match exactly.
+ * no state, so there is nothing to compare; a pasted redirect URL must carry the state
+ * (Monzo always echoes it back) and it must match exactly.
  */
 export function verifyState(pasted: PastedAuth, expected: string | null | undefined): void {
-  if (pasted.state === undefined) return;
+  if (pasted.state === undefined) {
+    if (!pasted.structured) return;
+    throw new OAuthInputError(
+      "The pasted URL has no state, so it cannot be checked against this connection attempt. " +
+        "Paste the full address your browser ended up on, or just the code.",
+    );
+  }
   if (!expected) {
     throw new OAuthInputError("No connection is in progress. Click Connect Monzo to start again.");
   }

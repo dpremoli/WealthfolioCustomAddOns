@@ -49,19 +49,20 @@ describe("parsePastedAuth", () => {
   it("extracts code and state from a full redirect URL", () => {
     expect(
       parsePastedAuth("https://localhost/monzo-callback?code=abc.DEF-123&state=s1"),
-    ).toEqual({ code: "abc.DEF-123", state: "s1" });
+    ).toEqual({ code: "abc.DEF-123", state: "s1", structured: true });
   });
 
   it("tolerates whitespace, quotes and a trailing fragment", () => {
     expect(parsePastedAuth('  "https://localhost/cb?code=xyz&state=s#frag"\n')).toEqual({
       code: "xyz",
       state: "s",
+      structured: true,
     });
   });
 
   it("accepts a bare query string", () => {
-    expect(parsePastedAuth("?code=c0de&state=s")).toEqual({ code: "c0de", state: "s" });
-    expect(parsePastedAuth("code=c0de")).toEqual({ code: "c0de", state: undefined });
+    expect(parsePastedAuth("?code=c0de&state=s")).toEqual({ code: "c0de", state: "s", structured: true });
+    expect(parsePastedAuth("code=c0de")).toEqual({ code: "c0de", state: undefined, structured: true });
   });
 
   it("accepts a bare code", () => {
@@ -97,6 +98,7 @@ describe("verifyState", () => {
   it("skips the check for a bare code", () => {
     expect(() => verifyState({ code: "c" }, "s")).not.toThrow();
     expect(() => verifyState({ code: "c" }, null)).not.toThrow();
+    expect(() => verifyState(parsePastedAuth("https://localhost/cb?code=abc"), "s")).toThrow(/no state/);
   });
 });
 

@@ -4,6 +4,7 @@ import {
   MIN_SPLIT_WINDOW_MS,
   Trading212Client,
   cursorFromNextPage,
+  isForbidden,
   isTooLarge,
   mergeCsv,
   transactionPageParams,
@@ -112,6 +113,11 @@ describe("Trading212Client — direct brokered calls", () => {
 
     const b = makeClient(() => ({ status: 500, headers: {}, body: "boom" }));
     await expect(b.client.getAccountSummary()).rejects.toThrow("Trading 212 request failed (500): boom");
+
+    const c = makeClient(() => ({ status: 403, headers: {}, body: "Scope( history:orders )" }));
+    const err = await c.client.pageOrders().catch((e) => e);
+    expect(isForbidden(err)).toBe(true);
+    expect(err.message).toMatch(/history\/orders.*missing a permission.*Scope\( history:orders \)/);
   });
 
   it("retries a transient transport error but not a policy error", async () => {
@@ -230,6 +236,53 @@ describe("Trading212Client.runExport", () => {
     expect(requests).toHaveLength(1); // download only
   });
 
+  it("does not reuse a report that left out some data types", async () => {
+    const server = fakeExportServer(() => `${HDR}\nDeposit,t,1`);
+    const { client, requests } = makeClient(server.handler);
+    await client.runExport({
+      timeFrom: "2025-01-01T00:00:00.000Z",
+      timeTo: "2025-02-01T00:00:00.000Z",
+      knownReports: [
+        {
+          reportId: 99,
+          timeFrom: "2020-01-01T00:00:00Z",
+          timeTo: "2026-12-31T00:00:00Z",
+          dataIncluded: { ...DATA_INCLUDED, includeDividends: false },
+          status: "Finished",
+          downloadLink: "https://dl.amazonaws.com/99.csv",
+        },
+      ],
+    });
+    expect(requests.some((r) => r.method === "POST")).toBe(true);
+    expect(requests.some((r) => r.url.endsWith("/99.csv"))).toBe(false);
+  });
+
+  it("requests a fresh export when a reused report's link has expired", async () => {
+    const server = fakeExportServer(() => `${HDR}\nDeposit,t,1`);
+    const { client, requests } = makeClient((req) =>
+      req.url.endsWith("/99.csv") ? { status: 403, headers: {}, body: "expired" } : server.handler(req),
+    );
+    const notes: string[] = [];
+    const csv = await client.runExport({
+      timeFrom: "2025-01-01T00:00:00.000Z",
+      timeTo: "2025-02-01T00:00:00.000Z",
+      onNote: (m) => notes.push(m),
+      knownReports: [
+        {
+          reportId: 99,
+          timeFrom: "2020-01-01T00:00:00Z",
+          timeTo: "2026-12-31T00:00:00Z",
+          dataIncluded: DATA_INCLUDED,
+          status: "Finished",
+          downloadLink: "https://dl.amazonaws.com/99.csv",
+        },
+      ],
+    });
+    expect(csv).toContain("Deposit");
+    expect(requests.some((r) => r.method === "POST")).toBe(true);
+    expect(notes.join(" ")).toMatch(/requesting a new one/);
+  });
+
   it("creates an export, polls, then downloads when nothing is reusable", async () => {
     const server = fakeExportServer(() => `${HDR}\nDeposit,t,1`);
     const { client, requests, sleep } = makeClient(server.handler);
@@ -337,6 +390,12 @@ describe("helpers", () => {
     expect(mergeCsv("h\n1", "h")).toBe("h\n1");
   });
 
+  it("mergeCsv keeps values under their own column when the halves' headers differ", () => {
+    const a = "Action,Total\nDeposit,10";
+    const b = 'Action,Withholding tax,Total\nDividend,"0,15",2';
+    expect(mergeCsv(a, b)).toBe('Action,Total,Withholding tax\nDeposit,10,\nDividend,2,"0,15"');
+  });
+
   it("cursorFromNextPage / transactionPageParams parse nextPagePath", () => {
     expect(cursorFromNextPage("/api/v0/equity/history/orders?limit=50&cursor=123")).toBe("123");
     expect(cursorFromNextPage(null)).toBeNull();
@@ -345,5 +404,9 @@ describe("helpers", () => {
       time: "2026-01-01T00:00:00Z",
     });
     expect(transactionPageParams(undefined)).toEqual({});
+    // A literal "+" in an offset is a plus sign, not an encoded space.
+    expect(transactionPageParams("/x?cursor=1&time=2026-01-01T00:00:00+01:00").time).toBe(
+      "2026-01-01T00:00:00+01:00",
+    );
   });
 });

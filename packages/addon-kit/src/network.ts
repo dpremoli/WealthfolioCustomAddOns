@@ -20,8 +20,16 @@ export interface BrokerOptions {
   max429Retries?: number;
   /** Fallback wait for a 429 with no Retry-After / x-ratelimit-reset header. */
   default429BackoffMs?: number;
-  /** Retries for transient transport failures (timeouts, dropped connections). */
+  /**
+   * Retries for transient transport failures (timeouts, dropped connections). Set 0 for
+   * a request that must not be sent twice, such as redeeming a single-use token.
+   */
   maxTransportRetries?: number;
+  /**
+   * Retries for a 500/502/503/504 ("try again later") answer, with backoff. Default 0:
+   * only enable it for idempotent requests (GETs).
+   */
+  maxServerErrorRetries?: number;
   /** Injected for tests. */
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
@@ -32,6 +40,8 @@ const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 // Errors the host raises for a request it will never send (bad host, policy,
 // missing secret). Retrying those only delays the real error.
 const NON_RETRYABLE = /not approved|not allowed|must use|must include|cannot include|invalid|too large|secret|permission/i;
+
+const TRANSIENT_STATUS = new Set([500, 502, 503, 504]);
 
 /** Lower-cases header names: the host returns them as received. */
 export function header(res: NetworkResponse, name: string): string | undefined {
@@ -57,7 +67,8 @@ export function retryDelayMs(res: NetworkResponse, fallbackMs: number, now = Dat
 /**
  * Sends a request through Wealthfolio's network broker (`ctx.api.network.request`),
  * the only way a sandboxed add-on can reach the internet. Retries 429s (honouring
- * the rate-limit headers) and transient transport failures; returns any other
+ * the rate-limit headers), transient transport failures and, when asked, transient
+ * 5xx answers; returns any other
  * response as-is, including non-2xx.
  */
 export async function brokeredRequest(
@@ -68,8 +79,10 @@ export async function brokeredRequest(
   const sleep = opts.sleep ?? defaultSleep;
   const max429 = opts.max429Retries ?? 12;
   const maxTransport = opts.maxTransportRetries ?? 3;
+  const maxServer = opts.maxServerErrorRetries ?? 0;
   let rateLimited = 0;
   let transport = 0;
+  let server = 0;
   for (;;) {
     let res: NetworkResponse;
     try {
@@ -87,6 +100,11 @@ export async function brokeredRequest(
       if (rateLimited >= max429) throw new HttpError(429, res.body, "Rate limit exceeded. Try again shortly.");
       await sleep(retryDelayMs(res, opts.default429BackoffMs ?? 15_000, opts.now?.()));
       rateLimited++;
+      continue;
+    }
+    if (TRANSIENT_STATUS.has(res.status) && server < maxServer) {
+      await sleep(Math.min(16_000, 2000 * 2 ** server));
+      server++;
       continue;
     }
     return res;

@@ -1,6 +1,12 @@
 export { parseCsv, parseCsvRecords, headerIndex } from "./csv";
 export { round2, cashSymbol, fnv1a } from "./money";
-export { selectNewActivities, contentKey, type ExistingActivityLike } from "./reconcile";
+export {
+  selectNewActivities,
+  contentKey,
+  withSourceRef,
+  sourceRefOf,
+  type ExistingActivityLike,
+} from "./reconcile";
 export {
   brokeredRequest,
   brokeredJson,

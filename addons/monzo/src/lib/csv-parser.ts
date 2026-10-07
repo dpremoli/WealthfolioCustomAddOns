@@ -24,6 +24,7 @@ export function parseMonzoCsv(text: string): MonzoTransaction[] {
   const iId = at("Transaction ID", 0);
   const iDate = at("Date", 1);
   const iTime = at("Time", 2);
+  const iType = at("Type", 3);
   const iName = at("Name", 4);
   const iCategory = at("Category", 6);
   const iAmount = at("Amount", 7);
@@ -38,6 +39,7 @@ export function parseMonzoCsv(text: string): MonzoTransaction[] {
     const id = c[iId];
     const date = c[iDate];
     const time = c[iTime];
+    const type = c[iType] || "";
     const name = c[iName] || "";
     const category = (c[iCategory] || "general").toLowerCase().replace(/\s+/g, "_");
     const amountRaw = parseFloat(c[iAmount]);
@@ -64,6 +66,8 @@ export function parseMonzoCsv(text: string): MonzoTransaction[] {
       category,
       merchant: name ? { name } : undefined,
       is_load: false,
+      // "Pot transfer" rows are money moved to/from a pot; mark them like the API does.
+      scheme: /^pot transfer$/i.test(type) ? "uk_retail_pot" : undefined,
       metadata: {},
     };
 

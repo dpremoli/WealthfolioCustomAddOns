@@ -125,17 +125,24 @@ account without aborting the rest. After the loop the symbol cache is written **
 1. Build a `Trading212Client` from `connectionConfig(settings, conn)` (env + the connection's
    secret name); load this connection's `lastSync` watermark + imported-ref set from
    `t212_sync_{id}` (add-on storage).
-2. **Orders** and **dividends**: page newest-first via `collectSince`, stopping once
-   a record predates `lastSync`. **Transactions**: use the server-side `time` filter
-   from `lastSync`, then follow the cursor.
+2. **Orders**, **dividends** and **transactions**: page newest-first, stopping once a
+   record is at or before `lastSync` (compared as instants). Transactions carry the
+   `cursor` + `time` pair from `nextPagePath` (Trading 212 requires both or neither).
 3. For each record not already in this connection's imported-ref set:
-   - Orders/dividends: resolve the symbol (see below). A trade with no resolvable
-     symbol is skipped and counted as `unresolved`. Interest needs no symbol.
+   - Orders: map first (cancelled/rejected orders have no fill; non-`TRADE` fills such as
+     splits or stock dividends are counted and logged, not imported), then resolve the
+     symbol (see below). A trade with no resolvable symbol is skipped and counted as
+     `unresolved`. Interest needs no symbol.
    - Build the `ActivityImport` via the mapper (with `conn.accountId`) and a **stable `id`**.
-4. `checkImport(activities)` → drop rows flagged `duplicateOfId` or `isValid === false`
-   → `import` the rest into `conn.accountId`.
-5. Record the ids of imported + duplicate rows into this connection's imported-ref set,
-   and set its `lastSync` watermark to now. Return a `SyncResult` tagged with the
+4. Reconcile against `activities.getAll(conn.accountId)` with the kit's
+   `selectNewActivities` (content key, **by count**), then `checkImport` the rest for
+   validation → drop `isValid === false` → `import` with `forceImport`. checkImport's own
+   `duplicateOfId` is ignored: it is a content hash, so it would drop the second of two
+   genuinely identical same-day rows (two equal deposits).
+5. Record the ids of imported + already-present rows into this connection's imported-ref
+   set, and set its `lastSync` watermark to when this run **started** (pages are read
+   newest-first from that instant; a full backfill uses the instant it first started,
+   persisted as `backfillStartedAt` so a resumed backfill leaves no gap). Return a `SyncResult` tagged with the
    connection/account.
 
 ### Tracking modes (HOLDINGS vs TRANSACTIONS)
@@ -226,6 +233,7 @@ uses it as-is — nothing re-derives it. What each mapping emits:
 | Transaction `DEPOSIT` | `DEPOSIT` | ledger amount | no separate `fee` is ever emitted for plain cash rows (a fee no longer reduces the balance). |
 | Transaction `WITHDRAW` | `WITHDRAWAL` | ledger amount (positive) | |
 | Transaction `FEE` | `FEE` | the fee | |
+| Transaction `INTEREST_ON_FREE_CASH` / `LENDING_INTEREST` | `INTEREST` | ledger amount | `cashSymbol(ccy)`; newer API types. |
 | Transaction `TRANSFER` | `TRANSFER_IN` / `TRANSFER_OUT` | ledger amount (by sign) | |
 
 Trades deliberately omit `amount` rather than send a total, so the writer's own derivation is

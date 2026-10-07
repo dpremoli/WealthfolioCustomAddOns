@@ -18,8 +18,8 @@ Monzo, paste its details into the add-on, and connect.
   Wealthfolio's `$CASH-<currency>` cash symbol. The merchant, Monzo category, location,
   foreign-currency amount and your notes are kept in the activity comment, so
   **Wealthfolio's Spending module can categorise these cash activities** for you.
-- Skips what should not count as spending: pending transactions (Flex purchases are the
-  exception, they never "settle"), pot transfers, the monthly Flex repayment (the purchases
+- Skips what should not count as spending: declined and zero-value transactions, pending
+  transactions (Flex purchases are the exception, they never "settle"), pot transfers, the monthly Flex repayment (the purchases
   are already on the Flex account) and savings-category moves such as investment transfers.
 - Lets you rename Monzo categories (Settings -> Category labels).
 - Imports a **Monzo CSV export** for history older than the API shares (see below).
@@ -88,19 +88,24 @@ link that did not come from your own Connect click is rejected.
   account, filters them, and imports what is new.
 - Re-syncing is safe. Instead of relying on Wealthfolio's content-hash duplicate detection
   (which would silently drop two genuinely identical same-day transactions, such as two
-  coffees at the same price), the add-on compares what it fetched with what the account
-  already holds, by count, and imports only the surplus. The same applies to CSV imports.
+  coffees at the same price), the add-on tags each activity's comment with its Monzo
+  transaction id (`[ref:tx_…]`) and skips ids the account already holds, so a transaction
+  whose notes or category changed in Monzo is still recognised. Rows imported before these
+  tags existed are matched by content, by count. The same applies to CSV imports, which use
+  the same transaction ids, so a CSV and the API sync can overlap freely.
 - A transaction that is still **pending** when you sync is not lost: the next sync starts
   from the oldest recent pending transaction, so it is picked up once it settles.
+- **Disconnect** revokes the tokens at Monzo (`/oauth2/logout`) as well as forgetting them.
 - **Reset sync history** (Settings -> Advanced) makes the next sync start from scratch.
   Anything already imported is recognised and skipped.
 
 ### The 90-day limit and CSV backfill
 
-Monzo only lets API clients read the **last 90 days** of transactions once you are more than
-a few minutes past your login approval (Monzo's developer docs describe a short window right
-after approval in which full history is available; the add-on does not rely on this, but a
-sync immediately after approving may therefore bring in more than 90 days).
+Monzo shares your **full history** only for 5 minutes after you authenticate; after that, API
+clients can read just the **last 90 days**. So **sync straight after approving the connection
+in the Monzo app**: the first sync asks for everything, and if Monzo refuses (the window has
+passed) it falls back to the last 90 days and says so in the log. Later syncs never ask for
+more than 90 days back, so a long gap between syncs is logged rather than failing with 403.
 
 For anything older, export a CSV from the Monzo app (**Account -> Export transactions ->
 CSV**) and use **Import CSV** in the add-on: choose the file, pick the target Wealthfolio

@@ -187,10 +187,10 @@ describe('mapTransactionToActivity', () => {
       metadata: {},
       merchant: 'merch_0000abcdef',
     };
-    expect(mapTransactionToActivity(tx, 'acc-123').comment).toBe('TESCO 1234 | Groceries');
+    expect(mapTransactionToActivity(tx, 'acc-123').comment).toBe('TESCO 1234 | Groceries [ref:tx_str]');
   });
 
-  it('keeps the comment format: name | category | city, country | FOREIGN amt | Note: notes', () => {
+  it('keeps the comment format: name | category | city, country | FOREIGN amt | Note: notes [ref:id]', () => {
     const tx: MonzoTransaction = {
       id: 'tx_fmt',
       created: '2026-05-05T10:00:00.000Z',
@@ -207,7 +207,7 @@ describe('mapTransactionToActivity', () => {
       merchant: { name: 'Bistro', address: { city: 'Paris', country: 'FR' } },
     };
     expect(mapTransactionToActivity(tx, 'acc-123').comment).toBe(
-      'Bistro | Eating Out | Paris, FR | EUR 59.00 | Note: birthday',
+      'Bistro | Eating Out | Paris, FR | EUR 59.00 | Note: birthday [ref:tx_fmt]',
     );
   });
 });

@@ -5,6 +5,7 @@ export const ADDON_ID = "monzo-addon";
 export const AUTH_URL = "https://auth.monzo.com/";
 export const API_BASE = "https://api.monzo.com";
 export const TOKEN_URL = `${API_BASE}/oauth2/token`;
+export const LOGOUT_URL = `${API_BASE}/oauth2/logout`;
 
 /** Suggested redirect URL: it never has to load, the user only copies the address bar. */
 export const SUGGESTED_REDIRECT_URL = "https://localhost/monzo-callback";

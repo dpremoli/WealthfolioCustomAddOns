@@ -454,7 +454,8 @@ export default function SettingsPage({ ctx }: AddonPageProps) {
             <code className="text-foreground">portfolio</code>,{" "}
             <code className="text-foreground">history:orders</code>,{" "}
             <code className="text-foreground">history:dividends</code>,{" "}
-            <code className="text-foreground">history:transactions</code>.
+            <code className="text-foreground">history:transactions</code>. Leave the key without
+            an IP restriction (or allow this computer's address), or Trading 212 answers 403.
           </Step>
           <Step n={3}>
             Copy the <strong>API key ID</strong> and <strong>API secret</strong> (both are

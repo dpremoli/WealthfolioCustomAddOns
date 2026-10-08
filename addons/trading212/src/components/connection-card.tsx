@@ -20,7 +20,7 @@ import {
   cn,
 } from "@wealthfolio/ui";
 import { useQuery } from "@tanstack/react-query";
-import { getSymbolMap, getSyncState } from "../hooks/use-config";
+import { connectionKind, getSymbolMap, getSyncState, kindLabel } from "../hooks/use-config";
 import type { SyncResult, T212Connection, T212Settings } from "../types";
 import { relativeTime } from "@wf-addons/kit";
 import { StatTiles, type Stat } from "@wf-addons/kit/ui";
@@ -41,13 +41,23 @@ const TYPE_ICON = {
   TRANSFER_OUT: "ArrowUpRight", Card: "CreditCard", Holdings: "Briefcase",
 } as const;
 
-export function ConnectionCard({ ctx, settings, conn, result, isSyncing }: ConnectionCardProps) {
-  const { data: syncState } = useQuery({
+/** A connection's sync state, refreshed when a sync starts or finishes. */
+export function useConnectionSyncState(
+  ctx: AddonContext,
+  conn: T212Connection,
+  isSyncing: boolean,
+  result: SyncResult | undefined,
+) {
+  return useQuery({
     queryKey: ["t212_sync_state", conn.id, isSyncing, result?.finishedAt],
     queryFn: () => getSyncState(ctx, conn.id),
   });
+}
+
+export function ConnectionCard({ ctx, settings, conn, result, isSyncing }: ConnectionCardProps) {
+  const { data: syncState } = useConnectionSyncState(ctx, conn, isSyncing, result);
   const lastSync = syncState?.lastSync;
-  const cardLastSync = syncState?.cardLastSync;
+  const kind = connectionKind(conn);
 
   const mode = conn.trackingMode ?? "TRANSACTIONS";
   const stats: Stat[] = result
@@ -59,23 +69,20 @@ export function ConnectionCard({ ctx, settings, conn, result, isSyncing }: Conne
       <CardHeader className="space-y-2 pb-3">
         <div className="flex flex-wrap items-center gap-2">
           <CardTitle className="text-base">{conn.name}</CardTitle>
+          <Badge variant="outline" className="gap-1">
+            <Icons.Wallet size={11} weight="duotone" />
+            {kindLabel(kind)}
+          </Badge>
           <Badge variant={mode === "HOLDINGS" ? "info" : "secondary"} className="gap-1">
             <Icons.Activity size={11} weight="duotone" />
             {mode === "HOLDINGS" ? "Holdings" : "Transactions"}
           </Badge>
-          {conn.cardAccountId && (
-            <Badge variant="outline" className="gap-1">
-              <Icons.CreditCard size={11} weight="duotone" />
-              Card account
-            </Badge>
-          )}
           <div className="ml-auto">
             <ConnectionHealth ctx={ctx} settings={settings} conn={conn} />
           </div>
         </div>
         <CardDescription className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
           <LastSync label="Last sync" iso={lastSync ?? null} />
-          {conn.cardAccountId && <LastSync label="Card" iso={cardLastSync ?? null} />}
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
@@ -107,7 +114,7 @@ export function ConnectionCard({ ctx, settings, conn, result, isSyncing }: Conne
   );
 }
 
-function LastSync({ label, iso }: { label: string; iso: string | null }) {
+export function LastSync({ label, iso }: { label: string; iso: string | null }) {
   if (!iso) {
     return (
       <span className="text-muted-foreground flex items-center gap-1">
@@ -136,8 +143,6 @@ function buildStats(r: SyncResult): Stat[] {
   ];
   if (r.unresolved > 0)
     out.push({ label: "Unmatched", value: r.unresolved, icon: "AlertTriangle", tone: "warning" });
-  if (r.card && r.card.imported > 0)
-    out.push({ label: "Card", value: r.card.imported, icon: "CreditCard" });
   return out;
 }
 

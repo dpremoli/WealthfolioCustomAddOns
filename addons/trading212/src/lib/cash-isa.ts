@@ -1,5 +1,5 @@
 import type { ActivityImport, AddonContext } from "@wealthfolio/addon-sdk";
-import { jsonStore, reconcileWithLedger, type ImportLedger } from "@wf-addons/kit";
+import { jsonStore, ledgerAccountId, reconcileWithLedger, type ImportLedger } from "@wf-addons/kit";
 import { PROVIDER } from "../constants";
 import { mapCsvRow, parseCsv } from "./csv";
 import type { SymbolResolver } from "./symbol-resolver";
@@ -14,6 +14,8 @@ import type { SymbolResolver } from "./symbol-resolver";
 export const CASH_ISA_PROVIDER_ID = "t212-cash-isa";
 /** Import ledger (kit `ImportLedger`) of Cash ISA rows already imported. */
 const LEDGER_KEY = "t212_cash_isa_ledger";
+/** {@link CashIsaState}: which Wealthfolio account holds the Cash ISA. */
+const STATE_KEY = "t212_cash_isa";
 export const DEFAULT_CASH_ISA_NAME = "Trading 212 Cash ISA";
 
 const CASH_TYPES = new Set(["DEPOSIT", "WITHDRAWAL", "INTEREST", "FEE"]);
@@ -36,34 +38,99 @@ export interface CashIsaParse {
 export async function parseCashIsaCsv(text: string, accountId: string): Promise<CashIsaParse> {
   const activities: ActivityImport[] = [];
   const skipped: Record<string, number> = {};
-  const seen = new Set<string>();
-  let currency = "";
   for (const row of parseCsv(text)) {
     const action = (row["Action"] ?? "").trim() || "(no action)";
     const a = await mapCsvRow(row, accountId, NO_SYMBOLS);
-    if (!a || !CASH_TYPES.has(String(a.activityType))) {
-      skipped[action] = (skipped[action] ?? 0) + 1;
-      continue;
+    if (a && CASH_TYPES.has(String(a.activityType))) activities.push(a);
+    else skipped[action] = (skipped[action] ?? 0) + 1;
+  }
+  return mergeCashIsaParses([{ activities, skipped, currency: "" }]);
+}
+
+/**
+ * Combines the parses of several exports (e.g. one per tax year) into one: rows that appear
+ * in more than one file (same Trading 212 id) are kept once.
+ */
+export function mergeCashIsaParses(parses: CashIsaParse[]): CashIsaParse {
+  const activities: ActivityImport[] = [];
+  const skipped: Record<string, number> = {};
+  const seen = new Set<string>();
+  let currency = "";
+  for (const p of parses) {
+    for (const [action, n] of Object.entries(p.skipped)) skipped[action] = (skipped[action] ?? 0) + n;
+    for (const a of p.activities) {
+      if (a.id && seen.has(a.id)) continue;
+      if (a.id) seen.add(a.id);
+      currency ||= a.currency ?? "";
+      activities.push(a);
     }
-    if (a.id && seen.has(a.id)) continue;
-    if (a.id) seen.add(a.id);
-    currency ||= a.currency ?? "";
-    activities.push(a);
   }
   return { activities, skipped, currency: currency || "GBP" };
 }
 
-/** The Wealthfolio Cash account for the Cash ISA, created on first use. */
+export interface CashIsaState {
+  /** Wealthfolio account the last import went into. */
+  accountId?: string;
+  /** When the last import finished (ISO). */
+  lastImport?: string;
+  /** The user removed the Cash ISA from the add-on; cleared by the next import. */
+  removed?: boolean;
+}
+
+export async function getCashIsaState(ctx: AddonContext): Promise<CashIsaState> {
+  return jsonStore(ctx.api.storage).get<CashIsaState>(STATE_KEY, {});
+}
+
+/**
+ * Stops listing the Cash ISA. The account, its activities, the import ledger and which account
+ * it is are all kept, so importing again later goes into the same account and adds nothing twice.
+ */
+export async function forgetCashIsa(ctx: AddonContext): Promise<void> {
+  const state = await getCashIsaState(ctx);
+  await jsonStore(ctx.api.storage).set<CashIsaState>(STATE_KEY, { ...state, removed: true });
+}
+
+/** Whether `account` is the Cash account this add-on created for the Cash ISA. */
+export function isOwnCashIsaAccount(account: object): boolean {
+  return (account as { providerAccountId?: string }).providerAccountId === CASH_ISA_PROVIDER_ID;
+}
+
+export interface CashIsa<A> {
+  /** The Wealthfolio account holding the Cash ISA, if it has one (removed ones included). */
+  account?: A;
+  state: CashIsaState;
+}
+
+/**
+ * The Wealthfolio account holding the Cash ISA: the account the last import went into, else the
+ * one this add-on created, else (imports made before that was recorded) an account the import
+ * ledger points at. Both listing and importing use this, so they always agree.
+ */
+export async function findCashIsa<A extends { id: string }>(
+  ctx: AddonContext,
+  accounts: A[],
+): Promise<CashIsa<A>> {
+  const state = await getCashIsaState(ctx);
+  const byId = (id: string | undefined) => (id ? accounts.find((a) => a.id === id) : undefined);
+  let account = byId(state.accountId) ?? accounts.find(isOwnCashIsaAccount);
+  if (!account) {
+    const ledger = await jsonStore(ctx.api.storage).get<ImportLedger>(LEDGER_KEY, {});
+    for (const entry of Object.values(ledger)) {
+      account = byId(ledgerAccountId(entry));
+      if (account) break;
+    }
+  }
+  return { account, state };
+}
+
+/** The Wealthfolio account for the Cash ISA ({@link findCashIsa}), created on first use. */
 export async function ensureCashIsaAccount(
   ctx: AddonContext,
   currency: string,
   name = DEFAULT_CASH_ISA_NAME,
 ): Promise<string> {
-  const accounts = await ctx.api.accounts.getAll();
-  const match = accounts.find(
-    (a) => (a as { providerAccountId?: string }).providerAccountId === CASH_ISA_PROVIDER_ID,
-  );
-  if (match) return match.id;
+  const { account } = await findCashIsa(ctx, await ctx.api.accounts.getAll());
+  if (account) return account.id;
   const created = await ctx.api.accounts.create({
     name,
     accountType: "CASH",
@@ -108,5 +175,6 @@ export async function importCashIsa(
     imported = res.summary.imported;
   }
   await store.set(LEDGER_KEY, ledger);
+  await store.set<CashIsaState>(STATE_KEY, { accountId, lastImport: new Date().toISOString() });
   return { imported, duplicates: present.length };
 }

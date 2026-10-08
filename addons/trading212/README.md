@@ -179,12 +179,15 @@ Trading 212's API only covers Invest and Stocks ISA accounts, so a **Cash ISA** 
 connected with an API key. Import its history from the app instead:
 
 1. In the Trading 212 app, open the Cash ISA → History → Export, and save the CSV
-   (`Action, Time (UTC), Notes, ID, Total, Currency (Total)`).
-2. In Wealthfolio, open **Trading 212 → Import Cash ISA**, choose the file, check the
-   deposit / withdrawal / interest counts, and press **Import**.
+   (`Action, Time (UTC), Notes, ID, Total, Currency (Total)`). Export as many date ranges
+   as you need.
+2. In Wealthfolio, open **Trading 212 → Settings → Add account**, pick **Cash ISA**, choose
+   one or more CSV files, check the deposit / withdrawal / interest counts, and press
+   **Import**.
 
-The first import creates a **"Trading 212 Cash ISA"** Cash account (or pick an existing Cash
-account). Deposits, withdrawals and interest become `DEPOSIT`, `WITHDRAWAL` and `INTEREST`
+The first import creates a **"Trading 212 Cash ISA"** Cash account (named in the form, or
+pick an existing Cash account). After that the Cash ISA is listed on the dashboard and under
+**Connected accounts**; its **Import CSV** button brings in newer exports. Deposits, withdrawals and interest become `DEPOSIT`, `WITHDRAWAL` and `INTEREST`
 cash activities. Re-importing, or importing overlapping exports, adds nothing twice: rows
 are recognised by their Trading 212 id (taken from the Notes when the ID column is empty,
 or derived from the row when there is none), and two genuinely identical deposits on the

@@ -5,7 +5,9 @@ import type { AddonContext, AddonRouteLocation } from "@wealthfolio/addon-sdk";
 import DashboardPage from "./dashboard-page";
 import SettingsPage from "./settings-page";
 
-function makeCtx(opts: { secrets?: [string, string][]; storage?: [string, string][] } = {}) {
+function makeCtx(
+  opts: { secrets?: [string, string][]; storage?: [string, string][]; accounts?: Record<string, unknown>[] } = {},
+) {
   const secrets = new Map<string, string>(opts.secrets ?? []);
   const storage = new Map<string, string>(opts.storage ?? []);
   const kv = (m: Map<string, string>) => ({
@@ -19,7 +21,15 @@ function makeCtx(opts: { secrets?: [string, string][]; storage?: [string, string
       secrets: kv(secrets),
       storage: kv(storage),
       network: { request },
-      accounts: { getAll: async () => [{ id: "acc-1", providerAccountId: "1", trackingMode: "TRANSACTIONS" }], create: vi.fn() },
+      accounts: {
+        getAll: async () =>
+          opts.accounts ?? [{ id: "acc-1", providerAccountId: "1", trackingMode: "TRANSACTIONS" }],
+        create: vi.fn(async (input: Record<string, unknown>) => ({ id: "wf-new", ...input })),
+      },
+      activities: {
+        getAll: async () => [],
+        import: vi.fn(async (rows: unknown[]) => ({ summary: { imported: rows.length, skipped: 0 } })),
+      },
       navigation: { navigate: vi.fn() },
       logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
     },
@@ -99,6 +109,97 @@ describe("pages (smoke)", () => {
     await waitFor(() => expect(screen.getByText("Old ISA")).toBeTruthy());
     // Both the page banner and the connection card tell the user to re-enter credentials.
     expect(screen.getAllByText(/re-enter the API key\s+ID and secret in Settings/i).length).toBeGreaterThanOrEqual(1);
-    expect(screen.getByText("Invest")).toBeTruthy();
+    expect(screen.getAllByText("Invest").length).toBeGreaterThan(0);
+  });
+
+  it("settings: the Cash ISA is added from several CSV exports, with no API key fields", async () => {
+    const { ctx, storage } = makeCtx();
+    renderPage(SettingsPage, ctx);
+    await waitFor(() => expect(screen.getByText("Cash ISA")).toBeTruthy());
+    fireEvent.click(screen.getByText("Cash ISA"));
+
+    expect(screen.queryByPlaceholderText("API key ID")).toBeNull();
+    expect((screen.getByPlaceholderText("Trading 212 Cash ISA") as HTMLInputElement).value).toBe(
+      "Trading 212 Cash ISA",
+    );
+    const input = screen.getByTestId("t212-cash-isa-files") as HTMLInputElement;
+    expect(input.multiple).toBe(true);
+
+    const header = "Action,Time (UTC),Notes,ID,Total,Currency (Total)";
+    const a = "Deposit,2025-12-10 09:00:00+00:00,Bank Transfer,id-1,500.00,GBP";
+    const b = "Interest on cash,2026-01-03 06:45:21+00:00,Interest on cash,id-2,1.50,GBP";
+    // jsdom's File has no text(); the host's browser does.
+    const csv = (name: string, rows: string[]) => {
+      const body = [header, ...rows].join("\n");
+      return Object.assign(new File([body], name, { type: "text/csv" }), { text: async () => body });
+    };
+    const files = [csv("2025.csv", [a]), csv("2026.csv", [a, b])];
+    fireEvent.change(input, { target: { files } });
+
+    await waitFor(() => expect(screen.getByText("2026.csv")).toBeTruthy());
+    expect(screen.getByText("2025.csv")).toBeTruthy();
+    // The deposit in both exports is imported once.
+    fireEvent.click(screen.getByText("Import 2 rows"));
+    await waitFor(() => expect(screen.getByText(/2 imported, 0 already there/)).toBeTruthy());
+    expect(ctx.api.accounts.create).toHaveBeenCalledWith(
+      expect.objectContaining({ name: "Trading 212 Cash ISA", accountType: "CASH" }),
+    );
+    expect(JSON.parse(storage.get("t212_cash_isa")!)).toMatchObject({ accountId: "wf-new" });
+  });
+
+  it("settings: ?add=cash-isa opens Add account on the Cash ISA", async () => {
+    const { ctx } = makeCtx();
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <SettingsPage ctx={ctx} location={{ search: "?add=cash-isa" } as AddonRouteLocation} />
+      </QueryClientProvider>,
+    );
+    await waitFor(() => expect(screen.getByTestId("t212-cash-isa-files")).toBeTruthy());
+  });
+
+  const dashboardCtx = (extractCard: boolean) =>
+    makeCtx({
+      storage: [
+        [
+          "t212_connections",
+          JSON.stringify([
+            { id: "c1", name: "T212 Invest", keyIdLast4: "1234", accountId: "acc-1", kind: "invest", cardAccountId: "card-1" },
+            // A stale card id on an ISA connection is not shown.
+            { id: "c2", name: "T212 ISA", keyIdLast4: "5678", accountId: "acc-2", kind: "isa", cardAccountId: "card-2" },
+          ]),
+        ],
+        ["t212_settings", JSON.stringify({ env: "live", extractCard })],
+        ["t212_cash_isa", JSON.stringify({ accountId: "cash-isa", lastImport: "2026-10-01T10:00:00Z" })],
+      ],
+      accounts: [
+        { id: "acc-1", providerAccountId: "1", trackingMode: "TRANSACTIONS" },
+        { id: "acc-2", providerAccountId: "2", trackingMode: "TRANSACTIONS" },
+        { id: "card-1", name: "T212 Invest Card", accountType: "CASH" },
+        { id: "card-2", name: "T212 ISA Card", accountType: "CASH" },
+        { id: "cash-isa", name: "My Cash ISA", accountType: "CASH" },
+      ],
+    });
+
+  it("dashboard: lists the card account and the Cash ISA next to the API connections", async () => {
+    const { ctx } = dashboardCtx(true);
+    renderPage(DashboardPage, ctx);
+
+    await waitFor(() => expect(screen.getByText("My Cash ISA")).toBeTruthy());
+    expect(screen.getByText("T212 Invest")).toBeTruthy();
+    expect(screen.getByText("T212 ISA")).toBeTruthy();
+    expect(screen.getByText("T212 Invest Card")).toBeTruthy();
+    expect(screen.queryByText("T212 ISA Card")).toBeNull();
+    expect(screen.queryByText("Import Cash ISA")).toBeNull();
+
+    fireEvent.click(screen.getByText("Import CSV"));
+    expect(ctx.api.navigation.navigate).toHaveBeenCalledWith("/addons/trading212-addon/settings?add=cash-isa");
+  });
+
+  it("dashboard: no card account card while card extraction is off", async () => {
+    const { ctx } = dashboardCtx(false);
+    renderPage(DashboardPage, ctx);
+    await waitFor(() => expect(screen.getByText("My Cash ISA")).toBeTruthy());
+    expect(screen.queryByText("T212 Invest Card")).toBeNull();
   });
 });

@@ -21,7 +21,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@wealthfolio/ui";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { AddonContext } from "@wealthfolio/addon-sdk";
 import { addonRoute, relativeTime, type AddonPageProps } from "@wf-addons/kit";
 import { PageShell } from "@wf-addons/kit/ui";
@@ -30,6 +30,7 @@ import { isUnauthorized } from "../lib/t212-client";
 import type { T212Connection, T212Env, T212Settings, T212TrackingMode } from "../types";
 import {
   addConnection,
+  activeCardAccountId,
   connectionKind,
   ensureMigrated,
   ensureProviderAccount,
@@ -38,6 +39,7 @@ import {
   getSyncState,
   keyIdLast4,
   randomId,
+  kindLabel,
   removeConnection,
   resetSyncState,
   saveCredentials,
@@ -45,7 +47,19 @@ import {
   verifyCredentials,
 } from "../hooks/use-config";
 import { ConnectionHealth } from "../components/connection-status";
+import { CashIsaImport } from "../components/cash-isa-import";
+import { CashIsaBadges } from "../components/account-cards";
+import { CASH_ISA_QUERY_KEY, useCashIsa } from "../hooks/use-cash-isa";
+import { DEFAULT_CASH_ISA_NAME, forgetCashIsa } from "../lib/cash-isa";
 import { maskedKeyId } from "../lib/format";
+
+type AddAccountType = "invest" | "isa" | "cash-isa";
+
+const DEFAULT_NAME: Record<AddAccountType, string> = {
+  invest: "Trading 212 (Invest)",
+  isa: "Trading 212 (ISA)",
+  "cash-isa": DEFAULT_CASH_ISA_NAME,
+};
 
 /** Human message for a failed credential check / API call. */
 function describeError(err: unknown): string {
@@ -141,13 +155,13 @@ function ConnectionRow({
             </Badge>
             <Badge variant={kind === "isa" ? "info" : "secondary"} className="gap-1">
               <Icons.Wallet size={10} weight="duotone" />
-              {kind === "isa" ? "Stocks ISA" : "Invest"}
+              {kindLabel(kind)}
             </Badge>
             <Badge variant={mode === "HOLDINGS" ? "info" : "secondary"} className="gap-1">
               <Icons.Activity size={10} weight="duotone" />
               {mode === "HOLDINGS" ? "Holdings" : "Transactions"}
             </Badge>
-            {conn.cardAccountId && (
+            {activeCardAccountId(conn, settings) && (
               <Badge variant="outline" className="gap-1">
                 <Icons.CreditCard size={10} weight="duotone" />
                 Card
@@ -277,6 +291,74 @@ function ConnectionRow({
   );
 }
 
+/** The Cash ISA: no API key, so it is kept up to date by importing more CSV exports. */
+function CashIsaRow({
+  ctx,
+  name,
+  lastImport,
+  onChanged,
+}: {
+  ctx: AddonContext;
+  name: string;
+  lastImport: string | null;
+  onChanged: () => void;
+}) {
+  const [importing, setImporting] = useState(false);
+
+  async function remove() {
+    await forgetCashIsa(ctx);
+    onChanged();
+  }
+
+  return (
+    <div className="flex flex-col gap-3 rounded-lg border bg-card p-3">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="min-w-0 space-y-1.5">
+          <span className="font-medium truncate">{name}</span>
+          <div className="text-muted-foreground flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+            <CashIsaBadges size={10} />
+            <span className="flex items-center gap-1">
+              <Icons.Clock size={10} weight="duotone" />
+              {lastImport ? <RelativeWithTooltip iso={lastImport} /> : "Never imported here"}
+            </span>
+          </div>
+        </div>
+        <div className="flex shrink-0 gap-2">
+          <Button variant="outline" size="sm" onClick={() => setImporting((v) => !v)}>
+            <Icons.Import size={14} className="mr-1" weight="bold" />
+            Import CSV
+          </Button>
+          <ActionConfirm
+            confirmTitle="Remove the Cash ISA?"
+            confirmMessage={
+              <span>
+                Stops listing the Cash ISA here. The Wealthfolio account and its activities stay —
+                delete it in Wealthfolio's Accounts page if you want it gone. Importing again later
+                still adds nothing twice.
+              </span>
+            }
+            confirmButtonText="Remove"
+            confirmButtonVariant="destructive"
+            isPending={false}
+            handleConfirm={remove}
+            button={
+              <Button variant="outline" size="sm">
+                <Icons.Trash size={14} className="mr-1" weight="bold" />
+                Remove
+              </Button>
+            }
+          />
+        </div>
+      </div>
+      {importing && (
+        <div className="rounded-md border bg-muted/20 p-3">
+          <CashIsaImport ctx={ctx} />
+        </div>
+      )}
+    </div>
+  );
+}
+
 function RelativeWithTooltip({ iso }: { iso: string }) {
   return (
     <TooltipProvider>
@@ -290,8 +372,10 @@ function RelativeWithTooltip({ iso }: { iso: string }) {
   );
 }
 
-export default function SettingsPage({ ctx }: AddonPageProps) {
+export default function SettingsPage({ ctx, location }: AddonPageProps) {
   const queryClient = useQueryClient();
+  const startOnCashIsa = new URLSearchParams(location?.search ?? "").get("add") === "cash-isa";
+  const addCardRef = useRef<HTMLDivElement>(null);
   const [migrated, setMigrated] = useState(false);
 
   const [env, setEnv] = useState<T212Env>("live");
@@ -300,9 +384,10 @@ export default function SettingsPage({ ctx }: AddonPageProps) {
   const [cardAccountType, setCardAccountType] = useState<"CASH" | "CREDIT_CARD">("CASH");
   const [settingsSaved, setSettingsSaved] = useState<string | null>(null);
 
-  const [accountType, setAccountType] = useState<"invest" | "isa">("invest");
+  const initialType: AddAccountType = startOnCashIsa ? "cash-isa" : "invest";
+  const [accountType, setAccountType] = useState<AddAccountType>(initialType);
   const [trackingMode, setTrackingMode] = useState<T212TrackingMode>("HOLDINGS");
-  const [name, setName] = useState("Trading 212 (Invest)");
+  const [name, setName] = useState(DEFAULT_NAME[initialType]);
   const [nameTouched, setNameTouched] = useState(false);
   const [keyId, setKeyId] = useState("");
   const [apiSecret, setApiSecret] = useState("");
@@ -338,9 +423,19 @@ export default function SettingsPage({ ctx }: AddonPageProps) {
     }
   }, [settings]);
 
-  function pickType(t: "invest" | "isa") {
+  const { data: cashIsa } = useCashIsa(ctx, migrated);
+  const listedCashIsa = cashIsa?.listed ? cashIsa.account : null;
+
+  // Coming from the dashboard's Import CSV: scroll to Add account once the lists above it
+  // have loaded, so it doesn't move away again.
+  const loaded = connections !== undefined && cashIsa !== undefined;
+  useEffect(() => {
+    if (startOnCashIsa && loaded) addCardRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+  }, [startOnCashIsa, loaded]);
+
+  function pickType(t: AddAccountType) {
     setAccountType(t);
-    if (!nameTouched) setName(t === "invest" ? "Trading 212 (Invest)" : "Trading 212 (ISA)");
+    if (!nameTouched) setName(DEFAULT_NAME[t]);
   }
 
   async function saveSettings() {
@@ -379,7 +474,7 @@ export default function SettingsPage({ ctx }: AddonPageProps) {
         keyIdLast4: keyIdLast4(keyId),
         accountId,
         trackingMode,
-        kind: accountType,
+        kind: accountType === "isa" ? "isa" : "invest",
       });
 
       queryClient.invalidateQueries({ queryKey: ["t212_connections"] });
@@ -388,7 +483,7 @@ export default function SettingsPage({ ctx }: AddonPageProps) {
       setKeyId("");
       setApiSecret("");
       setNameTouched(false);
-      setName(accountType === "invest" ? "Trading 212 (Invest)" : "Trading 212 (ISA)");
+      setName(DEFAULT_NAME[accountType]);
     } catch (err) {
       setError(describeError(err));
     } finally {
@@ -398,13 +493,14 @@ export default function SettingsPage({ ctx }: AddonPageProps) {
 
   function refresh() {
     queryClient.invalidateQueries({ queryKey: ["t212_connections"] });
+    queryClient.invalidateQueries({ queryKey: CASH_ISA_QUERY_KEY });
   }
 
   function openDashboard() {
     ctx.api.navigation.navigate(addonRoute(ADDON_ID));
   }
 
-  const hasConnections = (connections?.length ?? 0) > 0;
+  const hasConnections = (connections?.length ?? 0) > 0 || !!listedCashIsa;
   const isFirstRun = migrated && !settings && !hasConnections;
 
   return (
@@ -552,21 +648,32 @@ export default function SettingsPage({ ctx }: AddonPageProps) {
             Connected accounts
           </CardTitle>
           <CardDescription>
-            Each API key maps to one Wealthfolio account. Rename or delete accounts in
+            Each API key maps to one Wealthfolio account; the Cash ISA is filled from its CSV
+            exports. Rename or delete accounts in
             Wealthfolio's own Accounts page — removing one here only forgets the key.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
           {hasConnections ? (
-            connections!.map((conn) => (
-              <ConnectionRow
-                key={conn.id}
-                ctx={ctx}
-                settings={settings ?? { env }}
-                conn={conn}
-                onChanged={refresh}
-              />
-            ))
+            <>
+              {connections?.map((conn) => (
+                <ConnectionRow
+                  key={conn.id}
+                  ctx={ctx}
+                  settings={settings ?? { env }}
+                  conn={conn}
+                  onChanged={refresh}
+                />
+              ))}
+              {listedCashIsa && (
+                <CashIsaRow
+                  ctx={ctx}
+                  name={listedCashIsa.name}
+                  lastImport={cashIsa?.lastImport ?? null}
+                  onChanged={refresh}
+                />
+              )}
+            </>
           ) : (
             <p className="text-muted-foreground flex items-center gap-1.5 text-sm">
               <Icons.Info size={14} weight="duotone" />
@@ -576,14 +683,15 @@ export default function SettingsPage({ ctx }: AddonPageProps) {
         </CardContent>
       </Card>
 
-      <Card>
+      <Card ref={addCardRef}>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <Icons.PlusCircle size={18} weight="duotone" />
             Add account
           </CardTitle>
           <CardDescription>
-            Pick the account type (sets the name), then paste that account's API key ID and secret.
+            Pick the account type (sets the name), then paste that account's API key ID and
+            secret — or, for a Cash ISA, choose its CSV exports.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-5">
@@ -592,83 +700,99 @@ export default function SettingsPage({ ctx }: AddonPageProps) {
             <ToggleGroup
               type="single"
               value={accountType}
-              onValueChange={(v) => v && pickType(v as "invest" | "isa")}
+              onValueChange={(v) => v && pickType(v as AddAccountType)}
               variant="outline"
               className="w-fit"
             >
               <ToggleGroupItem value="invest">Invest</ToggleGroupItem>
               <ToggleGroupItem value="isa">Stocks ISA</ToggleGroupItem>
+              <ToggleGroupItem value="cash-isa">Cash ISA</ToggleGroupItem>
             </ToggleGroup>
           </div>
-          <div className="space-y-1.5">
-            <Label>Sync mode</Label>
-            <ToggleGroup
-              type="single"
-              value={trackingMode}
-              onValueChange={(v) => v && setTrackingMode(v as T212TrackingMode)}
-              variant="outline"
-              className="w-fit"
-            >
-              <ToggleGroupItem value="HOLDINGS">Holdings</ToggleGroupItem>
-              <ToggleGroupItem value="TRANSACTIONS">Transactions</ToggleGroupItem>
-            </ToggleGroup>
-            <p className="text-xs text-muted-foreground">
-              {trackingMode === "HOLDINGS"
-                ? "Holdings: sync your current positions and cash as a snapshot — instant, no history."
-                : "Transactions: import full trade/dividend/cash history. The first sync can take a few minutes."}{" "}
-              The mode is fixed at creation; to change it, switch the account's tracking mode in Wealthfolio and re-sync.
-            </p>
-          </div>
-          <div className="space-y-1.5">
-            <Label>Account name</Label>
-            <Input
-              value={name}
-              onChange={(e) => {
-                setNameTouched(true);
-                setName(e.target.value);
-              }}
-              placeholder="Trading 212 (Invest)"
-            />
-          </div>
-          <div className="grid gap-3 sm:grid-cols-2">
+          {/* Once the Cash ISA has an account, imports go there and its name is set. */}
+          {(accountType !== "cash-isa" || (cashIsa && !cashIsa.account)) && (
             <div className="space-y-1.5">
-              <Label>API key ID</Label>
+              <Label>Account name</Label>
               <Input
-                type="password"
-                autoComplete="off"
-                value={keyId}
-                onChange={(e) => setKeyId(e.target.value)}
-                placeholder="API key ID"
+                value={name}
+                onChange={(e) => {
+                  setNameTouched(true);
+                  setName(e.target.value);
+                }}
+                placeholder={DEFAULT_NAME[accountType]}
               />
             </div>
+          )}
+          {accountType === "cash-isa" ? (
+            <>
+              <p className="text-muted-foreground text-xs">
+                Trading 212's API does not cover the Cash ISA, so its history comes from the CSV
+                the app exports. Import newer exports any time to bring it up to date.
+              </p>
+              <CashIsaImport ctx={ctx} newAccountName={name} />
+            </>
+          ) : (
+            <>
             <div className="space-y-1.5">
-              <Label>API secret</Label>
-              <Input
-                type="password"
-                autoComplete="off"
-                value={apiSecret}
-                onChange={(e) => setApiSecret(e.target.value)}
-                placeholder="API secret"
-              />
+              <Label>Sync mode</Label>
+              <ToggleGroup
+                type="single"
+                value={trackingMode}
+                onValueChange={(v) => v && setTrackingMode(v as T212TrackingMode)}
+                variant="outline"
+                className="w-fit"
+              >
+                <ToggleGroupItem value="HOLDINGS">Holdings</ToggleGroupItem>
+                <ToggleGroupItem value="TRANSACTIONS">Transactions</ToggleGroupItem>
+              </ToggleGroup>
+              <p className="text-xs text-muted-foreground">
+                {trackingMode === "HOLDINGS"
+                  ? "Holdings: sync your current positions and cash as a snapshot — instant, no history."
+                  : "Transactions: import full trade/dividend/cash history. The first sync can take a few minutes."}{" "}
+                The mode is fixed at creation; to change it, switch the account's tracking mode in Wealthfolio and re-sync.
+              </p>
             </div>
-          </div>
-          <div className="flex flex-wrap items-center gap-3 pt-1">
-            <Button onClick={connectAndCreate} disabled={isConnecting}>
-              {isConnecting ? (
-                <>
-                  <Icons.Spinner size={14} className="mr-1 animate-spin" />
-                  Connecting…
-                </>
-              ) : (
-                <>
-                  <Icons.Plus size={14} className="mr-1" weight="bold" />
-                  Add account
-                </>
-              )}
-            </Button>
-          </div>
-          {status && <AlertFeedback variant="success" title="Added">{status}</AlertFeedback>}
-          {error && <AlertFeedback variant="error" title="Couldn't add the account">{error}</AlertFeedback>}
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="space-y-1.5">
+                <Label>API key ID</Label>
+                <Input
+                  type="password"
+                  autoComplete="off"
+                  value={keyId}
+                  onChange={(e) => setKeyId(e.target.value)}
+                  placeholder="API key ID"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label>API secret</Label>
+                <Input
+                  type="password"
+                  autoComplete="off"
+                  value={apiSecret}
+                  onChange={(e) => setApiSecret(e.target.value)}
+                  placeholder="API secret"
+                />
+              </div>
+            </div>
+            <div className="flex flex-wrap items-center gap-3 pt-1">
+              <Button onClick={connectAndCreate} disabled={isConnecting}>
+                {isConnecting ? (
+                  <>
+                    <Icons.Spinner size={14} className="mr-1 animate-spin" />
+                    Connecting…
+                  </>
+                ) : (
+                  <>
+                    <Icons.Plus size={14} className="mr-1" weight="bold" />
+                    Add account
+                  </>
+                )}
+              </Button>
+            </div>
+            {status && <AlertFeedback variant="success" title="Added">{status}</AlertFeedback>}
+            {error && <AlertFeedback variant="error" title="Couldn't add the account">{error}</AlertFeedback>}
+            </>
+          )}
         </CardContent>
       </Card>
     </PageShell>

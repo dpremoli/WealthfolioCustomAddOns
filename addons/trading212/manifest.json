@@ -1,7 +1,7 @@
 {
   "id": "trading212-addon",
   "name": "Trading 212 Sync",
-  "version": "2.3.1",
+  "version": "2.4.0",
   "description": "Sync your Trading 212 investment account (trades, dividends, deposits, withdrawals, fees and interest) into Wealthfolio, directly from the Trading 212 API.",
   "author": "dpremoli",
   "license": "GPL-3.0-only",
@@ -16,8 +16,7 @@
   "contributes": {
     "routes": [
       { "id": "trading212" },
-      { "id": "trading212-settings", "path": "settings" },
-      { "id": "trading212-cash-isa", "path": "cash-isa" }
+      { "id": "trading212-settings", "path": "settings" }
     ],
     "links": {
       "sidebar": [

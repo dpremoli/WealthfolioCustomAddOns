@@ -7,6 +7,7 @@ export {
   sourceRefOf,
   reconcileWithLedger,
   ledgerEntry,
+  ledgerAccountId,
   type ImportLedger,
   type LedgerReconcileResult,
   type ExistingActivityLike,

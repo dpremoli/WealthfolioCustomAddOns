@@ -1,6 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ActivityImport, AddonContext } from "@wealthfolio/addon-sdk";
-import { ensureCashIsaAccount, importCashIsa, parseCashIsaCsv } from "./cash-isa";
+import {
+  ensureCashIsaAccount,
+  findCashIsa,
+  forgetCashIsa,
+  getCashIsaState,
+  importCashIsa,
+  mergeCashIsaParses,
+  parseCashIsaCsv,
+} from "./cash-isa";
 
 // The layout of the Trading 212 Cash ISA export (values made up).
 const EXPORT = [
@@ -89,6 +97,58 @@ describe("importCashIsa", () => {
   });
 });
 
+describe("mergeCashIsaParses", () => {
+  it("keeps a row found in several exports once and adds up what was left out", async () => {
+    const later = [
+      "Action,Time (UTC),Notes,ID,Total,Currency (Total)",
+      "Withdrawal,2026-01-15 12:30:00+00:00,Sent,9f1c2d3e-0000-4000-8000-000000000002,-250.00,GBP",
+      "Interest on cash,2026-02-03 06:45:21+00:00,Interest on cash,0cc283e7-0000-4000-8000-000000000003,90.10,GBP",
+      "Withdrawal,,,,,GBP",
+    ].join("\n");
+    const merged = mergeCashIsaParses([await parseCashIsaCsv(EXPORT, ""), await parseCashIsaCsv(later, "")]);
+    expect(merged.activities.map((a) => [a.activityType, a.amount])).toEqual([
+      ["INTEREST", 87.43],
+      ["DEPOSIT", 500],
+      ["DEPOSIT", 500],
+      ["WITHDRAWAL", 250],
+      ["INTEREST", 90.1],
+    ]);
+    expect(merged.skipped).toEqual({ Withdrawal: 2 });
+    expect(merged.currency).toBe("GBP");
+  });
+});
+
+describe("findCashIsa", () => {
+  it("finds the account the last import went into, and keeps it after a remove", async () => {
+    const { ctx } = fakeCtx();
+    const accounts = [{ id: "cash-1" }, { id: "cash-2" }];
+    expect((await findCashIsa(ctx, accounts)).account).toBeUndefined();
+
+    const { activities } = await parseCashIsaCsv(EXPORT, "");
+    await importCashIsa(ctx, "cash-2", activities);
+    const found = await findCashIsa(ctx, accounts);
+    expect(found.account).toEqual({ id: "cash-2" });
+    expect(found.state.lastImport).toBeTruthy();
+
+    // Removed from the list, but a later import still goes into the same account.
+    await forgetCashIsa(ctx);
+    const removed = await findCashIsa(ctx, accounts);
+    expect(removed.state.removed).toBe(true);
+    expect(removed.account).toEqual({ id: "cash-2" });
+    await importCashIsa(ctx, "cash-2", activities);
+    expect((await getCashIsaState(ctx)).removed).toBeUndefined();
+  });
+
+  it("falls back to the add-on's own account, then to an existing account in the import ledger", async () => {
+    const { ctx } = fakeCtx();
+    const own = { id: "own", providerAccountId: "t212-cash-isa" };
+    expect((await findCashIsa(ctx, [{ id: "x" }, own])).account).toBe(own);
+    // The first ledger entry points at a deleted account; a later one at the live account.
+    await ctx.api.storage.set("t212_cash_isa_ledger", JSON.stringify({ r1: "gone:abc", r2: "cash-9:def" }));
+    expect((await findCashIsa(ctx, [{ id: "cash-9" }])).account).toEqual({ id: "cash-9" });
+  });
+});
+
 describe("ensureCashIsaAccount", () => {
   it("creates one Cash account and reuses it afterwards", async () => {
     const { ctx, create } = fakeCtx();
@@ -98,5 +158,14 @@ describe("ensureCashIsaAccount", () => {
     );
     expect(await ensureCashIsaAccount(ctx, "GBP")).toBe(id);
     expect(create).toHaveBeenCalledTimes(1);
+  });
+
+  it("reuses the account a previous import went into instead of creating one", async () => {
+    const { ctx, create } = fakeCtx();
+    const { activities } = await parseCashIsaCsv(EXPORT, "");
+    await importCashIsa(ctx, "users-own", activities);
+    (await ctx.api.accounts.getAll()).push({ id: "users-own" } as never);
+    expect(await ensureCashIsaAccount(ctx, "GBP")).toBe("users-own");
+    expect(create).not.toHaveBeenCalled();
   });
 });

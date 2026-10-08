@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -15,14 +15,16 @@ import {
   EmptyPlaceholder,
   Icons,
 } from "@wealthfolio/ui";
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { addonRoute, type AddonPageProps } from "@wf-addons/kit";
 import { PageShell, SyncActivity, type SyncPhase } from "@wf-addons/kit/ui";
-import { ADDON_ID } from "../constants";
+import { ADDON_ID, SETTINGS_ADD_CASH_ISA } from "../constants";
 import { useSync } from "../hooks/use-sync";
-import { ensureMigrated, getConnections, getSettings } from "../hooks/use-config";
+import { activeCardAccountId, ensureMigrated, getConnections, getSettings } from "../hooks/use-config";
 import type { SyncPhaseId, SyncResult, T212TrackingMode } from "../types";
 import { ConnectionCard } from "../components/connection-card";
+import { CardAccountCard, CashIsaCard } from "../components/account-cards";
+import { useCashIsa } from "../hooks/use-cash-isa";
 
 const PHASES: SyncPhase<SyncPhaseId>[] = [
   { phase: "export", label: "Fetching", icon: "Download" },
@@ -41,6 +43,7 @@ interface ModeDrift {
 const modeLabel = (m: T212TrackingMode) => (m === "HOLDINGS" ? "Holdings" : "Transactions");
 
 export default function DashboardPage({ ctx }: AddonPageProps) {
+  const queryClient = useQueryClient();
   const { isSyncing, results, error, progress, steps, syncAll } = useSync(ctx);
   const [migrated, setMigrated] = useState(false);
   const [pendingDrifts, setPendingDrifts] = useState<ModeDrift[]>([]);
@@ -63,6 +66,20 @@ export default function DashboardPage({ ctx }: AddonPageProps) {
     queryFn: () => getSettings(ctx),
     enabled: migrated,
   });
+
+  // Every Wealthfolio account the add-on fills: names of card accounts, and the Cash ISA.
+  const { data: accounts } = useQuery({
+    queryKey: ["wf_accounts"],
+    queryFn: () => ctx.api.accounts.getAll(),
+    enabled: migrated,
+  });
+  const { data: cashIsa, isPending: cashIsaPending } = useCashIsa(ctx, migrated);
+  const listedCashIsa = cashIsa?.listed ? cashIsa.account : null;
+
+  // A sync can create a card account; pick it up once the sync finishes.
+  useEffect(() => {
+    if (!isSyncing) void queryClient.invalidateQueries({ queryKey: ["wf_accounts"] });
+  }, [isSyncing, queryClient]);
 
   const connected = (connections?.length ?? 0) > 0;
   const needCredentials = (connections ?? []).filter((c) => c.needsCredentials);
@@ -143,14 +160,6 @@ export default function DashboardPage({ ctx }: AddonPageProps) {
         description="Sync your Trading 212 activity into Wealthfolio."
         actions={
           <>
-            <Button
-              variant="outline"
-              size="lg"
-              onClick={() => ctx.api.navigation.navigate(addonRoute(ADDON_ID, "cash-isa"))}
-            >
-              <Icons.Import size={16} className="mr-1" weight="duotone" />
-              Import Cash ISA
-            </Button>
             <Button variant="outline" size="lg" onClick={openSettings}>
               <Icons.Settings size={16} className="mr-1" weight="duotone" />
               Settings
@@ -192,7 +201,7 @@ export default function DashboardPage({ ctx }: AddonPageProps) {
 
         <SyncActivity phases={PHASES} isSyncing={isSyncing} progress={progress} steps={steps} />
 
-        {!connected && migrated && (
+        {!connected && !listedCashIsa && migrated && !cashIsaPending && (
           <Card>
             <CardContent className="py-10">
               <EmptyPlaceholder
@@ -202,7 +211,7 @@ export default function DashboardPage({ ctx }: AddonPageProps) {
                   </div>
                 }
                 title="Connect a Trading 212 account"
-                description="Add your API key ID and secret in Settings to sync trades, dividends, deposits, withdrawals, fees and (optionally) card spending."
+                description="Add your API key ID and secret in Settings to sync trades, dividends, deposits, withdrawals, fees and (optionally) card spending — or import a Cash ISA from its CSV export."
               >
                 <Button className="mt-4" onClick={openSettings}>
                   <Icons.Plus size={16} className="mr-1" weight="bold" />
@@ -213,16 +222,40 @@ export default function DashboardPage({ ctx }: AddonPageProps) {
           </Card>
         )}
 
-        {connections?.map((conn) => (
-          <ConnectionCard
-            key={conn.id}
-            ctx={ctx}
-            settings={settings ?? undefined}
-            conn={conn}
-            result={resultFor(conn.id)}
-            isSyncing={isSyncing}
+        {connections?.map((conn) => {
+          const result = resultFor(conn.id);
+          const cardId = activeCardAccountId(conn, settings);
+          const cardAccount = cardId ? accounts?.find((a) => a.id === cardId) : undefined;
+          return (
+            <Fragment key={conn.id}>
+              <ConnectionCard
+                ctx={ctx}
+                settings={settings ?? undefined}
+                conn={conn}
+                result={result}
+                isSyncing={isSyncing}
+              />
+              {cardAccount && (
+                <CardAccountCard
+                  ctx={ctx}
+                  conn={conn}
+                  name={cardAccount.name}
+                  accountType={cardAccount.accountType}
+                  result={result}
+                  isSyncing={isSyncing}
+                />
+              )}
+            </Fragment>
+          );
+        })}
+
+        {listedCashIsa && (
+          <CashIsaCard
+            name={listedCashIsa.name}
+            lastImport={cashIsa?.lastImport ?? null}
+            onImport={() => ctx.api.navigation.navigate(addonRoute(ADDON_ID, SETTINGS_ADD_CASH_ISA))}
           />
-        ))}
+        )}
 
         {results && results.perAccount.length > 1 && (
           <div className="text-muted-foreground flex flex-wrap justify-center gap-3 text-sm">

@@ -51,6 +51,17 @@ describe("syncSpendingRules", () => {
     expect((await syncSpendingRules(refused, [])).error).toBe("permission denied");
   });
 
+  it("explains the HTTPS requirement when Wealthfolio cannot hash rule ids", async () => {
+    const ctx = ctxWith({
+      getCategories: async () => CATEGORIES,
+      saveRule: async () => Promise.reject(new TypeError("Cannot read properties of undefined (reading 'digest')")),
+    });
+    const out = await syncSpendingRules(ctx, [
+      { ruleKey: "g", name: "Groceries", pattern: "x", kind: "expense", categories: ["groceries"] },
+    ]);
+    expect(out.error).toMatch(/opened over HTTPS/);
+  });
+
   it("escapeRegex escapes metacharacters", () => {
     expect(new RegExp(`^${escapeRegex("Bills (x) | a.b")}$`).test("Bills (x) | a.b")).toBe(true);
   });

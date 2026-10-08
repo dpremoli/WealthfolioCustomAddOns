@@ -181,6 +181,14 @@ describe("reconcileWithLedger", () => {
     expect(reconcileWithLedger([now], [row], {}, "acc").toImport).toHaveLength(1);
   });
 
+  it("imports again into a different account (e.g. the old one was deleted and recreated)", () => {
+    const a = withId("tx_1", cash(3, "Coffee"));
+    const { ledger } = reconcileWithLedger([a], [], {}, "old-acc");
+    const r = reconcileWithLedger([a], [], ledger, "new-acc");
+    expect(r.toImport.map((x) => x.id)).toEqual(["tx_1"]);
+    expect(r.ledger.tx_1).toMatch(/^new-acc:/);
+  });
+
   it("imports one row per id when the same id appears twice in a batch", () => {
     const a = withId("tx_1", cash(3, "Coffee"));
     expect(reconcileWithLedger([a, a], [], {}, "acc").toImport).toHaveLength(1);

@@ -105,6 +105,12 @@ function toIsoDate(s: string): string {
   const t = s.trim();
   // Already ISO with a timezone — leave as-is.
   if (/T\d{2}:\d{2}/.test(t) && /(Z|[+-]\d{2}:?\d{2})$/.test(t)) return t;
+  // "2025-12-03 06:45:21+00:00" (the Cash ISA export): honour the offset.
+  const withOffset = t.match(/^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?)([+-]\d{2}:?\d{2}|Z)$/);
+  if (withOffset) {
+    const ms = Date.parse(`${withOffset[1]}T${withOffset[2]}${withOffset[3]}`);
+    if (!Number.isNaN(ms)) return new Date(ms).toISOString();
+  }
   const dt = t.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}(?::\d{2})?)(\.\d+)?/);
   if (dt) return `${dt[1]}T${dt[2]}${dt[3] ?? ""}Z`;
   const dateOnly = t.match(/^(\d{4}-\d{2}-\d{2})$/);
@@ -162,11 +168,14 @@ export async function mapCsvRow(
   // When card extraction is on, card spend/refund/cashback rows are routed to the
   // dedicated card (spending) account instead of the main investing account.
   const cardAccount = cardAccountId ?? accountId;
-  const csvId = row["ID"]?.trim() ?? "";
   const action = row["Action"]?.trim();
   if (!action) return null;
+  // The Cash ISA export puts some deposits' id only in Notes ("Transaction ID: <uuid>").
+  const csvId =
+    row["ID"]?.trim() || /Transaction ID:\s*([0-9a-f-]{8,})/i.exec(row["Notes"] ?? "")?.[1] || "";
 
-  const rawTime = row["Time"];
+  // "Time" in the Invest/ISA export, "Time (UTC)" in the Cash ISA export.
+  const rawTime = col(row, "Time", "Time (UTC)");
   if (!rawTime) return null;
   const date = toIsoDate(rawTime);
 
@@ -190,9 +199,15 @@ export async function mapCsvRow(
 
   const actionLower = action.toLowerCase();
 
-  // Dividends in the T212 CSV consistently have an empty ID column.
-  // All other action types carry a UUID — skip them if the ID is missing.
-  if (!csvId && !actionLower.startsWith("dividend")) return null;
+  // Dividends in the T212 CSV consistently have an empty ID column, and so do some Cash ISA
+  // cash rows; those get the stable composite id. Anything else without an ID is skipped.
+  const cashAction =
+    actionLower === "deposit" ||
+    actionLower === "withdrawal" ||
+    actionLower === "withdraw" ||
+    actionLower.includes("interest");
+  if (!csvId && !actionLower.startsWith("dividend") && !cashAction) return null;
+  const cashId = csvId || stableId(actionLower);
 
   // ── BUY ────────────────────────────────────────────────────────────────
   if (actionLower.endsWith(" buy") || actionLower === "buy") {
@@ -327,7 +342,7 @@ export async function mapCsvRow(
     if (total <= 0) return null;
     const isCashback = actionLower.includes("cashback");
     return {
-      id: `t212-txn-${csvId}`,
+      id: `t212-txn-${cashId}`,
       accountId: isCashback ? cardAccount : accountId,
       activityType: "INTEREST" as ActivityType,
       date,
@@ -343,7 +358,7 @@ export async function mapCsvRow(
   if (actionLower === "deposit") {
     if (total <= 0) return null;
     return {
-      id: `t212-txn-${csvId}`,
+      id: `t212-txn-${cashId}`,
       accountId,
       activityType: "DEPOSIT" as ActivityType,
       date,
@@ -359,7 +374,7 @@ export async function mapCsvRow(
   if (actionLower === "withdrawal" || actionLower === "withdraw") {
     if (total <= 0) return null;
     return {
-      id: `t212-txn-${csvId}`,
+      id: `t212-txn-${cashId}`,
       accountId,
       activityType: "WITHDRAWAL" as ActivityType,
       date,

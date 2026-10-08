@@ -143,6 +143,14 @@ export default function DashboardPage({ ctx }: AddonPageProps) {
         description="Sync your Trading 212 activity into Wealthfolio."
         actions={
           <>
+            <Button
+              variant="outline"
+              size="lg"
+              onClick={() => ctx.api.navigation.navigate(addonRoute(ADDON_ID, "cash-isa"))}
+            >
+              <Icons.Import size={16} className="mr-1" weight="duotone" />
+              Import Cash ISA
+            </Button>
             <Button variant="outline" size="lg" onClick={openSettings}>
               <Icons.Settings size={16} className="mr-1" weight="duotone" />
               Settings

@@ -7,6 +7,7 @@ export const PROVIDER = "trading212-addon";
 /** Route ids; must match `contributes.routes[].id` in manifest.json. */
 export const ROUTE_DASHBOARD = "trading212";
 export const ROUTE_SETTINGS = "trading212-settings";
+export const ROUTE_CASH_ISA = "trading212-cash-isa";
 
 /** Add-on storage keys (non-secret state). */
 export const KEYS = {

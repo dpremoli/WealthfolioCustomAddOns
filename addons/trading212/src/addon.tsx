@@ -1,17 +1,15 @@
 import type { AddonEnableFunction } from "@wealthfolio/addon-sdk";
 import { registerPages } from "@wf-addons/kit";
-import { ADDON_ID, ROUTE_CASH_ISA, ROUTE_DASHBOARD, ROUTE_SETTINGS } from "./constants";
+import { ADDON_ID, ROUTE_DASHBOARD, ROUTE_SETTINGS } from "./constants";
 import { ensureMigrated } from "./hooks/use-config";
 import { startAutoSync } from "./lib/auto-sync";
 import DashboardPage from "./pages/dashboard-page";
 import SettingsPage from "./pages/settings-page";
-import CashIsaImportPage from "./pages/cash-isa-import-page";
 
 const enable: AddonEnableFunction = (ctx) => {
   registerPages(ctx, ADDON_ID, [
     { id: ROUTE_DASHBOARD, component: DashboardPage },
     { id: ROUTE_SETTINGS, path: "settings", component: SettingsPage },
-    { id: ROUTE_CASH_ISA, path: "cash-isa", component: CashIsaImportPage },
   ]);
 
   // v1.x kept everything — including the connections list, settings and sync state — in

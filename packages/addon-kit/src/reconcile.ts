@@ -163,8 +163,8 @@ export function ledgerEntry(accountId: string, activity: ExistingActivityLike | 
 /**
  * {@link selectNewActivities} for rows that carry a stable source id (`ActivityImport.id`).
  *
- * - A row whose id is in the ledger (or in a legacy `[ref:…]` comment tag) is already
- *   imported, whatever its comment says now; if its account row differs from what the
+ * - A row whose id is in the ledger for this account (or in a legacy `[ref:…]` comment tag)
+ *   is already imported, whatever its comment says now; if its account row differs from what the
  *   source says now, it is reported as `stale`.
  * - Existing rows the ledger accounts for are taken out of content matching, so a genuinely
  *   new transaction identical to one imported earlier the same day (a second coffee) is not
@@ -182,9 +182,12 @@ export function reconcileWithLedger<E extends ExistingActivityLike>(
   opts: { legacy?: (a: ActivityImport) => ActivityImport | undefined } = {},
 ): LedgerReconcileResult<E> {
   const next: ImportLedger = { ...ledger };
+  // An id counts as imported only into the account it went to: if that account was deleted
+  // and recreated (or the row was imported elsewhere), it has to be imported again here.
+  const here = (id: string) => next[id]?.startsWith(`${accountId}:`) ?? false;
   for (const e of existing) {
     const ref = sourceRefOf(e.comment);
-    if (ref && !(ref in next)) next[ref] = ledgerValue(accountId, e);
+    if (ref && !here(ref)) next[ref] = ledgerValue(accountId, e);
   }
 
   // Existing rows by ledger value; ledger entries for this account claim theirs first.
@@ -205,7 +208,7 @@ export function reconcileWithLedger<E extends ExistingActivityLike>(
   const stale: { row: E; activity: ActivityImport }[] = [];
   for (const a of desired) {
     const v = ledgerValue(accountId, a);
-    if (a.id && a.id in next) {
+    if (a.id && here(a.id)) {
       present.push(a);
       const row = claimed.get(a.id);
       if (row && next[a.id] !== v) stale.push({ row, activity: a });

@@ -360,6 +360,23 @@ describe("runSync spending categories", () => {
   });
 });
 
+describe("runSync recreated accounts", () => {
+  it("imports into a recreated account even though the transactions were imported before", async () => {
+    const t = setup([tx({ id: "tx_a" }), tx({ id: "tx_b" })]);
+    await runSync(t.ctx);
+    expect(t.activities.get(WF_ACC)).toHaveLength(2);
+
+    // The user deletes the Wealthfolio account; the add-on maps Monzo to a new one.
+    t.wfAccounts.length = 0;
+    t.wfAccounts.push({ id: "wf-new", name: "Monzo Current" });
+    t.storage.set(KEY_MAPPING, JSON.stringify({ [MONZO_ACC]: "wf-new" }));
+    t.storage.delete(KEY_LAST_SYNC);
+    const result = await runSync(t.ctx);
+    expect(result.imported).toBe(2);
+    expect(t.activities.get("wf-new")).toHaveLength(2);
+  });
+});
+
 describe("runSync account types", () => {
   it("warns when a mapped account is not a type Wealthfolio's Spending counts", async () => {
     const t = setup([tx()]);

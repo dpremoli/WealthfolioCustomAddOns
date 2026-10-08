@@ -92,9 +92,24 @@ export async function syncSpendingRules(
     }
     out.categorised = await spending.rerunRules(true);
   } catch (err) {
-    out.error = err instanceof Error ? err.message : String(err);
+    out.error = describeSpendingError(err instanceof Error ? err.message : String(err));
   }
   return out;
+}
+
+/**
+ * Wealthfolio derives each rule's id with `crypto.subtle.digest`, which browsers only provide
+ * on secure pages (HTTPS or localhost). Over plain http:// it fails with "reading 'digest'".
+ */
+function describeSpendingError(message: string): string {
+  if (/digest|crypto\.subtle|subtle/i.test(message)) {
+    return (
+      "Wealthfolio can only save categorisation rules when it is opened over HTTPS (or on " +
+      "localhost): browsers disable the crypto it needs on plain http:// pages. Open " +
+      `Wealthfolio over https:// and sync again. (${message})`
+    );
+  }
+  return message;
 }
 
 /** One log line summarising {@link syncSpendingRules}, or null when there is nothing to say. */

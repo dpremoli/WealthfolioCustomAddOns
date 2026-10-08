@@ -173,6 +173,23 @@ to be empty is not walked again, and Stocks ISA connections never export card hi
 Connections carried over from v1 are recognised as ISA by their name (e.g.
 "Trading 212 (ISA)").
 
+### Cash ISA (CSV import)
+
+Trading 212's API only covers Invest and Stocks ISA accounts, so a **Cash ISA** cannot be
+connected with an API key. Import its history from the app instead:
+
+1. In the Trading 212 app, open the Cash ISA → History → Export, and save the CSV
+   (`Action, Time (UTC), Notes, ID, Total, Currency (Total)`).
+2. In Wealthfolio, open **Trading 212 → Import Cash ISA**, choose the file, check the
+   deposit / withdrawal / interest counts, and press **Import**.
+
+The first import creates a **"Trading 212 Cash ISA"** Cash account (or pick an existing Cash
+account). Deposits, withdrawals and interest become `DEPOSIT`, `WITHDRAWAL` and `INTEREST`
+cash activities. Re-importing, or importing overlapping exports, adds nothing twice: rows
+are recognised by their Trading 212 id (taken from the Notes when the ID column is empty,
+or derived from the row when there is none), and two genuinely identical deposits on the
+same day are both kept.
+
 ### "Wealthfolio has not approved network access to …"
 
 Wealthfolio only lets an add-on reach the network hosts you ticked in its permission

@@ -160,6 +160,11 @@ export function ledgerEntry(accountId: string, activity: ExistingActivityLike | 
   return ledgerValue(accountId, activity);
 }
 
+/** The account a ledger value (from {@link ledgerEntry}) records the row as imported into. */
+export function ledgerAccountId(entry: string): string {
+  return entry.slice(0, entry.lastIndexOf(":"));
+}
+
 /**
  * {@link selectNewActivities} for rows that carry a stable source id (`ActivityImport.id`).
  *

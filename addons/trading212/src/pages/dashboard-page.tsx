@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -20,11 +20,11 @@ import { addonRoute, type AddonPageProps } from "@wf-addons/kit";
 import { PageShell, SyncActivity, type SyncPhase } from "@wf-addons/kit/ui";
 import { ADDON_ID, SETTINGS_ADD_CASH_ISA } from "../constants";
 import { useSync } from "../hooks/use-sync";
-import { connectionKind, ensureMigrated, getConnections, getSettings } from "../hooks/use-config";
+import { activeCardAccountId, ensureMigrated, getConnections, getSettings } from "../hooks/use-config";
 import type { SyncPhaseId, SyncResult, T212TrackingMode } from "../types";
 import { ConnectionCard } from "../components/connection-card";
 import { CardAccountCard, CashIsaCard } from "../components/account-cards";
-import { findCashIsaAccount } from "../lib/cash-isa";
+import { useCashIsa } from "../hooks/use-cash-isa";
 
 const PHASES: SyncPhase<SyncPhaseId>[] = [
   { phase: "export", label: "Fetching", icon: "Download" },
@@ -43,6 +43,7 @@ interface ModeDrift {
 const modeLabel = (m: T212TrackingMode) => (m === "HOLDINGS" ? "Holdings" : "Transactions");
 
 export default function DashboardPage({ ctx }: AddonPageProps) {
+  const queryClient = useQueryClient();
   const { isSyncing, results, error, progress, steps, syncAll } = useSync(ctx);
   const [migrated, setMigrated] = useState(false);
   const [pendingDrifts, setPendingDrifts] = useState<ModeDrift[]>([]);
@@ -68,15 +69,17 @@ export default function DashboardPage({ ctx }: AddonPageProps) {
 
   // Every Wealthfolio account the add-on fills: names of card accounts, and the Cash ISA.
   const { data: accounts } = useQuery({
-    queryKey: ["wf_accounts", isSyncing],
+    queryKey: ["wf_accounts"],
     queryFn: () => ctx.api.accounts.getAll(),
     enabled: migrated,
   });
-  const { data: cashIsa } = useQuery({
-    queryKey: ["t212_cash_isa", "account", accounts],
-    queryFn: async () => (await findCashIsaAccount(ctx, accounts ?? [])) ?? null,
-    enabled: !!accounts,
-  });
+  const { data: cashIsa, isPending: cashIsaPending } = useCashIsa(ctx, migrated);
+  const listedCashIsa = cashIsa?.listed ? cashIsa.account : null;
+
+  // A sync can create a card account; pick it up once the sync finishes.
+  useEffect(() => {
+    if (!isSyncing) void queryClient.invalidateQueries({ queryKey: ["wf_accounts"] });
+  }, [isSyncing, queryClient]);
 
   const connected = (connections?.length ?? 0) > 0;
   const needCredentials = (connections ?? []).filter((c) => c.needsCredentials);
@@ -198,7 +201,7 @@ export default function DashboardPage({ ctx }: AddonPageProps) {
 
         <SyncActivity phases={PHASES} isSyncing={isSyncing} progress={progress} steps={steps} />
 
-        {!connected && !cashIsa && migrated && (
+        {!connected && !listedCashIsa && migrated && !cashIsaPending && (
           <Card>
             <CardContent className="py-10">
               <EmptyPlaceholder
@@ -220,18 +223,16 @@ export default function DashboardPage({ ctx }: AddonPageProps) {
         )}
 
         {connections?.map((conn) => {
-          // ISA connections never sync a card (an older version could still record one).
-          const cardAccount =
-            conn.cardAccountId && connectionKind(conn) !== "isa"
-              ? accounts?.find((a) => a.id === conn.cardAccountId)
-              : undefined;
+          const result = resultFor(conn.id);
+          const cardId = activeCardAccountId(conn, settings);
+          const cardAccount = cardId ? accounts?.find((a) => a.id === cardId) : undefined;
           return (
             <Fragment key={conn.id}>
               <ConnectionCard
                 ctx={ctx}
                 settings={settings ?? undefined}
                 conn={conn}
-                result={resultFor(conn.id)}
+                result={result}
                 isSyncing={isSyncing}
               />
               {cardAccount && (
@@ -240,7 +241,7 @@ export default function DashboardPage({ ctx }: AddonPageProps) {
                   conn={conn}
                   name={cardAccount.name}
                   accountType={cardAccount.accountType}
-                  result={resultFor(conn.id)}
+                  result={result}
                   isSyncing={isSyncing}
                 />
               )}
@@ -248,10 +249,10 @@ export default function DashboardPage({ ctx }: AddonPageProps) {
           );
         })}
 
-        {cashIsa && (
+        {listedCashIsa && (
           <CashIsaCard
-            ctx={ctx}
-            name={cashIsa.name}
+            name={listedCashIsa.name}
+            lastImport={cashIsa?.lastImport ?? null}
             onImport={() => ctx.api.navigation.navigate(addonRoute(ADDON_ID, SETTINGS_ADD_CASH_ISA))}
           />
         )}

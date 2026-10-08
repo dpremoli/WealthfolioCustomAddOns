@@ -30,6 +30,7 @@ import { isUnauthorized } from "../lib/t212-client";
 import type { T212Connection, T212Env, T212Settings, T212TrackingMode } from "../types";
 import {
   addConnection,
+  activeCardAccountId,
   connectionKind,
   ensureMigrated,
   ensureProviderAccount,
@@ -38,6 +39,7 @@ import {
   getSyncState,
   keyIdLast4,
   randomId,
+  kindLabel,
   removeConnection,
   resetSyncState,
   saveCredentials,
@@ -46,7 +48,9 @@ import {
 } from "../hooks/use-config";
 import { ConnectionHealth } from "../components/connection-status";
 import { CashIsaImport } from "../components/cash-isa-import";
-import { DEFAULT_CASH_ISA_NAME, findCashIsaAccount, forgetCashIsa, getCashIsaState } from "../lib/cash-isa";
+import { CashIsaBadges } from "../components/account-cards";
+import { CASH_ISA_QUERY_KEY, useCashIsa } from "../hooks/use-cash-isa";
+import { DEFAULT_CASH_ISA_NAME, forgetCashIsa } from "../lib/cash-isa";
 import { maskedKeyId } from "../lib/format";
 
 type AddAccountType = "invest" | "isa" | "cash-isa";
@@ -151,13 +155,13 @@ function ConnectionRow({
             </Badge>
             <Badge variant={kind === "isa" ? "info" : "secondary"} className="gap-1">
               <Icons.Wallet size={10} weight="duotone" />
-              {kind === "isa" ? "Stocks ISA" : "Invest"}
+              {kindLabel(kind)}
             </Badge>
             <Badge variant={mode === "HOLDINGS" ? "info" : "secondary"} className="gap-1">
               <Icons.Activity size={10} weight="duotone" />
               {mode === "HOLDINGS" ? "Holdings" : "Transactions"}
             </Badge>
-            {conn.cardAccountId && kind !== "isa" && (
+            {activeCardAccountId(conn, settings) && (
               <Badge variant="outline" className="gap-1">
                 <Icons.CreditCard size={10} weight="duotone" />
                 Card
@@ -290,19 +294,16 @@ function ConnectionRow({
 /** The Cash ISA: no API key, so it is kept up to date by importing more CSV exports. */
 function CashIsaRow({
   ctx,
-  account,
+  name,
+  lastImport,
   onChanged,
 }: {
   ctx: AddonContext;
-  account: { id: string; name: string };
+  name: string;
+  lastImport: string | null;
   onChanged: () => void;
 }) {
   const [importing, setImporting] = useState(false);
-  const { data: state } = useQuery({
-    queryKey: ["t212_cash_isa", "state"],
-    queryFn: () => getCashIsaState(ctx),
-  });
-  const last = state?.lastImport ?? null;
 
   async function remove() {
     await forgetCashIsa(ctx);
@@ -313,19 +314,12 @@ function CashIsaRow({
     <div className="flex flex-col gap-3 rounded-lg border bg-card p-3">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="min-w-0 space-y-1.5">
-          <span className="font-medium truncate">{account.name}</span>
+          <span className="font-medium truncate">{name}</span>
           <div className="text-muted-foreground flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
-            <Badge variant="info" className="gap-1">
-              <Icons.PiggyBank size={10} weight="duotone" />
-              Cash ISA
-            </Badge>
-            <Badge variant="outline" className="gap-1">
-              <Icons.FileText size={10} weight="duotone" />
-              CSV import
-            </Badge>
+            <CashIsaBadges size={10} />
             <span className="flex items-center gap-1">
               <Icons.Clock size={10} weight="duotone" />
-              {last ? <RelativeWithTooltip iso={last} /> : "Never imported here"}
+              {lastImport ? <RelativeWithTooltip iso={lastImport} /> : "Never imported here"}
             </span>
           </div>
         </div>
@@ -358,7 +352,7 @@ function CashIsaRow({
       </div>
       {importing && (
         <div className="rounded-md border bg-muted/20 p-3">
-          <CashIsaImport ctx={ctx} accountId={account.id} newAccountName={account.name} onImported={onChanged} />
+          <CashIsaImport ctx={ctx} />
         </div>
       )}
     </div>
@@ -390,9 +384,10 @@ export default function SettingsPage({ ctx, location }: AddonPageProps) {
   const [cardAccountType, setCardAccountType] = useState<"CASH" | "CREDIT_CARD">("CASH");
   const [settingsSaved, setSettingsSaved] = useState<string | null>(null);
 
-  const [accountType, setAccountType] = useState<AddAccountType>(startOnCashIsa ? "cash-isa" : "invest");
+  const initialType: AddAccountType = startOnCashIsa ? "cash-isa" : "invest";
+  const [accountType, setAccountType] = useState<AddAccountType>(initialType);
   const [trackingMode, setTrackingMode] = useState<T212TrackingMode>("HOLDINGS");
-  const [name, setName] = useState(DEFAULT_NAME[startOnCashIsa ? "cash-isa" : "invest"]);
+  const [name, setName] = useState(DEFAULT_NAME[initialType]);
   const [nameTouched, setNameTouched] = useState(false);
   const [keyId, setKeyId] = useState("");
   const [apiSecret, setApiSecret] = useState("");
@@ -406,10 +401,6 @@ export default function SettingsPage({ ctx, location }: AddonPageProps) {
       .catch(() => undefined)
       .finally(() => setMigrated(true));
   }, [ctx]);
-
-  useEffect(() => {
-    if (startOnCashIsa) addCardRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" });
-  }, [startOnCashIsa]);
 
   const { data: settings } = useQuery({
     queryKey: ["t212_settings", migrated],
@@ -432,11 +423,15 @@ export default function SettingsPage({ ctx, location }: AddonPageProps) {
     }
   }, [settings]);
 
-  const { data: cashIsa } = useQuery({
-    queryKey: ["t212_cash_isa", "account", migrated],
-    queryFn: async () => (await findCashIsaAccount(ctx, await ctx.api.accounts.getAll())) ?? null,
-    enabled: migrated,
-  });
+  const { data: cashIsa } = useCashIsa(ctx, migrated);
+  const listedCashIsa = cashIsa?.listed ? cashIsa.account : null;
+
+  // Coming from the dashboard's Import CSV: scroll to Add account once the lists above it
+  // have loaded, so it doesn't move away again.
+  const loaded = connections !== undefined && cashIsa !== undefined;
+  useEffect(() => {
+    if (startOnCashIsa && loaded) addCardRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+  }, [startOnCashIsa, loaded]);
 
   function pickType(t: AddAccountType) {
     setAccountType(t);
@@ -457,7 +452,6 @@ export default function SettingsPage({ ctx, location }: AddonPageProps) {
     setError(null);
     setStatus(null);
     try {
-      if (accountType === "cash-isa") throw new Error("The Cash ISA is added by importing its CSV export.");
       const s: T212Settings = { env, autoSync, extractCard, cardAccountType };
       if (!keyId.trim() || !apiSecret.trim())
         throw new Error("Enter both the API key ID and the API secret.");
@@ -480,7 +474,7 @@ export default function SettingsPage({ ctx, location }: AddonPageProps) {
         keyIdLast4: keyIdLast4(keyId),
         accountId,
         trackingMode,
-        kind: accountType,
+        kind: accountType === "isa" ? "isa" : "invest",
       });
 
       queryClient.invalidateQueries({ queryKey: ["t212_connections"] });
@@ -499,14 +493,14 @@ export default function SettingsPage({ ctx, location }: AddonPageProps) {
 
   function refresh() {
     queryClient.invalidateQueries({ queryKey: ["t212_connections"] });
-    queryClient.invalidateQueries({ queryKey: ["t212_cash_isa"] });
+    queryClient.invalidateQueries({ queryKey: CASH_ISA_QUERY_KEY });
   }
 
   function openDashboard() {
     ctx.api.navigation.navigate(addonRoute(ADDON_ID));
   }
 
-  const hasConnections = (connections?.length ?? 0) > 0 || !!cashIsa;
+  const hasConnections = (connections?.length ?? 0) > 0 || !!listedCashIsa;
   const isFirstRun = migrated && !settings && !hasConnections;
 
   return (
@@ -671,7 +665,14 @@ export default function SettingsPage({ ctx, location }: AddonPageProps) {
                   onChanged={refresh}
                 />
               ))}
-              {cashIsa && <CashIsaRow ctx={ctx} account={cashIsa} onChanged={refresh} />}
+              {listedCashIsa && (
+                <CashIsaRow
+                  ctx={ctx}
+                  name={listedCashIsa.name}
+                  lastImport={cashIsa?.lastImport ?? null}
+                  onChanged={refresh}
+                />
+              )}
             </>
           ) : (
             <p className="text-muted-foreground flex items-center gap-1.5 text-sm">
@@ -708,26 +709,27 @@ export default function SettingsPage({ ctx, location }: AddonPageProps) {
               <ToggleGroupItem value="cash-isa">Cash ISA</ToggleGroupItem>
             </ToggleGroup>
           </div>
+          {/* Once the Cash ISA has an account, imports go there and its name is set. */}
+          {(accountType !== "cash-isa" || (cashIsa && !cashIsa.account)) && (
+            <div className="space-y-1.5">
+              <Label>Account name</Label>
+              <Input
+                value={name}
+                onChange={(e) => {
+                  setNameTouched(true);
+                  setName(e.target.value);
+                }}
+                placeholder={DEFAULT_NAME[accountType]}
+              />
+            </div>
+          )}
           {accountType === "cash-isa" ? (
             <>
               <p className="text-muted-foreground text-xs">
                 Trading 212's API does not cover the Cash ISA, so its history comes from the CSV
                 the app exports. Import newer exports any time to bring it up to date.
               </p>
-              {!cashIsa && (
-                <div className="space-y-1.5">
-                  <Label>Account name</Label>
-                  <Input
-                    value={name}
-                    onChange={(e) => {
-                      setNameTouched(true);
-                      setName(e.target.value);
-                    }}
-                    placeholder={DEFAULT_CASH_ISA_NAME}
-                  />
-                </div>
-              )}
-              <CashIsaImport ctx={ctx} newAccountName={name} onImported={refresh} />
+              <CashIsaImport ctx={ctx} newAccountName={name} />
             </>
           ) : (
             <>
@@ -749,17 +751,6 @@ export default function SettingsPage({ ctx, location }: AddonPageProps) {
                   : "Transactions: import full trade/dividend/cash history. The first sync can take a few minutes."}{" "}
                 The mode is fixed at creation; to change it, switch the account's tracking mode in Wealthfolio and re-sync.
               </p>
-            </div>
-            <div className="space-y-1.5">
-              <Label>Account name</Label>
-              <Input
-                value={name}
-                onChange={(e) => {
-                  setNameTouched(true);
-                  setName(e.target.value);
-                }}
-                placeholder="Trading 212 (Invest)"
-              />
             </div>
             <div className="grid gap-3 sm:grid-cols-2">
               <div className="space-y-1.5">

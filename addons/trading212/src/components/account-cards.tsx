@@ -1,11 +1,8 @@
 import type { AddonContext } from "@wealthfolio/addon-sdk";
 import { Badge, Button, Card, CardContent, CardDescription, CardHeader, CardTitle, Icons } from "@wealthfolio/ui";
-import { useQuery } from "@tanstack/react-query";
 import { StatTiles } from "@wf-addons/kit/ui";
-import { getSyncState } from "../hooks/use-config";
-import { getCashIsaState } from "../lib/cash-isa";
 import type { SyncResult, T212Connection } from "../types";
-import { LastSync } from "./connection-card";
+import { LastSync, useConnectionSyncState } from "./connection-card";
 
 /** The "<name> Card" account a connection's card spending is synced into. */
 export function CardAccountCard({
@@ -24,10 +21,7 @@ export function CardAccountCard({
   result?: SyncResult;
   isSyncing: boolean;
 }) {
-  const { data: syncState } = useQuery({
-    queryKey: ["t212_sync_state", conn.id, isSyncing, result?.finishedAt],
-    queryFn: () => getSyncState(ctx, conn.id),
-  });
+  const { data: syncState } = useConnectionSyncState(ctx, conn, isSyncing, result);
   const card = result?.card;
 
   return (
@@ -72,32 +66,20 @@ export function CardAccountCard({
 
 /** The Cash ISA, which has no API access and is kept up to date from its CSV exports. */
 export function CashIsaCard({
-  ctx,
   name,
+  lastImport,
   onImport,
 }: {
-  ctx: AddonContext;
   name: string;
+  lastImport: string | null;
   onImport: () => void;
 }) {
-  const { data: state } = useQuery({
-    queryKey: ["t212_cash_isa", "state"],
-    queryFn: () => getCashIsaState(ctx),
-  });
-
   return (
     <Card>
       <CardHeader className="space-y-2 pb-3">
         <div className="flex flex-wrap items-center gap-2">
           <CardTitle className="text-base">{name}</CardTitle>
-          <Badge variant="outline" className="gap-1">
-            <Icons.PiggyBank size={11} weight="duotone" />
-            Cash ISA
-          </Badge>
-          <Badge variant="secondary" className="gap-1">
-            <Icons.FileText size={11} weight="duotone" />
-            CSV import
-          </Badge>
+          <CashIsaBadges size={11} />
           <div className="ml-auto">
             <Button variant="outline" size="sm" onClick={onImport}>
               <Icons.Import size={14} className="mr-1" weight="bold" />
@@ -106,7 +88,7 @@ export function CashIsaCard({
           </div>
         </div>
         <CardDescription className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
-          <LastSync label="Last import" iso={state?.lastImport ?? null} />
+          <LastSync label="Last import" iso={lastImport} />
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -116,5 +98,21 @@ export function CashIsaCard({
         </p>
       </CardContent>
     </Card>
+  );
+}
+
+/** "Cash ISA" + "CSV import": what sets the Cash ISA apart from the API connections. */
+export function CashIsaBadges({ size }: { size: number }) {
+  return (
+    <>
+      <Badge variant="info" className="gap-1">
+        <Icons.PiggyBank size={size} weight="duotone" />
+        Cash ISA
+      </Badge>
+      <Badge variant="outline" className="gap-1">
+        <Icons.FileText size={size} weight="duotone" />
+        CSV import
+      </Badge>
+    </>
   );
 }

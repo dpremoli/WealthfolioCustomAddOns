@@ -158,8 +158,8 @@ describe("pages (smoke)", () => {
     await waitFor(() => expect(screen.getByTestId("t212-cash-isa-files")).toBeTruthy());
   });
 
-  it("dashboard: lists the card account and the Cash ISA next to the API connections", async () => {
-    const { ctx } = makeCtx({
+  const dashboardCtx = (extractCard: boolean) =>
+    makeCtx({
       storage: [
         [
           "t212_connections",
@@ -169,7 +169,7 @@ describe("pages (smoke)", () => {
             { id: "c2", name: "T212 ISA", keyIdLast4: "5678", accountId: "acc-2", kind: "isa", cardAccountId: "card-2" },
           ]),
         ],
-        ["t212_settings", JSON.stringify({ env: "live" })],
+        ["t212_settings", JSON.stringify({ env: "live", extractCard })],
         ["t212_cash_isa", JSON.stringify({ accountId: "cash-isa", lastImport: "2026-10-01T10:00:00Z" })],
       ],
       accounts: [
@@ -180,6 +180,9 @@ describe("pages (smoke)", () => {
         { id: "cash-isa", name: "My Cash ISA", accountType: "CASH" },
       ],
     });
+
+  it("dashboard: lists the card account and the Cash ISA next to the API connections", async () => {
+    const { ctx } = dashboardCtx(true);
     renderPage(DashboardPage, ctx);
 
     await waitFor(() => expect(screen.getByText("My Cash ISA")).toBeTruthy());
@@ -191,5 +194,12 @@ describe("pages (smoke)", () => {
 
     fireEvent.click(screen.getByText("Import CSV"));
     expect(ctx.api.navigation.navigate).toHaveBeenCalledWith("/addons/trading212-addon/settings?add=cash-isa");
+  });
+
+  it("dashboard: no card account card while card extraction is off", async () => {
+    const { ctx } = dashboardCtx(false);
+    renderPage(DashboardPage, ctx);
+    await waitFor(() => expect(screen.getByText("My Cash ISA")).toBeTruthy());
+    expect(screen.queryByText("T212 Invest Card")).toBeNull();
   });
 });

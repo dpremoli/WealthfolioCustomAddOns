@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { ActivityImport, AddonContext } from "@wealthfolio/addon-sdk";
 import {
   ensureCashIsaAccount,
-  findCashIsaAccount,
+  findCashIsa,
   forgetCashIsa,
   getCashIsaState,
   importCashIsa,
@@ -118,29 +118,34 @@ describe("mergeCashIsaParses", () => {
   });
 });
 
-describe("findCashIsaAccount", () => {
-  it("finds the account the last import went into, and nothing once removed", async () => {
+describe("findCashIsa", () => {
+  it("finds the account the last import went into, and keeps it after a remove", async () => {
     const { ctx } = fakeCtx();
     const accounts = [{ id: "cash-1" }, { id: "cash-2" }];
-    expect(await findCashIsaAccount(ctx, accounts)).toBeUndefined();
+    expect((await findCashIsa(ctx, accounts)).account).toBeUndefined();
 
     const { activities } = await parseCashIsaCsv(EXPORT, "");
     await importCashIsa(ctx, "cash-2", activities);
-    expect(await findCashIsaAccount(ctx, accounts)).toEqual({ id: "cash-2" });
-    expect((await getCashIsaState(ctx)).lastImport).toBeTruthy();
+    const found = await findCashIsa(ctx, accounts);
+    expect(found.account).toEqual({ id: "cash-2" });
+    expect(found.state.lastImport).toBeTruthy();
 
+    // Removed from the list, but a later import still goes into the same account.
     await forgetCashIsa(ctx);
-    expect(await findCashIsaAccount(ctx, accounts)).toBeUndefined();
+    const removed = await findCashIsa(ctx, accounts);
+    expect(removed.state.removed).toBe(true);
+    expect(removed.account).toEqual({ id: "cash-2" });
     await importCashIsa(ctx, "cash-2", activities);
-    expect(await findCashIsaAccount(ctx, accounts)).toEqual({ id: "cash-2" });
+    expect((await getCashIsaState(ctx)).removed).toBeUndefined();
   });
 
-  it("falls back to the add-on's own account, then to the account in the import ledger", async () => {
+  it("falls back to the add-on's own account, then to an existing account in the import ledger", async () => {
     const { ctx } = fakeCtx();
     const own = { id: "own", providerAccountId: "t212-cash-isa" };
-    expect(await findCashIsaAccount(ctx, [{ id: "x" }, own])).toBe(own);
-    await ctx.api.storage.set("t212_cash_isa_ledger", JSON.stringify({ r1: "cash-9:abc" }));
-    expect(await findCashIsaAccount(ctx, [{ id: "cash-9" }])).toEqual({ id: "cash-9" });
+    expect((await findCashIsa(ctx, [{ id: "x" }, own])).account).toBe(own);
+    // The first ledger entry points at a deleted account; a later one at the live account.
+    await ctx.api.storage.set("t212_cash_isa_ledger", JSON.stringify({ r1: "gone:abc", r2: "cash-9:def" }));
+    expect((await findCashIsa(ctx, [{ id: "cash-9" }])).account).toEqual({ id: "cash-9" });
   });
 });
 
@@ -153,5 +158,14 @@ describe("ensureCashIsaAccount", () => {
     );
     expect(await ensureCashIsaAccount(ctx, "GBP")).toBe(id);
     expect(create).toHaveBeenCalledTimes(1);
+  });
+
+  it("reuses the account a previous import went into instead of creating one", async () => {
+    const { ctx, create } = fakeCtx();
+    const { activities } = await parseCashIsaCsv(EXPORT, "");
+    await importCashIsa(ctx, "users-own", activities);
+    (await ctx.api.accounts.getAll()).push({ id: "users-own" } as never);
+    expect(await ensureCashIsaAccount(ctx, "GBP")).toBe("users-own");
+    expect(create).not.toHaveBeenCalled();
   });
 });

@@ -1,9 +1,10 @@
 import type { AddonContext } from "@wealthfolio/addon-sdk";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertFeedback, Badge, Button, Icons, Label } from "@wealthfolio/ui";
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
+import { CASH_ISA_QUERY_KEY, useCashIsa } from "../hooks/use-cash-isa";
 import {
-  CASH_ISA_PROVIDER_ID,
+  DEFAULT_CASH_ISA_NAME,
   ensureCashIsaAccount,
   importCashIsa,
   mergeCashIsaParses,
@@ -12,7 +13,7 @@ import {
   type CashIsaParse,
 } from "../lib/cash-isa";
 
-/** Picker value for the add-on's own Cash ISA account (created on first import). */
+/** Picker value for creating the Cash ISA account on the first import. */
 const NEW_ACCOUNT = "__new__";
 
 interface PickedFile {
@@ -24,11 +25,8 @@ interface PickedFile {
 
 interface CashIsaImportProps {
   ctx: AddonContext;
-  /** Import into this account (re-importing an already listed Cash ISA); no account picker. */
-  accountId?: string;
   /** Name of the Cash account created on the first import. */
-  newAccountName: string;
-  onImported?: (result: CashIsaImportResult) => void;
+  newAccountName?: string;
 }
 
 /**
@@ -36,7 +34,7 @@ interface CashIsaImportProps {
  * account. The Cash ISA has no API access, so this is the only way to bring it in; rows that
  * appear in several files, or were imported before, are added only once.
  */
-export function CashIsaImport({ ctx, accountId, newAccountName, onImported }: CashIsaImportProps) {
+export function CashIsaImport({ ctx, newAccountName = DEFAULT_CASH_ISA_NAME }: CashIsaImportProps) {
   const queryClient = useQueryClient();
   const fileRef = useRef<HTMLInputElement>(null);
   const [files, setFiles] = useState<PickedFile[]>([]);
@@ -45,11 +43,14 @@ export function CashIsaImport({ ctx, accountId, newAccountName, onImported }: Ca
   const [result, setResult] = useState<CashIsaImportResult | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // Once the Cash ISA has an account, every import goes there; the picker is for the first one.
+  const { data: cashIsa } = useCashIsa(ctx);
+  const known = cashIsa?.account ?? null;
   const { data: cashAccounts = [] } = useQuery({
     queryKey: ["wf_accounts"],
     queryFn: () => ctx.api.accounts.getAll(),
     select: (accounts) => accounts.filter((a) => a.accountType === "CASH"),
-    enabled: !accountId,
+    enabled: !!cashIsa && !known,
   });
 
   async function addFiles(list: File[]) {
@@ -68,9 +69,20 @@ export function CashIsaImport({ ctx, accountId, newAccountName, onImported }: Ca
     setFiles((prev) => [...prev.filter((f) => !picked.some((p) => p.key === f.key)), ...picked]);
   }
 
-  const parsed = files.some((f) => f.parse)
-    ? mergeCashIsaParses(files.flatMap((f) => (f.parse ? [f.parse] : [])))
-    : null;
+  const parsed = useMemo(() => {
+    const parses = files.flatMap((f) => (f.parse ? [f.parse] : []));
+    return parses.length > 0 ? mergeCashIsaParses(parses) : null;
+  }, [files]);
+  const counts = useMemo(
+    () =>
+      (parsed?.activities ?? []).reduce<Record<string, number>>((acc, a) => {
+        const k = String(a.activityType);
+        acc[k] = (acc[k] ?? 0) + 1;
+        return acc;
+      }, {}),
+    [parsed],
+  );
+  const newName = newAccountName.trim() || DEFAULT_CASH_ISA_NAME;
 
   async function doImport() {
     if (!parsed) return;
@@ -78,16 +90,14 @@ export function CashIsaImport({ ctx, accountId, newAccountName, onImported }: Ca
     setError(null);
     try {
       const dest =
-        accountId ??
-        (target === NEW_ACCOUNT
-          ? await ensureCashIsaAccount(ctx, parsed.currency, newAccountName.trim() || undefined)
-          : target);
-      const res = await importCashIsa(ctx, dest, parsed.activities);
-      setResult(res);
+        known?.id ??
+        (target === NEW_ACCOUNT ? await ensureCashIsaAccount(ctx, parsed.currency, newName) : target);
+      setResult(await importCashIsa(ctx, dest, parsed.activities));
       setFiles([]);
-      await queryClient.invalidateQueries({ queryKey: ["wf_accounts"] });
-      await queryClient.invalidateQueries({ queryKey: ["t212_cash_isa"] });
-      onImported?.(res);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["wf_accounts"] }),
+        queryClient.invalidateQueries({ queryKey: CASH_ISA_QUERY_KEY }),
+      ]);
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -95,16 +105,7 @@ export function CashIsaImport({ ctx, accountId, newAccountName, onImported }: Ca
     }
   }
 
-  const counts = (parsed?.activities ?? []).reduce<Record<string, number>>((acc, a) => {
-    const k = String(a.activityType);
-    acc[k] = (acc[k] ?? 0) + 1;
-    return acc;
-  }, {});
   const skipped = parsed ? Object.entries(parsed.skipped) : [];
-  const ownAccount = cashAccounts.find(
-    (a) => (a as { providerAccountId?: string }).providerAccountId === CASH_ISA_PROVIDER_ID,
-  );
-  const otherAccounts = cashAccounts.filter((a) => a !== ownAccount);
 
   return (
     <div className="space-y-4">
@@ -184,7 +185,13 @@ export function CashIsaImport({ ctx, accountId, newAccountName, onImported }: Ca
         </div>
       )}
 
-      {parsed && parsed.activities.length > 0 && !accountId && (
+      {parsed && parsed.activities.length > 0 && known && (
+        <p className="text-muted-foreground text-xs">
+          Imports into <strong>{known.name}</strong>, the Cash ISA's Wealthfolio account.
+        </p>
+      )}
+
+      {parsed && parsed.activities.length > 0 && cashIsa && !known && (
         <div className="space-y-1.5">
           <Label htmlFor="t212-cash-isa-target">Wealthfolio account</Label>
           <select
@@ -193,12 +200,8 @@ export function CashIsaImport({ ctx, accountId, newAccountName, onImported }: Ca
             value={target}
             onChange={(e) => setTarget(e.target.value)}
           >
-            <option value={NEW_ACCOUNT}>
-              {ownAccount
-                ? ownAccount.name
-                : `Create "${newAccountName.trim() || "Trading 212 Cash ISA"}" (${parsed.currency})`}
-            </option>
-            {otherAccounts.map((a) => (
+            <option value={NEW_ACCOUNT}>{`Create "${newName}" (${parsed.currency})`}</option>
+            {cashAccounts.map((a) => (
               <option key={a.id} value={a.id}>
                 {a.name}
               </option>
@@ -212,7 +215,7 @@ export function CashIsaImport({ ctx, accountId, newAccountName, onImported }: Ca
       )}
 
       {parsed && parsed.activities.length > 0 && (
-        <Button onClick={doImport} disabled={isImporting}>
+        <Button onClick={doImport} disabled={isImporting || !cashIsa}>
           {isImporting ? (
             <>
               <Icons.Spinner size={14} className="mr-1 animate-spin" />

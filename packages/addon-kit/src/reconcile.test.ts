@@ -1,6 +1,8 @@
 import type { ActivityImport } from "@wealthfolio/addon-sdk";
 import {
   contentKey,
+  ledgerAccountId,
+  ledgerEntry,
   reconcileWithLedger,
   selectNewActivities,
   sourceRefOf,
@@ -119,6 +121,12 @@ describe("contentKey", () => {
       currency: "USD",
     } as ExistingActivityLike;
     expect(contentKey(trade)).toBe(contentKey(existing));
+  });
+});
+
+describe("ledgerAccountId", () => {
+  it("reads back the account a ledger entry was written for", () => {
+    expect(ledgerAccountId(ledgerEntry("acc:with-colon", cash(5, "x")))).toBe("acc:with-colon");
   });
 });
 

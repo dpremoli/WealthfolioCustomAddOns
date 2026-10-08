@@ -20,7 +20,7 @@ import {
   cn,
 } from "@wealthfolio/ui";
 import { useQuery } from "@tanstack/react-query";
-import { connectionKind, getSymbolMap, getSyncState } from "../hooks/use-config";
+import { connectionKind, getSymbolMap, getSyncState, kindLabel } from "../hooks/use-config";
 import type { SyncResult, T212Connection, T212Settings } from "../types";
 import { relativeTime } from "@wf-addons/kit";
 import { StatTiles, type Stat } from "@wf-addons/kit/ui";
@@ -41,11 +41,21 @@ const TYPE_ICON = {
   TRANSFER_OUT: "ArrowUpRight", Card: "CreditCard", Holdings: "Briefcase",
 } as const;
 
-export function ConnectionCard({ ctx, settings, conn, result, isSyncing }: ConnectionCardProps) {
-  const { data: syncState } = useQuery({
+/** A connection's sync state, refreshed when a sync starts or finishes. */
+export function useConnectionSyncState(
+  ctx: AddonContext,
+  conn: T212Connection,
+  isSyncing: boolean,
+  result: SyncResult | undefined,
+) {
+  return useQuery({
     queryKey: ["t212_sync_state", conn.id, isSyncing, result?.finishedAt],
     queryFn: () => getSyncState(ctx, conn.id),
   });
+}
+
+export function ConnectionCard({ ctx, settings, conn, result, isSyncing }: ConnectionCardProps) {
+  const { data: syncState } = useConnectionSyncState(ctx, conn, isSyncing, result);
   const lastSync = syncState?.lastSync;
   const kind = connectionKind(conn);
 
@@ -61,7 +71,7 @@ export function ConnectionCard({ ctx, settings, conn, result, isSyncing }: Conne
           <CardTitle className="text-base">{conn.name}</CardTitle>
           <Badge variant="outline" className="gap-1">
             <Icons.Wallet size={11} weight="duotone" />
-            {kind === "isa" ? "Stocks ISA" : "Invest"}
+            {kindLabel(kind)}
           </Badge>
           <Badge variant={mode === "HOLDINGS" ? "info" : "secondary"} className="gap-1">
             <Icons.Activity size={11} weight="duotone" />

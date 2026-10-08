@@ -252,6 +252,20 @@ export function connectionKind(conn: Pick<T212Connection, "kind" | "name">): "in
   return conn.kind ?? (/\bisa\b/i.test(conn.name) ? "isa" : "invest");
 }
 
+export const kindLabel = (kind: "invest" | "isa") => (kind === "isa" ? "Stocks ISA" : "Invest");
+
+/**
+ * The card account a connection's card spending is currently synced into: only while card
+ * extraction is on, and never for a Stocks ISA (no card; an older version could still have
+ * recorded one).
+ */
+export function activeCardAccountId(
+  conn: T212Connection,
+  settings: Pick<T212Settings, "extractCard"> | null | undefined,
+): string | undefined {
+  return settings?.extractCard && connectionKind(conn) !== "isa" ? conn.cardAccountId : undefined;
+}
+
 export async function getSyncState(
   ctx: AddonContext,
   id: string,

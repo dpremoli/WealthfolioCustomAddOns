@@ -23,6 +23,54 @@ export function monzoAccountType(acc: MonzoAccount): "CASH" | "CREDIT_CARD" {
   return acc.account_type === "uk_monzo_flex" ? "CREDIT_CARD" : "CASH";
 }
 
+const TYPE_NAMES: Record<string, string> = {
+  CASH: "Cash",
+  CREDIT_CARD: "Credit card",
+  SECURITIES: "Securities",
+  CRYPTOCURRENCY: "Cryptocurrency",
+};
+
+export interface AccountTypeIssue {
+  /** The Wealthfolio account. */
+  name: string;
+  /** Its current type, for display ("Securities"). */
+  current: string;
+  /** The type it should have, for display ("Cash" / "Credit card"). */
+  expected: string;
+}
+
+/**
+ * Mapped Wealthfolio accounts whose type keeps them out of Wealthfolio's Spending reports
+ * (which only count Cash and Credit card accounts). Early v1 versions sent the type under the
+ * wrong field name, so their accounts were created as Securities. The add-on API cannot
+ * change an account's type, so these are reported for the user to fix.
+ */
+export function accountTypeIssues(
+  monzoAccounts: MonzoAccount[],
+  wfAccounts: { id: string; name: string; accountType?: string }[],
+  mapping: AccountMapping,
+): AccountTypeIssue[] {
+  const issues: AccountTypeIssue[] = [];
+  for (const acc of monzoAccounts) {
+    const wf = wfAccounts.find((a) => a.id === mapping[acc.id]);
+    if (!wf?.accountType || wf.accountType === "CASH" || wf.accountType === "CREDIT_CARD") continue;
+    issues.push({
+      name: wf.name,
+      current: TYPE_NAMES[wf.accountType] ?? wf.accountType,
+      expected: TYPE_NAMES[monzoAccountType(acc)],
+    });
+  }
+  return issues;
+}
+
+/** One sentence describing an {@link AccountTypeIssue} and its fix. */
+export function accountTypeIssueText(i: AccountTypeIssue): string {
+  return (
+    `"${i.name}" is a ${i.current} account, so Wealthfolio's Spending reports and categories ` +
+    `leave it out. Change it to ${i.expected} (Accounts → ${i.name} → Update Account).`
+  );
+}
+
 /** Monzo accounts with no mapping, or whose mapped Wealthfolio account no longer exists. */
 export function findUnmapped(
   monzoAccounts: MonzoAccount[],

@@ -24,7 +24,12 @@ import {
   KEY_MAPPING,
   SUGGESTED_REDIRECT_URL,
 } from "../constants";
-import { accountTypeLabel, ensureAccountMapping } from "../lib/accounts";
+import {
+  accountTypeIssueText,
+  accountTypeIssues,
+  accountTypeLabel,
+  ensureAccountMapping,
+} from "../lib/accounts";
 import {
   MonzoAuthError,
   beginAuthorisation,
@@ -521,6 +526,12 @@ export default function SettingsPage({ ctx }: AddonPageProps) {
                   {firstSync.error} Run Sync Now from the dashboard to try again.
                 </AlertFeedback>
               )}
+              {savedMapping &&
+                accountTypeIssues(monzoAccounts, wfAccounts, savedMapping).map((issue) => (
+                  <AlertFeedback key={issue.name} variant="warning" title="Account not counted in Spending">
+                    <p className="text-sm">{accountTypeIssueText(issue)}</p>
+                  </AlertFeedback>
+                ))}
               {autoCreateStatus && (
                 <AlertFeedback variant="success" title="Accounts created">
                   {autoCreateStatus}

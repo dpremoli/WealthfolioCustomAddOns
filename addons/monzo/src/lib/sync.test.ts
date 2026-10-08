@@ -360,6 +360,15 @@ describe("runSync spending categories", () => {
   });
 });
 
+describe("runSync account types", () => {
+  it("warns when a mapped account is not a type Wealthfolio's Spending counts", async () => {
+    const t = setup([tx()]);
+    (t.wfAccounts[0] as unknown as Record<string, unknown>).accountType = "SECURITIES";
+    const result = await runSync(t.ctx);
+    expect(result.log?.join("\n")).toMatch(/Warning: "Monzo Current" is a Securities account.*Change it to Cash/);
+  });
+});
+
 describe("runSync guards", () => {
   it("requires a connection", async () => {
     const t = setup([]);

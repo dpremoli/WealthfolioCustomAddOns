@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { makeCtx } from "../test-utils";
 import type { MonzoAccount } from "../types";
-import { accountTypeLabel, ensureAccountMapping, findUnmapped } from "./accounts";
+import { accountTypeIssues, accountTypeLabel, ensureAccountMapping, findUnmapped } from "./accounts";
 
 const current: MonzoAccount = {
   id: "monzo-1",
@@ -56,5 +56,35 @@ describe("ensureAccountMapping", () => {
     const second = await ensureAccountMapping(t.ctx, [current, flex], t.wfAccounts, first.mapping, handled);
     expect(second.created).toEqual([]);
     expect(t.created).toHaveLength(2);
+  });
+});
+
+describe("accountTypeIssues", () => {
+  it("flags mapped accounts that Wealthfolio's Spending reports leave out, with the type to use", () => {
+    const issues = accountTypeIssues(
+      [current, flex],
+      [
+        { id: "wf-1", name: "user_0000abc", accountType: "SECURITIES" },
+        { id: "wf-2", name: "monzoflex_0000abc", accountType: "SECURITIES" },
+      ],
+      { "monzo-1": "wf-1", "monzo-2": "wf-2" },
+    );
+    expect(issues).toEqual([
+      { name: "user_0000abc", current: "Securities", expected: "Cash" },
+      { name: "monzoflex_0000abc", current: "Securities", expected: "Credit card" },
+    ]);
+  });
+
+  it("accepts Cash and Credit card accounts", () => {
+    expect(
+      accountTypeIssues(
+        [current, flex],
+        [
+          { id: "wf-1", name: "Monzo Current", accountType: "CASH" },
+          { id: "wf-2", name: "Monzo Flex", accountType: "CASH" },
+        ],
+        { "monzo-1": "wf-1", "monzo-2": "wf-2" },
+      ),
+    ).toEqual([]);
   });
 });

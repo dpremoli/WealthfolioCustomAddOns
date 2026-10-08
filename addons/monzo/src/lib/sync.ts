@@ -29,6 +29,7 @@ import {
   tallyByCategory,
 } from "./mapper";
 import { MonzoClient } from "./monzo-client";
+import { accountTypeIssueText, accountTypeIssues } from "./accounts";
 import { ensureMigrated } from "./migrate";
 import { monzoSpendingRules } from "./spending-rules";
 
@@ -274,12 +275,16 @@ export async function runSync(
   });
 
   // Fail early (before importing anything) when a mapped Wealthfolio account was deleted.
-  const wfIds = new Set((await ctx.api.accounts.getAll()).map((a) => a.id));
+  const wfAccounts = await ctx.api.accounts.getAll();
+  const wfIds = new Set(wfAccounts.map((a) => a.id));
   if (entries.some(([, id]) => !wfIds.has(id))) {
     throw new Error(
       "Account mapping is out of date (mapped accounts were deleted). " +
         "Open Settings to reconnect and re-create accounts."
     );
+  }
+  for (const issue of accountTypeIssues(monzoAccounts, wfAccounts, mapping)) {
+    log.push(`Warning: ${accountTypeIssueText(issue)}`);
   }
 
   let imported = 0;

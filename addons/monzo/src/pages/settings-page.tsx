@@ -46,6 +46,7 @@ import { ensureMigrated } from "../lib/migrate";
 import { MonzoClient } from "../lib/monzo-client";
 import { useSync } from "../hooks/use-sync";
 import { buildAuthUrl } from "../lib/oauth";
+import { resetSyncHistory } from "../lib/sync";
 import type { AccountMapping, MonzoAccount } from "../types";
 
 interface SettingsData {
@@ -195,14 +196,13 @@ export default function SettingsPage({ ctx }: AddonPageProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [monzoAccounts, wfAccounts, savedMapping]);
 
-  // Run the first sync as soon as approval has landed and the accounts are mapped.
+  // Run a sync as soon as approval has landed and the accounts are mapped.
   useEffect(() => {
     if (!firstSyncDue || firstSync.isSyncing || awaitingApproval) return;
     if (!monzoAccounts.length || !savedMapping || Object.keys(savedMapping).length === 0) return;
     setFirstSyncDue(false);
+    // Every (re)connection gets one sync; runSync decides how far back it goes.
     (async () => {
-      // Only a connection that has never synced: otherwise the normal incremental sync applies.
-      if ((await store.get<string | null>(KEY_LAST_SYNC, null)) !== null) return;
       await firstSync.sync();
       queryClient.invalidateQueries({ queryKey: ["monzo_last_run"] });
     })();
@@ -302,11 +302,11 @@ export default function SettingsPage({ ctx }: AddonPageProps) {
     });
   }
 
-  async function resetSyncHistory() {
-    await ctx.api.storage.delete(KEY_LAST_SYNC);
+  async function onResetSyncHistory() {
+    await resetSyncHistory(ctx);
     queryClient.invalidateQueries({ queryKey: ["monzo_last_run"] });
     setResetStatus(
-      "Sync history cleared. The next sync re-fetches everything Monzo allows (up to 90 days); transactions already imported are skipped.",
+      "Sync history cleared. The next sync re-fetches the last 90 days (the whole history if you reconnected within the last few minutes); transactions already imported are skipped.",
     );
   }
 
@@ -691,15 +691,15 @@ export default function SettingsPage({ ctx }: AddonPageProps) {
             <div>
               <p className="text-sm font-medium">Reset sync history</p>
               <p className="text-muted-foreground text-xs">
-                Forces the next sync to re-fetch everything Monzo allows (up to 90 days).
+                Forces the next sync to re-fetch the last 90 days (the whole history if you reconnected within the last few minutes).
               </p>
             </div>
             <ActionConfirm
               confirmTitle="Reset sync history?"
-              confirmMessage="The next sync will re-fetch the last 90 days. Transactions already in Wealthfolio are recognised and skipped, so this is safe; it just takes a little longer."
+              confirmMessage="The next sync will re-fetch the last 90 days (the whole history if you reconnected within the last few minutes). Transactions already in Wealthfolio are recognised and skipped, so this is safe; it just takes a little longer."
               confirmButtonText="Reset"
               isPending={false}
-              handleConfirm={resetSyncHistory}
+              handleConfirm={onResetSyncHistory}
               button={
                 <Button variant="outline" size="sm">
                   <Icons.RefreshCw size={14} className="mr-1" weight="bold" />

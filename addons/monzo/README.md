@@ -40,7 +40,7 @@ Monzo, paste its details into the add-on, and connect.
   transactions (Flex purchases are the exception, they never "settle"), pot transfers, the monthly Flex repayment (the purchases
   are already on the Flex account) and savings-category moves such as investment transfers.
 - Lets you rename Monzo categories (Settings -> Category labels).
-- Imports a **Monzo CSV export** for history older than the API shares (see below).
+- Imports **Monzo CSV exports** (several files at once, each to its own account) for history older than the API shares (see below).
 
 ## Setup
 
@@ -96,8 +96,9 @@ permissions. The add-on asks for:
    it checks every few seconds.
 
 As soon as the approval comes through, the Settings page creates the Wealthfolio cash
-accounts and runs the first sync by itself, inside the 5 minutes in which Monzo shares your
-full history. After that, use **Sync Now** on the dashboard.
+accounts and runs a sync by itself (after every connection, including a reconnect), inside the
+5 minutes in which Monzo shares your full history. After that, use **Sync Now** on the
+dashboard.
 
 The add-on checks the `state` value in the pasted URL against the one it generated, so a
 link that did not come from your own Connect click is rejected.
@@ -117,28 +118,56 @@ link that did not come from your own Connect click is rejected.
   the ledger and removes the tag.)
 - A transaction that is still **pending** when you sync is not lost: the next sync starts
   from the oldest recent pending transaction, so it is picked up once it settles.
+- Only one sync or CSV import runs at a time, even across pages: while one is running, the
+  dashboard's **Sync Now** and the CSV page's **Import** are disabled, and the dashboard shows
+  the result when it finishes.
+- The dashboard keeps the result and step list of the last successful sync, so it is still
+  there after you leave the page or restart Wealthfolio. Disconnecting and **Reset sync
+  history** clear it.
 - **Disconnect** revokes the tokens at Monzo (`/oauth2/logout`) as well as forgetting them.
 - **Reset sync history** (Settings -> Advanced) makes the next sync start from scratch.
   Anything already imported is recognised and skipped.
 
 ### The 90-day limit and CSV backfill
 
-Monzo shares your **full history** only for 5 minutes after you authenticate; after that, API
-clients can read just the **last 90 days**. So **sync straight after approving the connection
-in the Monzo app**: the first sync asks for everything, and if Monzo refuses (the window has
-passed) it falls back to the last 90 days and says so in the log. Later syncs never ask for
-more than 90 days back, so a long gap between syncs is logged rather than failing with 403.
+Monzo shares your **full history** only for 5 minutes after you authenticate (log in through
+the connect flow); after that, API clients can read just the **last 90 days**. A token
+refresh does not reopen that window.
+
+- **Sync right after connecting** and you get the whole history, read in slices of about six
+  months, newest first. The add-on starts a sync by itself after every connection, and a sync
+  that starts within 15 minutes of connecting asks for everything even if you synced before
+  (anything already imported is recognised and skipped).
+- **Otherwise** a sync reaches back at most 90 days. If Monzo refuses the full history (the
+  window has passed) the add-on falls back to the last 90 days and says so in the log. If it
+  stops part-way through the slices, you keep what it fetched, and the log says how far back
+  that reached. Later syncs never ask for more than 90 days back, so a long gap between syncs
+  is logged rather than failing with 403.
+- **Reconnecting later** (Disconnect, then connect again) and syncing straight away fetches the
+  whole history again.
 
 For anything older, export a CSV from the Monzo app (**Account -> Export transactions ->
-CSV**) and use **Import CSV** in the add-on: choose the file, pick the target Wealthfolio
-account, and import. Columns are matched by header name (Transaction ID, Date, Time, Name,
-Category, Amount, Currency, Local amount, Local currency, Notes and #tags, Description, ...),
-so small changes to Monzo's export layout do not break it. Overlapping API and CSV imports
+CSV**) and use **Import CSV** in the add-on: choose one or more files at once (or add more later),
+pick the target Wealthfolio account for each one, and import. Monzo exports one CSV per Monzo
+account, so different files usually go to different accounts; files are imported one after
+another, and a file that fails does not stop the rest. Columns are matched by header name
+(Transaction ID, Date, Time, Name, Category, Amount, Currency, Local amount, Local currency,
+Notes and #tags, Description, ...), so small changes to Monzo's export layout do not break it. Overlapping API and CSV imports
 are reconciled the same way as re-syncs. "Skip transfers & savings" is on by default.
 
 Because older history is not available, an account's balance in Wealthfolio reflects only
 the transactions imported. If you need it to match Monzo, add an opening-balance deposit
-dated just before your first imported transaction.
+dated just before your first imported transaction. Remove or adjust that deposit if you later
+import the full history (by reconnecting, or from CSV), or the balance will be off by the
+opening amount.
+
+### Upgrading to 2.4.0
+
+Versions before 2.4.0 sent no `since` on a first sync or after **Reset sync history**, and
+Monzo then returns only the last 30 days (with no error). Anyone who synced that way could be
+missing transactions from 31 to 89 days back. 2.4.0 always sends `since`, and re-checks the
+last 90 days once automatically on the first sync after the upgrade (anything already imported
+is skipped). Older gaps still need a CSV import, or a reconnect followed by an immediate sync.
 
 ## Upgrading from v1.x
 
@@ -191,7 +220,9 @@ Only rows near the sync boundary could be affected, and only if Monzo returns th
 | "state does not match" | The pasted URL is from an older attempt. Use the newest link, or paste only the `code`. |
 | "Monzo rejected the saved refresh token" | The tokens are no longer valid or the client details do not match. Check Settings, or reconnect. |
 | "Enter your Monzo client ID and secret" | Upgrading from v1: see the upgrade notes. |
-| Only 90 days of transactions | A Monzo API limit; use CSV import for older history. |
+| Only 90 days of transactions | A Monzo API limit: the whole history is shared only for 5 minutes after you connect. Disconnect, reconnect and let the add-on sync straight away, or use CSV import for older history. |
+| Only about 30 days imported | You synced with a version before 2.4.0, which fetched just the last 30 days on a first sync or after a reset. Upgrade to 2.4.0: its first sync re-checks the last 90 days. |
+| "A sync or import is already running" | Only one sync or CSV import runs at a time. Wait for the running one to finish. |
 | "Account mapping is out of date" | A mapped Wealthfolio account was deleted. Open Settings to re-create and re-map it. |
 
 ## Security
@@ -202,7 +233,8 @@ Only rows near the sync boundary could be affected, and only if Monzo returns th
   `Authorization` header itself.
 - The client secret is sent only to `api.monzo.com`, in the token exchange and refresh. The
   add-on can reach no other host.
-- Non-secret state (client ID, redirect URL, token expiry, account mapping, last-sync time,
+- Non-secret state (client ID, redirect URL, token expiry, when you last logged in, account
+  mapping, last-sync time, the import ledger of Monzo transaction ids, the last sync's result,
   category labels) is kept in add-on storage.
 - The add-on runs in Wealthfolio's sandbox: no direct network access, no popups, no
   browser storage.
@@ -217,10 +249,14 @@ Only rows near the sync boundary could be affected, and only if Monzo returns th
 | storage | `monzo_client_id` | OAuth client ID |
 | storage | `monzo_redirect_url` | registered redirect URL |
 | storage | `monzo_expires_at` | access token expiry (ms since epoch) |
+| storage | `monzo_authenticated_at` | when the last login completed (ms since epoch); a sync soon after reads the whole history |
 | storage | `monzo_oauth_state` | `state` of a connection in progress |
 | storage | `monzo_account_mapping` | Monzo account id -> Wealthfolio account id |
 | storage | `monzo_last_sync` | `since` watermark for the next sync |
 | storage | `monzo_last_run` | when the last sync finished (display) |
+| storage | `monzo_rechecked_90_days` | set once a sync has covered the last 90 days (the one-off check after upgrading to 2.4.0) |
+| storage | `monzo_imported_ids` | import ledger: Monzo transaction id -> account and content hash of the imported activity |
+| storage | `monzo_last_result` | the last successful sync's result and steps, shown on the dashboard |
 | storage | `monzo_category_labels` | custom category labels |
 
 ## Development
@@ -247,9 +283,11 @@ addons/monzo/
     │   ├── oauth.ts           # state, auth URL, paste parsing, token request bodies
     │   ├── auth.ts            # settings, token storage, code exchange, refresh
     │   ├── monzo-client.ts    # accounts + paginated transactions via the broker
+    │   ├── busy.ts            # one sync/import at a time
     │   ├── sync.ts            # fetch -> filter -> reconcile -> import
     │   ├── mapper.ts          # Monzo transaction -> cash activity (+ filters)
     │   ├── csv-parser.ts      # Monzo CSV export
+    │   ├── csv-import.ts      # import several CSV files into accounts
     │   ├── migrate.ts         # v1 -> v2 state migration
     │   ├── accounts.ts        # Monzo -> Wealthfolio account mapping
     │   ├── clipboard.ts

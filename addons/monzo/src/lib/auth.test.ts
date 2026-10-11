@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  KEY_AUTHENTICATED_AT,
   KEY_CLIENT_ID,
   KEY_EXPIRES_AT,
+  KEY_LAST_RESULT,
   KEY_OAUTH_STATE,
   KEY_REDIRECT_URL,
   SECRET_ACCESS_TOKEN,
@@ -98,6 +100,21 @@ describe("completeAuthorisation", () => {
     expect(await getConnectionStatus(t.ctx)).toMatchObject({ connected: true, hasCredentials: true, hasRefreshToken: true });
   });
 
+  it("records when the login completed (ms since epoch), and a failed exchange records nothing", async () => {
+    const t = await configured({ handler: () => tokenReply });
+    const { state } = await beginAuthorisation(t.ctx);
+    const before = Date.now();
+    await completeAuthorisation(t.ctx, `${REDIRECT}?code=the-code&state=${state}`);
+    const at = Number(t.storage.get(KEY_AUTHENTICATED_AT));
+    expect(at).toBeGreaterThanOrEqual(before);
+    expect(at).toBeLessThanOrEqual(Date.now());
+
+    const failing = await configured({ handler: () => json(400, { error: "invalid_grant" }) });
+    await beginAuthorisation(failing.ctx);
+    await expect(completeAuthorisation(failing.ctx, "bad-code")).rejects.toThrow();
+    expect(failing.storage.has(KEY_AUTHENTICATED_AT)).toBe(false);
+  });
+
   it("accepts a bare code", async () => {
     const t = await configured({ handler: () => tokenReply });
     await beginAuthorisation(t.ctx);
@@ -146,6 +163,14 @@ describe("refreshAccessToken", () => {
     expect(t.secrets.get(SECRET_REFRESH_TOKEN)).toBe("new-ref");
   });
 
+  it("does not count as a new login", async () => {
+    const t = await connected({
+      handler: () => json(200, { access_token: "new-acc", refresh_token: "new-ref", expires_in: 100 }),
+    });
+    await refreshAccessToken(t.ctx);
+    expect(t.storage.has(KEY_AUTHENTICATED_AT)).toBe(false);
+  });
+
   it("shares one request between concurrent refreshes (refresh tokens are single-use)", async () => {
     const t = await connected({
       handler: async () => {
@@ -185,6 +210,20 @@ describe("disconnect", () => {
     expect(t.storage.has(KEY_EXPIRES_AT)).toBe(false);
     expect(t.secrets.get(SECRET_CLIENT_SECRET)).toBe("mnzconf.sec");
     expect(t.storage.get(KEY_CLIENT_ID)).toBe("oauth2client_abc");
+  });
+
+  it("forgets when the login happened", async () => {
+    const t = await configured();
+    t.storage.set(KEY_AUTHENTICATED_AT, String(Date.now()));
+    await disconnect(t.ctx);
+    expect(t.storage.has(KEY_AUTHENTICATED_AT)).toBe(false);
+  });
+
+  it("forgets the last sync's view so a disconnected add-on does not show it", async () => {
+    const t = await configured();
+    t.storage.set(KEY_LAST_RESULT, "{}");
+    await disconnect(t.ctx);
+    expect(t.storage.has(KEY_LAST_RESULT)).toBe(false);
   });
 
   it("revokes the token at Monzo first, and still disconnects if that fails", async () => {

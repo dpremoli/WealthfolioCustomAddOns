@@ -38,6 +38,19 @@ export const KEY_LAST_RUN = "monzo_last_run";
  * even when its comment changed, without writing the id into the comment.
  */
 export const KEY_IMPORTED_IDS = "monzo_imported_ids";
+/**
+ * ms since epoch the user last completed the OAuth login (decimal string). Set when the
+ * authorisation code is exchanged, not on token refresh: Monzo shares the whole history only
+ * for 5 minutes after a login, so a sync soon after this asks for all of it.
+ */
+export const KEY_AUTHENTICATED_AT = "monzo_authenticated_at";
+/**
+ * JSON `true` once a sync has covered the last 90 days. Versions before 2.4.0 fetched only
+ * the last 30 days on a first sync, so one existing watermark gets a one-off re-check.
+ */
+export const KEY_RECHECKED_90_DAYS = "monzo_rechecked_90_days";
+/** JSON: what the dashboard shows of the last successful sync (its result and step list). */
+export const KEY_LAST_RESULT = "monzo_last_result";
 /** JSON: category id -> custom label. */
 export const KEY_CATEGORY_LABELS = "monzo_category_labels";
 

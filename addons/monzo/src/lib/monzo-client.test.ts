@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { KEY_EXPIRES_AT, SECRET_ACCESS_TOKEN, SECRET_CLIENT_SECRET, SECRET_REFRESH_TOKEN, KEY_CLIENT_ID, KEY_REDIRECT_URL } from "../constants";
 import { json, makeCtx, tx, type FakeRequest } from "../test-utils";
-import { MonzoClient, PAGE_SIZE } from "./monzo-client";
+import { HISTORY_SLICE_MS, MonzoClient, PAGE_SIZE } from "./monzo-client";
 
 function connectedCtx(handler: Parameters<typeof makeCtx>[0]) {
   const t = makeCtx(handler);
@@ -107,6 +107,123 @@ describe("MonzoClient.getTransactions pagination", () => {
     expect(t.requests).toHaveLength(2);
   });
 });
+
+/**
+ * A fake Monzo `GET /transactions` over `all`: oldest first, `since` (a time or a transaction
+ * id) and `before` both exclusive, `refuse` answering a request with an error status.
+ */
+function fakeMonzo(all: ReturnType<typeof tx>[], refuse: (u: URL) => number | null = () => null) {
+  const sorted = [...all].sort((a, b) => a.created.localeCompare(b.created));
+  return (req: FakeRequest) => {
+    const u = new URL(req.url);
+    const status = refuse(u);
+    if (status) return json(status, { code: "refused" });
+    const since = u.searchParams.get("since");
+    const before = u.searchParams.get("before");
+    let found = sorted;
+    if (since?.startsWith("tx_")) found = found.slice(found.findIndex((x) => x.id === since) + 1);
+    else if (since) found = found.filter((x) => x.created > since);
+    if (before) found = found.filter((x) => x.created < before);
+    return json(200, { transactions: found.slice(0, Number(u.searchParams.get("limit"))) });
+  };
+}
+
+describe("MonzoClient.getHistory", () => {
+  const now = new Date("2026-10-11T00:00:00.000Z");
+  const from = new Date(now.getTime() - 2.5 * HISTORY_SLICE_MS);
+  const at = (ms: number) => new Date(ms).toISOString();
+  const sinceOf = (r: FakeRequest) => new URL(r.url).searchParams.get("since")!;
+  const beforeOf = (r: FakeRequest) => new URL(r.url).searchParams.get("before");
+
+  it("reads newest slice first and returns each transaction once, oldest first, including ones on a slice boundary", async () => {
+    // Exactly on the two slice boundaries (now - 1 and 2 slices): with `since` and `before`
+    // both exclusive, only the one-second overlap between neighbouring slices finds them.
+    const times = [
+      from.getTime() + 1000,
+      now.getTime() - 2 * HISTORY_SLICE_MS,
+      now.getTime() - 1.5 * HISTORY_SLICE_MS,
+      now.getTime() - HISTORY_SLICE_MS,
+      now.getTime() - 1000,
+    ];
+    const all = times.map((ms, i) => tx({ id: `tx_b${i}`, created: at(ms) }));
+    const t = connectedCtx({ handler: fakeMonzo(all) });
+    const got = await new MonzoClient(t.ctx).getHistory("acc_1", from, now);
+
+    expect(got.complete).toBe(true);
+    expect(got.transactions.map((x) => x.id)).toEqual(all.map((x) => x.id));
+    expect(t.requests).toHaveLength(3);
+    // Newest slice first and open-ended; older ones bounded by the slice above them.
+    expect(t.requests.map(beforeOf)).toEqual([null, at(now.getTime() - HISTORY_SLICE_MS), at(now.getTime() - 2 * HISTORY_SLICE_MS)]);
+    expect(t.requests.map(sinceOf)).toEqual([
+      at(now.getTime() - HISTORY_SLICE_MS - 1000),
+      at(now.getTime() - 2 * HISTORY_SLICE_MS - 1000),
+      at(from.getTime() - 1000),
+    ]);
+    for (const r of t.requests.slice(1)) {
+      expect(Date.parse(beforeOf(r)!) - Date.parse(sinceOf(r))).toBeLessThanOrEqual(HISTORY_SLICE_MS + 1000);
+    }
+  });
+
+  it("returns the newer slices, marked incomplete, when an older slice is refused", async () => {
+    const all = [0.5, 1.2, 2.2].map((k, i) =>
+      tx({ id: `tx_r${i}`, created: at(now.getTime() - k * HISTORY_SLICE_MS) }),
+    );
+    for (const status of [403, 400]) {
+      // Refuse anything reaching more than 2.2 slices back (only the oldest slice does).
+      const t = connectedCtx({
+        handler: fakeMonzo(all, (u) =>
+          now.getTime() - Date.parse(u.searchParams.get("since")!) > 2.2 * HISTORY_SLICE_MS ? status : null,
+        ),
+      });
+      const got = await new MonzoClient(t.ctx).getHistory("acc_1", from, now);
+      expect(got.complete).toBe(false);
+      expect(got.transactions.map((x) => x.id)).toEqual(["tx_r1", "tx_r0"]);
+    }
+  });
+
+  it("throws when the first slice is refused, so the caller can fall back", async () => {
+    const t = connectedCtx({ handler: fakeMonzo([tx()], () => 403) });
+    await expect(new MonzoClient(t.ctx).getHistory("acc_1", from, now)).rejects.toMatchObject({ kind: "approval" });
+    expect(t.requests).toHaveLength(1);
+
+    const t400 = connectedCtx({ handler: fakeMonzo([tx()], () => 400) });
+    await expect(new MonzoClient(t400.ctx).getHistory("acc_1", from, now)).rejects.toMatchObject({ status: 400 });
+  });
+
+  it("rethrows any other error, even after a slice succeeded", async () => {
+    const t = connectedCtx({
+      handler: fakeMonzo([], (u) => (beforeOfUrl(u) ? 404 : null)),
+    });
+    await expect(new MonzoClient(t.ctx).getHistory("acc_1", from, now)).rejects.toMatchObject({ status: 404 });
+  });
+
+  it("returns every transaction of a `before`-bounded slice that needs several pages", async () => {
+    // 250 transactions in the second-newest slice: paged by transaction id, `before` kept.
+    const base = now.getTime() - 1.9 * HISTORY_SLICE_MS;
+    const all = Array.from({ length: 250 }, (_, i) =>
+      tx({ id: `tx_p${String(i).padStart(3, "0")}`, created: at(base + i * 60_000) }),
+    );
+    const t = connectedCtx({ handler: fakeMonzo(all) });
+    const got = await new MonzoClient(t.ctx).getHistory("acc_1", from, now);
+
+    expect(got.transactions.map((x) => x.id)).toEqual(all.map((x) => x.id));
+    const bounded = t.requests.filter((r) => beforeOf(r) === at(now.getTime() - HISTORY_SLICE_MS));
+    expect(bounded.map((r) => sinceOf(r).startsWith("tx_"))).toEqual([false, true, true]);
+    expect(bounded.every((r) => beforeOf(r) !== null)).toBe(true);
+  });
+
+  it("never goes back past 2015, whatever opening date it is given", async () => {
+    const t = connectedCtx({ handler: fakeMonzo([]) });
+    const got = await new MonzoClient(t.ctx).getHistory("acc_1", new Date("0001-01-01T00:00:00Z"), now);
+    expect(got).toEqual({ transactions: [], complete: true });
+    // About 4,300 days at 180 per request.
+    expect(t.requests.length).toBeLessThanOrEqual(25);
+    const oldest = Math.min(...t.requests.map((r) => Date.parse(sinceOf(r))));
+    expect(oldest).toBeGreaterThanOrEqual(Date.UTC(2015, 0, 1) - 1000);
+  });
+});
+
+const beforeOfUrl = (u: URL) => u.searchParams.get("before");
 
 describe("MonzoClient auth handling", () => {
   it("refreshes once on 401, then retries the call", async () => {

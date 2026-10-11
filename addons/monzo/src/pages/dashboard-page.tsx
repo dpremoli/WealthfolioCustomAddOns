@@ -16,7 +16,7 @@ const PHASES: SyncPhase<SyncPhaseId>[] = [
 ];
 
 export default function DashboardPage({ ctx }: AddonPageProps) {
-  const { isSyncing, lastResult, error, progress, steps, sync } = useSync(ctx);
+  const { isSyncing, lastResult, error, progress, steps, sync } = useSync(ctx, { restore: true });
 
   const { data: status } = useQuery({
     queryKey: ["monzo_status", isSyncing],

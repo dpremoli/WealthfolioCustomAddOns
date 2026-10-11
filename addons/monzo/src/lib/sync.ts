@@ -9,15 +9,25 @@ import {
   type ExistingActivityLike,
   type ImportLedger,
   type SyncProgress,
+  type SyncStep,
 } from "@wf-addons/kit";
 import {
+  KEY_AUTHENTICATED_AT,
   KEY_CATEGORY_LABELS,
   KEY_IMPORTED_IDS,
+  KEY_LAST_RESULT,
   KEY_LAST_RUN,
   KEY_LAST_SYNC,
   KEY_MAPPING,
+  KEY_RECHECKED_90_DAYS,
 } from "../constants";
-import type { AccountMapping, MonzoTransaction, SyncPhaseId, SyncResult } from "../types";
+import type {
+  AccountMapping,
+  MonzoAccount,
+  MonzoTransaction,
+  SyncPhaseId,
+  SyncResult,
+} from "../types";
 import { MonzoAuthError, getConnectionStatus } from "./auth";
 import {
   legacyActivity,
@@ -28,7 +38,8 @@ import {
   mapTransactionToActivity,
   tallyByCategory,
 } from "./mapper";
-import { MonzoClient } from "./monzo-client";
+import { runExclusive } from "./busy";
+import { MonzoClient, isHistoryRefusal } from "./monzo-client";
 import { accountTypeIssueText, accountTypeIssues } from "./accounts";
 import { ensureMigrated } from "./migrate";
 import { monzoSpendingRules } from "./spending-rules";
@@ -50,9 +61,16 @@ const PENDING_HOLD_BACK_MS = 14 * DAY_MS;
 export const HISTORY_LIMIT_MS = 89 * DAY_MS;
 
 /**
+ * A sync this soon after the user logged in asks for the whole history. Monzo's window is 5
+ * minutes, but it may only start once the login is approved in the Monzo app, which can come
+ * well after the login this is measured from. Asking too late costs one refused request.
+ */
+const FRESH_AUTH_MS = 15 * 60 * 1000;
+
+/**
  * The `since` for an incremental sync: the watermark, but never further back than Monzo
- * allows (asking for more is refused). Undefined on a first sync, which tries for the
- * full history first (see {@link runSync}).
+ * allows (asking for more is refused). Undefined on a first sync, which asks from each
+ * account's opening date instead (see {@link runSync}).
  */
 export function syncSince(
   lastSync: string | undefined,
@@ -224,11 +242,32 @@ export function pendingHoldBack(txs: MonzoTransaction[], now: Date): string | nu
   return earliest;
 }
 
-/** Fetch -> filter -> reconcile -> import for every mapped Monzo account. */
-export async function runSync(
+/** " (back to 2026-07-14)" for a sync log line: how far back a fetch actually reached. */
+function oldestNote(txs: MonzoTransaction[]): string {
+  if (txs.length === 0) return "";
+  const oldest = txs.reduce((a, b) => (b.created < a.created ? b : a)).created;
+  return ` (back to ${oldest.slice(0, 10)})`;
+}
+
+/**
+ * Fetch -> filter -> reconcile -> import for every mapped Monzo account. Only one sync or
+ * CSV import runs at a time (see `runExclusive`); `afterwards` runs inside that exclusive
+ * section once the sync succeeded (the hook saves the dashboard's view there, so a page that
+ * sees the run finish finds it saved).
+ */
+export function runSync(
   ctx: AddonContext,
-  onProgress: SyncProgressHandler = () => {}
+  onProgress: SyncProgressHandler = () => {},
+  afterwards: (result: SyncResult) => Promise<void> = async () => {}
 ): Promise<SyncResult> {
+  return runExclusive(async () => {
+    const result = await syncAll(ctx, onProgress);
+    await afterwards(result);
+    return result;
+  });
+}
+
+async function syncAll(ctx: AddonContext, onProgress: SyncProgressHandler): Promise<SyncResult> {
   await ensureMigrated(ctx);
   const store = jsonStore(ctx.api.storage);
   const log: string[] = [];
@@ -243,13 +282,30 @@ export async function runSync(
   }
   const lastSync = (await store.get<string | null>(KEY_LAST_SYNC, null)) ?? undefined;
   const categoryLabels = await store.get<Record<string, string>>(KEY_CATEGORY_LABELS, {});
+  const authenticatedAt = Number(await ctx.api.storage.get(KEY_AUTHENTICATED_AT));
+  const rechecked = await store.get<boolean>(KEY_RECHECKED_90_DAYS, false);
   const startedAt = new Date();
-  const { since, clamped } = syncSince(lastSync, startedAt);
+  const floor = new Date(startedAt.getTime() - HISTORY_LIMIT_MS).toISOString();
+  const sinceLogin = startedAt.getTime() - authenticatedAt;
+  const justAuthenticated = sinceLogin >= 0 && sinceLogin < FRESH_AUTH_MS;
+  // Whole history: a first sync, or one right after logging in (already-imported rows
+  // reconcile away). Otherwise one catch-up sync for people who synced with an older version.
+  const fullHistory = !lastSync || justAuthenticated;
+  const recheck = !fullHistory && !rechecked;
+  const { since: watermarkSince, clamped } = syncSince(lastSync, startedAt);
+  const since = fullHistory ? undefined : recheck ? floor : watermarkSince;
   // The account holders' names: Monzo's default payment reference, not worth repeating.
   const ownNames = new Set<string>();
   if (!lastSync)
     log.push("Full sync (all history if Monzo allows it, otherwise the last 90 days).");
-  else if (clamped) {
+  else if (justAuthenticated)
+    log.push("You connected a moment ago: reading all history again (while Monzo allows it).");
+  else if (recheck) {
+    log.push(
+      "One-off re-check of the last 90 days: earlier versions could miss up to two months of " +
+        "transactions. Already imported ones are skipped."
+    );
+  } else if (clamped) {
     log.push(
       `Last synced ${lastSync}, more than 90 days ago: Monzo only shares the last 90 days now, ` +
         "so fetching from " +
@@ -295,46 +351,73 @@ export async function runSync(
   const breakdown: Record<string, number> = {};
 
   // Monzo shares all history only within 5 minutes of the user authenticating; after that,
-  // asking for more than 90 days is refused (403). A first sync tries for everything and
-  // falls back to 90 days on that refusal.
-  const floor = new Date(startedAt.getTime() - HISTORY_LIMIT_MS).toISOString();
-  let fullHistory = since === undefined;
-  const fetchAll = async (accountId: string) => {
-    if (!fullHistory) return client.getTransactions(accountId, since ?? floor);
+  // a `since` 90 or more days back is refused (403). With no `since` at all it refuses
+  // nothing and quietly returns just the last 30 days, so every request names one. A full
+  // sync asks from the account's opening date and falls back to 90 days on that refusal.
+  let askFullHistory = fullHistory;
+  const fetchAll = async (account: MonzoAccount) => {
+    const opened = Date.parse(account.created ?? "");
+    const label = `Account ${account.id.slice(0, 10)}…`;
+    if (!askFullHistory) return client.getTransactions(account.id, since ?? floor);
+    if (Number.isNaN(opened)) {
+      log.push(`${label}: Monzo gave no opening date, so it is limited to the last 90 days.`);
+      return client.getTransactions(account.id, floor);
+    }
+    // An account younger than the limit is covered by the 90 days.
+    if (opened >= Date.parse(floor)) return client.getTransactions(account.id, floor);
     try {
-      return await client.getTransactions(accountId, undefined);
+      const history = await client.getHistory(account.id, new Date(opened), startedAt);
+      if (!history.complete) {
+        const back = history.transactions[0]?.created.slice(0, 10);
+        log.push(
+          `${label}: Monzo stopped sharing history part-way, so only ${
+            back ? `back to ${back}` : "the most recent part"
+          } was fetched. CSV import covers the rest.`
+        );
+      }
+      return history.transactions;
     } catch (err) {
-      if (!(err instanceof MonzoAuthError && err.kind === "approval")) throw err;
-      fullHistory = false;
+      if (!isHistoryRefusal(err)) throw err;
+      askFullHistory = false;
       log.push(
         "Monzo refused full history (it only shares it for 5 minutes after you connect); " +
           "fetching the last 90 days instead. Use CSV import for anything older."
       );
-      return client.getTransactions(accountId, floor);
+      return client.getTransactions(account.id, floor);
     }
   };
 
-  let idx = 0;
-  for (const [monzoAccountId, wealthfolioAccountId] of entries) {
-    idx++;
+  // Fetch every account first: importing one must not eat into the time Monzo gives for the
+  // next one's full history.
+  const fetched: {
+    monzoAccountId: string;
+    wealthfolioAccountId: string;
+    transactions: MonzoTransaction[];
+  }[] = [];
+  for (const [i, [monzoAccountId, wealthfolioAccountId]] of entries.entries()) {
     onProgress({
       phase: "fetch",
       message: "Fetching transactions…",
-      current: idx,
+      current: i + 1,
       total: entries.length,
     });
+    const transactions = await fetchAll(monzoAccounts.find((a) => a.id === monzoAccountId)!);
+    fetched.push({ monzoAccountId, wealthfolioAccountId, transactions });
+  }
+
+  for (const { monzoAccountId, wealthfolioAccountId, transactions } of fetched) {
     try {
       const cleaned = await stripRefTags(ctx, wealthfolioAccountId);
       if (cleaned) log.push(`Removed the [ref:…] tag from ${cleaned} older comment(s).`);
     } catch (err) {
       log.push(`Could not tidy older comments: ${(err as Error).message}`);
     }
-    const transactions = await fetchAll(monzoAccountId);
 
     const isFlex = flexAccountIds.has(monzoAccountId);
     const eligible = transactions.filter((tx) => isEligible(tx, isFlex));
     log.push(
-      `Account ${monzoAccountId.slice(0, 10)}…: ${transactions.length} fetched, ${eligible.length} eligible.`
+      `Account ${monzoAccountId.slice(0, 10)}…: ${transactions.length} fetched${oldestNote(transactions)}, ` +
+        `${eligible.length} eligible.`
     );
     if (!isFlex) {
       const hb = pendingHoldBack(transactions, startedAt);
@@ -365,6 +448,8 @@ export async function runSync(
   const finishedAt = new Date().toISOString();
   await store.set(KEY_LAST_SYNC, watermark);
   await store.set(KEY_LAST_RUN, finishedAt);
+  // Whatever kind of sync this was, the last 90 days are now covered.
+  await store.set(KEY_RECHECKED_90_DAYS, true);
   log.push(
     `Import: ${imported} imported, ${updated} updated, ${duplicates} already present, ${skipped} skipped.`
   );
@@ -383,4 +468,40 @@ export async function runSync(
     message: `Synced ${imported} transaction${imported === 1 ? "" : "s"}.`,
   });
   return { imported, skipped, duplicates, breakdown, log, finishedAt };
+}
+
+/** What the dashboard keeps showing of the last successful sync, across reloads. */
+export interface LastSyncView {
+  result: SyncResult;
+  steps: SyncStep<SyncPhaseId>[];
+}
+
+/** Remembers the last sync's view. Best effort: a storage failure must not fail the sync. */
+export async function saveLastSyncView(ctx: AddonContext, view: LastSyncView): Promise<void> {
+  try {
+    await jsonStore(ctx.api.storage).set(KEY_LAST_RESULT, view);
+  } catch {
+    /* best effort */
+  }
+}
+
+/** The saved view, or null when there is none or what is stored is not one. */
+export async function loadLastSyncView(ctx: AddonContext): Promise<LastSyncView | null> {
+  const v = await jsonStore(ctx.api.storage).get<Partial<LastSyncView> | null>(
+    KEY_LAST_RESULT,
+    null
+  );
+  if (!v || typeof v !== "object" || !Array.isArray(v.steps)) return null;
+  if (!v.result || typeof v.result.imported !== "number") return null;
+  return v as LastSyncView;
+}
+
+/**
+ * Forgets what was synced: the watermark, so the next sync starts from the beginning again,
+ * and the last result, whose log would describe a watermark that no longer exists.
+ */
+export async function resetSyncHistory(ctx: AddonContext): Promise<void> {
+  const store = jsonStore(ctx.api.storage);
+  await store.delete(KEY_LAST_SYNC);
+  await store.delete(KEY_LAST_RESULT);
 }

@@ -1,8 +1,10 @@
 import type { AddonContext } from "@wealthfolio/addon-sdk";
 import { brokeredRequest } from "@wf-addons/kit";
 import {
+  KEY_AUTHENTICATED_AT,
   KEY_CLIENT_ID,
   KEY_EXPIRES_AT,
+  KEY_LAST_RESULT,
   KEY_OAUTH_STATE,
   KEY_REDIRECT_URL,
   LOGOUT_URL,
@@ -163,6 +165,8 @@ export async function disconnect(ctx: AddonContext): Promise<void> {
   await ctx.api.secrets.delete(SECRET_REFRESH_TOKEN);
   await ctx.api.storage.delete(KEY_EXPIRES_AT);
   await ctx.api.storage.delete(KEY_OAUTH_STATE);
+  await ctx.api.storage.delete(KEY_AUTHENTICATED_AT);
+  await ctx.api.storage.delete(KEY_LAST_RESULT);
 }
 
 export interface AuthorisationStart {
@@ -264,6 +268,8 @@ export async function completeAuthorisation(ctx: AddonContext, pasted: string): 
   // A fresh connection must not keep a refresh token from an earlier one.
   if (!tokens.refresh_token) await ctx.api.secrets.delete(SECRET_REFRESH_TOKEN);
   await storeTokens(ctx, tokens);
+  // Not in storeTokens: a refresh does not reopen Monzo's 5-minute full-history window.
+  await ctx.api.storage.set(KEY_AUTHENTICATED_AT, String(Date.now()));
   await ctx.api.storage.delete(KEY_OAUTH_STATE);
 }
 

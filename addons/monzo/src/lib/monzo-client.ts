@@ -15,6 +15,13 @@ import { isExpiring } from "./oauth";
 export const PAGE_SIZE = 100;
 /** Safety stop: 500 pages = 50,000 transactions per account. */
 const MAX_PAGES = 500;
+/**
+ * Longest range asked for in one go when reading a whole history. Monzo refuses a range of
+ * more than about a year (400 `invalid_time_range`) and asks for `since` + `before` slices.
+ */
+export const HISTORY_SLICE_MS = 180 * 24 * 60 * 60 * 1000;
+/** Monzo did not exist before this; some APIs send a zero date for "unknown". */
+const HISTORY_EARLIEST_MS = Date.UTC(2015, 0, 1);
 
 /**
  * Thin Monzo API client over the Wealthfolio network broker. The access token is never
@@ -81,14 +88,19 @@ export class MonzoClient {
   }
 
   /**
-   * Every transaction of an account since `since` (RFC 3339 time or transaction id),
-   * oldest first. Fetched `PAGE_SIZE` at a time, advancing `since` to the newest
-   * transaction of each page, so no single response approaches the broker's 2 MB cap.
+   * Every transaction of an account since `since` (RFC 3339 time or transaction id) and,
+   * when given, before `before`, oldest first. Fetched `PAGE_SIZE` at a time, advancing
+   * `since` to the newest transaction of each page, so no single response approaches the
+   * broker's 2 MB cap.
+   *
+   * Always pass `since` when syncing: without it Monzo does not return the whole history,
+   * only the last 30 days (and with no error to say so).
    */
   async getTransactions(
     accountId: string,
     since?: string,
     onPage?: (total: number) => void,
+    before?: string,
   ): Promise<MonzoTransaction[]> {
     const all: MonzoTransaction[] = [];
     const seen = new Set<string>();
@@ -97,6 +109,7 @@ export class MonzoClient {
       const url = withQuery(`${API_BASE}/transactions`, {
         account_id: accountId,
         since: cursor,
+        before,
         limit: PAGE_SIZE,
         "expand[]": "merchant",
       });
@@ -113,6 +126,68 @@ export class MonzoClient {
     }
     return all;
   }
+
+  /**
+   * Every transaction of an account from `from` (its opening date) up to `now`, read in
+   * slices of {@link HISTORY_SLICE_MS}, newest first, and returned oldest first. Monzo only
+   * allows this within 5 minutes of the user authenticating; later it answers 403 for
+   * anything 90 or more days back (or 400 for a range that is too long).
+   *
+   * If a slice is refused after another one succeeded, what was fetched is returned with
+   * `complete: false` (the history ends part-way, not at `from`); if the very first slice is
+   * refused, the error is thrown so the caller can fall back to a shorter range.
+   */
+  async getHistory(
+    accountId: string,
+    from: Date,
+    now: Date,
+  ): Promise<{ transactions: MonzoTransaction[]; complete: boolean }> {
+    const floor = Math.max(from.getTime(), HISTORY_EARLIEST_MS);
+    const all: MonzoTransaction[] = [];
+    const seen = new Set<string>();
+    let complete = true;
+    // Upper bound of the slice being read; undefined for the newest (open-ended) one, and so
+    // also while no slice has succeeded yet.
+    let upper: number | undefined;
+    let end = now.getTime();
+    while (end > floor) {
+      const lower = Math.max(floor, end - HISTORY_SLICE_MS);
+      try {
+        // `since` and `before` are exclusive, so each slice starts a second early: a
+        // transaction on the boundary is in the slice above if not in this one.
+        const slice = await this.getTransactions(
+          accountId,
+          new Date(lower - 1000).toISOString(),
+          undefined,
+          upper === undefined ? undefined : new Date(upper).toISOString(),
+        );
+        for (const t of slice) {
+          if (seen.has(t.id)) continue;
+          seen.add(t.id);
+          all.push(t);
+        }
+      } catch (err) {
+        if (!isHistoryRefusal(err) || upper === undefined) throw err;
+        complete = false;
+        break;
+      }
+      upper = lower;
+      end = lower;
+    }
+    all.sort((a, b) => (a.created < b.created ? -1 : a.created > b.created ? 1 : 0));
+    return { transactions: all, complete };
+  }
+}
+
+/**
+ * Monzo refusing to share a long range: 403 (older than 90 days, outside the 5 minutes after
+ * logging in) or 400 (a range of more than about a year).
+ */
+export function isHistoryRefusal(err: unknown): boolean {
+  return (
+    (err instanceof MonzoAuthError && err.kind === "approval") ||
+    (err instanceof HttpError && err.status === 400)
+  );
 }
 
 /** The most recently created transaction (Monzo lists oldest first; don't rely on it). */

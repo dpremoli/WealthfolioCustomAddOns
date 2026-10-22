@@ -215,25 +215,22 @@ opening amount.
 
 ### Upgrading to 2.8.0 (older rules, wrong categories on deposits and transfers)
 
-Rules saved under a different key than the current ones (an older version's, or any other
-"Monzo:" rule the add-on saved) keep applying next to the current outflow-only rules, and an
-older rule with no activity type and a higher priority outranks them, so deposits and transfers
-can still get spending categories (a salary under Education, a Flex repayment under Groceries).
-From 2.8.0 every sync removes the add-on's own rules that it did not just save, and the log says
-so: `Spending: … N older rules removed`. It reads the rules back afterwards, so if some could not
-be removed the log says `could not remove N older rules (names): delete them in Settings →
-Spending → Rules` and you delete those by hand. (The add-on can only see and remove rules **it**
-saved; a "Monzo: …" rule you or another tool created in Wealthfolio is not visible to it.) The
-upgrade asks you to approve two more Spending permissions, `getRules` and `deleteRule`. The
-rules are only saved when Wealthfolio is opened over HTTPS or on localhost.
+Rules the add-on saved under a key the current ones no longer use would keep applying next to
+the current outflow-only rules, so deposits and transfers could still get spending categories.
+From 2.8.0 every sync removes the add-on's own rules that it did not just save (Wealthfolio names
+them `addon:monzo-addon:<key>`; rules created elsewhere, for instance by hand or in the database,
+are never touched), and the log says so: `Spending: … N older rules removed`. The upgrade asks you
+to approve two more Spending permissions, `getRules` and `deleteRule`. Rules are only saved when
+Wealthfolio is opened over HTTPS or on localhost. A "Monzo: …" rule you created yourself that
+outranks the add-on's rules (a higher priority, or no activity type) will keep filing deposits and
+transfers as spending: delete or restrict it in Settings → Spending → Rules.
 
 **Rows that already have a wrong category stay as they are.** Rules only fill in uncategorised
 rows, and the SDK gives add-ons no way to clear a category, so the add-on cannot undo earlier
-tags. After the older rules are gone, fix them once in Wealthfolio's Spending → Activities page:
-filter by type (Deposit, Transfer in/out), select the rows that carry a spending category and clear
-or change it in bulk. Salary deposits belong under Other Income (the add-on's Income rule files
-new ones there once the older rules are gone); transfers and Flex repayments are meant to have no
-category.
+tags. Fix them once in Wealthfolio's Spending → Activities page: filter by type (Deposit,
+Transfer in/out), select the rows that carry a spending category and clear or change it in bulk.
+Salary deposits belong under Other Income (the add-on's Income rule files new ones there);
+transfers and Flex repayments are meant to have no category.
 
 ### Upgrading to 2.7.0 (savings moves and the Cash ISA)
 

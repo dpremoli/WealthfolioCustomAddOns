@@ -591,22 +591,23 @@ describe("runSync guards", () => {
 });
 
 describe("runSync spending rules", () => {
-  /** A Spending API holding the older rules of an earlier version (no activity type, priority 25). */
-  function withSpending(t: ReturnType<typeof setup>, oldRules: string[]) {
-    const rules = oldRules.map((name, i) => ({ id: `old-${i}`, name, priority: 25 }));
+  const ID = (key: string) => `addon:monzo-addon:${key}`;
+  /** A Spending API holding rules; the host names the add-on's rules `addon:monzo-addon:<key>`. */
+  function withSpending(t: ReturnType<typeof setup>, existing: { id: string; name: string }[]) {
+    const rules = existing.map((r) => ({ ...r, priority: 0 }));
     const spending = {
       getCategories: async () => [
         { kind: "expense", taxonomyId: "t", categoryId: "c-groc", key: "groceries", name: "Groceries", path: "Groceries" },
         { kind: "income", taxonomyId: "i", categoryId: "c-inc", key: "income_other", name: "Other Income", path: "Other Income" },
       ],
-      saveRule: vi.fn(async (r: { ruleKey: string; name: string; activityType?: string }) => {
-        let hit = rules.find((x) => x.id === `id-${r.ruleKey}`);
-        if (!hit) rules.push((hit = { id: `id-${r.ruleKey}`, name: r.name, priority: 0 }));
+      saveRule: vi.fn(async (r: { ruleKey: string; name: string }) => {
+        let hit = rules.find((x) => x.id === ID(r.ruleKey));
+        if (!hit) rules.push((hit = { id: ID(r.ruleKey), name: r.name, priority: 0 }));
         return hit;
       }),
       getRules: async () => [...rules],
       deleteRule: vi.fn(async (key: string) => {
-        const i = rules.findIndex((x) => x.id === key);
+        const i = rules.findIndex((x) => x.id === ID(key));
         if (i >= 0) rules.splice(i, 1);
       }),
       rerunRules: async () => 0,
@@ -614,33 +615,37 @@ describe("runSync spending rules", () => {
     (t.ctx.api as unknown as { spending: unknown }).spending = spending;
     return { rules, spending };
   }
+  const groceries = () => [tx({ amount: -350, category: "groceries", description: "Tesco" })];
 
-  it("removes the older unrestricted Monzo rules, so only the outflow-only set remains", async () => {
-    const t = setup([tx({ amount: -350, category: "groceries", description: "Tesco" })]);
-    const s = withSpending(t, ["Monzo: Groceries", "Monzo: Education", "Monzo: Finances"]);
+  it("removes the add-on's own older rules, so only the current set remains", async () => {
+    const t = setup(groceries());
+    const s = withSpending(t, [
+      { id: ID("monzo-old-groceries"), name: "Monzo: Groceries" },
+      { id: ID("monzo-finances"), name: "Monzo: Finances" },
+    ]);
     const result = await runSync(t.ctx);
-    expect(s.spending.deleteRule.mock.calls.map((c) => c[0]).sort()).toEqual(["old-0", "old-1", "old-2"]);
-    expect(s.rules.some((r) => r.id.startsWith("old-"))).toBe(false);
-    expect(result.log!.join("\n")).toMatch(/3 older rules removed/);
+    expect(s.spending.deleteRule.mock.calls.map((c) => c[0]).sort()).toEqual(["monzo-finances", "monzo-old-groceries"]);
+    expect(s.rules.every((r) => ["monzo-groceries", "monzo-groceries-refund", "monzo-income"].includes(r.id.replace("addon:monzo-addon:", "")))).toBe(true);
+    expect(result.log!.join("\n")).toMatch(/2 older rules removed/);
   });
 
-  it("does not remove them again, or add duplicates, on the next sync", async () => {
-    const t = setup([tx({ amount: -350, category: "groceries", description: "Tesco" })]);
-    const s = withSpending(t, ["Monzo: Groceries"]);
+  it("leaves rules that were created elsewhere alone", async () => {
+    const t = setup(groceries());
+    const s = withSpending(t, [{ id: "monzo_fb_groceries", name: "Monzo: Groceries" }]);
+    await runSync(t.ctx);
+    expect(s.spending.deleteRule).not.toHaveBeenCalled();
+    expect(s.rules.some((r) => r.id === "monzo_fb_groceries")).toBe(true);
+  });
+
+  it("does not remove anything again, or add duplicates, on the next sync", async () => {
+    const t = setup(groceries());
+    const s = withSpending(t, [{ id: ID("monzo-old-groceries"), name: "Monzo: Groceries" }]);
     await runSync(t.ctx);
     const count = s.rules.length;
     s.spending.deleteRule.mockClear();
     await runSync(t.ctx);
     expect(s.spending.deleteRule).not.toHaveBeenCalled();
     expect(s.rules).toHaveLength(count);
-  });
-
-  it("says so in the log when an older rule cannot be removed", async () => {
-    const t = setup([tx({ amount: -350, category: "groceries", description: "Tesco" })]);
-    const s = withSpending(t, ["Monzo: Groceries"]);
-    s.spending.deleteRule.mockImplementation(async () => {});
-    const result = await runSync(t.ctx);
-    expect(result.log!.join("\n")).toMatch(/could not remove 1 older rule \(Monzo: Groceries\)/);
   });
 });
 

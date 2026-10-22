@@ -15,6 +15,7 @@ import {
   type SyncStep,
 } from "@wf-addons/kit";
 import {
+  ADDON_ID,
   KEY_AUTHENTICATED_AT,
   KEY_CATEGORY_LABELS,
   KEY_IMPORTED_IDS,
@@ -519,7 +520,9 @@ async function syncAll(ctx: AddonContext, onProgress: SyncProgressHandler): Prom
   // label in each comment). Best effort: never fails the sync.
   onProgress({ phase: "import", message: "Updating spending categories…" });
   const note = spendingRulesNote(
-    await syncSpendingRules(ctx, monzoSpendingRules(categoryLabels), { pruneStale: true })
+    await syncSpendingRules(ctx, monzoSpendingRules(categoryLabels), {
+      pruneStale: { addonId: ADDON_ID },
+    })
   );
   if (note) log.push(note);
   if (watermark !== startedAt.toISOString()) {

@@ -68,21 +68,21 @@ describe("syncSpendingRules", () => {
 });
 
 describe("syncSpendingRules pruneStale", () => {
-  const rule = (id: string, name: string) => ({ id, name, pattern: "x", matchType: "regex", kind: "expense", categoryId: "c", priority: 25 });
+  // The host names a rule `addon:<addon id>:<ruleKey>` and deletes it by that key.
+  const ID = (key: string) => `addon:test-addon:${key}`;
+  const rule = (id: string, name: string) => ({ id, name, pattern: "x", matchType: "regex", kind: "expense", categoryId: "c", priority: 0 });
 
-  /** A host holding `rules`; saveRule adds (by ruleKey) and deleteRule removes by key or id. */
-  function host(initial: ReturnType<typeof rule>[], opts: { deleteWorks?: boolean } = {}) {
+  function host(initial: ReturnType<typeof rule>[]) {
     const rules = [...initial];
     const deleteRule = vi.fn(async (key: string) => {
-      if (opts.deleteWorks === false) return;
-      const i = rules.findIndex((r) => r.id === key);
+      const i = rules.findIndex((r) => r.id === ID(key));
       if (i >= 0) rules.splice(i, 1);
     });
     const spending = {
       getCategories: async () => CATEGORIES,
       saveRule: vi.fn(async (r: { ruleKey: string; name: string }) => {
-        let hit = rules.find((x) => x.id === `id-${r.ruleKey}`);
-        if (!hit) rules.push((hit = rule(`id-${r.ruleKey}`, r.name)));
+        let hit = rules.find((x) => x.id === ID(r.ruleKey));
+        if (!hit) rules.push((hit = rule(ID(r.ruleKey), r.name)));
         return hit;
       }),
       getRules: vi.fn(async () => [...rules]),
@@ -92,40 +92,53 @@ describe("syncSpendingRules pruneStale", () => {
     return { ctx: { api: { spending } } as unknown as AddonContext, rules, deleteRule, spending };
   }
   const spec = { ruleKey: "g", name: "Monzo: Groceries", pattern: "x", kind: "expense" as const, categories: ["groceries"] };
+  const PRUNE = { pruneStale: { addonId: "test-addon" } };
 
-  it("removes the add-on's older rules that this run did not save, and never the ones it just saved", async () => {
-    const h = host([rule("old-1", "Monzo: Groceries"), rule("old-2", "Monzo: Finances")]);
-    const out = await syncSpendingRules(h.ctx, [spec], { pruneStale: true });
+  it("removes the add-on's own rules that this run did not save, by key, and never the ones it just saved", async () => {
+    const h = host([rule(ID("old-1"), "Monzo: Groceries"), rule(ID("old-2"), "Monzo: Finances")]);
+    const out = await syncSpendingRules(h.ctx, [spec], PRUNE);
     expect(h.deleteRule.mock.calls.map((c) => c[0]).sort()).toEqual(["old-1", "old-2"]);
-    expect(h.rules.map((r) => r.id)).toEqual(["id-g"]);
-    expect(out).toMatchObject({ saved: 1, removed: 2, staleKept: [] });
+    expect(h.rules.map((r) => r.id)).toEqual([ID("g")]);
+    expect(out).toMatchObject({ saved: 1, removed: 2 });
+    expect(spendingRulesNote(out)).toMatch(/2 older rules removed/);
   });
 
-  it("reports the rules it could not remove instead of claiming it did", async () => {
-    const h = host([rule("old-1", "Monzo: Groceries")], { deleteWorks: false });
-    const out = await syncSpendingRules(h.ctx, [spec], { pruneStale: true });
-    expect(out).toMatchObject({ removed: 0, staleKept: ["Monzo: Groceries"] });
-    expect(spendingRulesNote(out)).toMatch(/could not remove.*Monzo: Groceries.*Settings/s);
+  it("leaves a rule that is not this add-on's alone", async () => {
+    const h = host([rule("monzo_fb_groceries", "Monzo: Groceries"), rule("addon:other-addon:x", "Other")]);
+    const out = await syncSpendingRules(h.ctx, [spec], PRUNE);
+    expect(h.deleteRule).not.toHaveBeenCalled();
+    expect(out.removed).toBe(0);
+    expect(h.rules.map((r) => r.id)).toEqual(["monzo_fb_groceries", "addon:other-addon:x", ID("g")]);
   });
 
   it("is idempotent: a second run saves in place, removes nothing and adds no duplicates", async () => {
-    const h = host([rule("old-1", "Monzo: Groceries")]);
-    await syncSpendingRules(h.ctx, [spec], { pruneStale: true });
-    const again = await syncSpendingRules(h.ctx, [spec], { pruneStale: true });
-    expect(again).toMatchObject({ removed: 0, staleKept: [] });
+    const h = host([rule(ID("old-1"), "Monzo: Groceries")]);
+    await syncSpendingRules(h.ctx, [spec], PRUNE);
+    const again = await syncSpendingRules(h.ctx, [spec], PRUNE);
+    expect(again.removed).toBe(0);
     expect(h.rules).toHaveLength(1);
   });
 
-  it("only prunes when asked, and a refused getRules/deleteRule never fails the sync", async () => {
-    const h = host([rule("old-1", "Monzo: Groceries")]);
-    await syncSpendingRules(h.ctx, [spec]);
+  it("only prunes when asked", async () => {
+    const h = host([rule(ID("old-1"), "Monzo: Groceries")]);
+    const out = await syncSpendingRules(h.ctx, [spec]);
     expect(h.deleteRule).not.toHaveBeenCalled();
+    expect(out.removed).toBeUndefined();
+  });
 
+  it("a refused lookup or delete never fails the sync, and is reported", async () => {
+    const h = host([rule(ID("old-1"), "Monzo: Groceries")]);
     h.spending.getRules.mockRejectedValue(new Error("permission denied"));
-    const out = await syncSpendingRules(h.ctx, [spec], { pruneStale: true });
-    expect(out.error).toBeUndefined();
+    const refused = await syncSpendingRules(h.ctx, [spec], PRUNE);
+    expect(refused.error).toBeUndefined();
+    expect(refused.saved).toBe(1);
+    expect(refused.pruneError).toBe("permission denied");
+    expect(spendingRulesNote(refused)).toMatch(/older rules.*permission denied/s);
+
+    const h2 = host([rule(ID("old-1"), "Monzo: Groceries")]);
+    h2.deleteRule.mockRejectedValue(new Error("nope"));
+    const out = await syncSpendingRules(h2.ctx, [spec], PRUNE);
     expect(out.saved).toBe(1);
-    expect(out.pruneError).toBe("permission denied");
-    expect(spendingRulesNote(out)).toMatch(/older rules.*permission denied/s);
+    expect(out.pruneError).toBe("nope");
   });
 });

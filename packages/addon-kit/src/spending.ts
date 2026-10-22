@@ -31,9 +31,7 @@ export interface SpendingRulesOutcome {
   error?: string;
   /** With `pruneStale`: older rules of this add-on that were removed. */
   removed?: number;
-  /** With `pruneStale`: names of older rules that are still there after trying to remove them. */
-  staleKept?: string[];
-  /** With `pruneStale`: why the older rules could not be looked up. */
+  /** With `pruneStale`: why the older rules could not be looked up or removed. */
   pruneError?: string;
 }
 
@@ -74,12 +72,13 @@ export async function syncSpendingRules(
   specs: SpendingRuleSpec[],
   opts: {
     /**
-     * Also remove the add-on's own older rules that this run did not save (found through
-     * `getRules()`, which lists only the add-on's rules): rules from earlier versions, saved under
-     * keys the current ones no longer use, would otherwise keep applying. Needs the `getRules`
-     * and `deleteRule` permissions. Checked afterwards, so the outcome says what is really gone.
+     * Also remove the add-on's own rules that this run did not save: rules from earlier versions,
+     * saved under keys the current ones no longer use, would otherwise keep applying. The host
+     * names a rule `addon:<addon id>:<ruleKey>`, so only rules with the given `addonId` prefix are
+     * touched (never one created elsewhere) and the key to delete is read off the id. Needs the
+     * `getRules` and `deleteRule` permissions.
      */
-    pruneStale?: boolean;
+    pruneStale?: { addonId: string };
   } = {},
 ): Promise<SpendingRulesOutcome> {
   const out: SpendingRulesOutcome = { saved: 0, unmatched: [], categorised: 0 };
@@ -107,7 +106,7 @@ export async function syncSpendingRules(
       savedIds.add(rule.id);
       out.saved++;
     }
-    if (opts.pruneStale) await pruneStaleRules(spending, savedIds, out);
+    if (opts.pruneStale) await pruneStaleRules(spending, `addon:${opts.pruneStale.addonId}:`, savedIds, out);
     out.categorised = await spending.rerunRules(true);
   } catch (err) {
     out.error = describeSpendingError(err instanceof Error ? err.message : String(err));
@@ -116,21 +115,22 @@ export async function syncSpendingRules(
 }
 
 /**
- * Deletes the add-on's rules that are not in `keep` (ids), then reads the rules again to see which
- * are really gone. The host deletes by the key a rule was saved under, which `getRules()` does not
- * give back, so the rule's id is what is tried; whatever remains is reported, never assumed gone.
+ * Deletes the rules whose id starts with `prefix` (this add-on's: `addon:<addon id>:`) and is not
+ * in `keep`, by the key that follows the prefix.
  */
 async function pruneStaleRules(
   spending: NonNullable<AddonContext["api"]["spending"]>,
+  prefix: string,
   keep: ReadonlySet<string>,
   out: SpendingRulesOutcome,
 ): Promise<void> {
+  out.removed = 0;
   try {
-    const stale = (await spending.getRules()).filter((r) => !keep.has(r.id));
-    for (const r of stale) await spending.deleteRule(r.id).catch(() => {});
-    const left = new Set((await spending.getRules()).map((r) => r.id));
-    out.removed = stale.filter((r) => !left.has(r.id)).length;
-    out.staleKept = stale.filter((r) => left.has(r.id)).map((r) => r.name);
+    const stale = (await spending.getRules()).filter((r) => r.id.startsWith(prefix) && !keep.has(r.id));
+    for (const r of stale) {
+      await spending.deleteRule(r.id.slice(prefix.length));
+      out.removed++;
+    }
   } catch (err) {
     out.pruneError = err instanceof Error ? err.message : String(err);
   }
@@ -158,12 +158,6 @@ export function spendingRulesNote(o: SpendingRulesOutcome): string | null {
   if (o.categorised) parts.push(`${o.categorised} activit${o.categorised === 1 ? "y" : "ies"} categorised`);
   if (o.unmatched.length) parts.push(`no matching Wealthfolio category for: ${o.unmatched.join(", ")}`);
   if (o.removed) parts.push(`${o.removed} older rule${o.removed === 1 ? "" : "s"} removed`);
-  if (o.staleKept?.length) {
-    parts.push(
-      `could not remove ${o.staleKept.length} older rule${o.staleKept.length === 1 ? "" : "s"} ` +
-        `(${o.staleKept.join(", ")}): delete them in Settings → Spending → Rules`,
-    );
-  }
-  if (o.pruneError) parts.push(`could not check for older rules (${o.pruneError})`);
+  if (o.pruneError) parts.push(`could not remove older rules (${o.pruneError})`);
   return `Spending: ${parts.join("; ")}.`;
 }

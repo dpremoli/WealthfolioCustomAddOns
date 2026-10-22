@@ -166,6 +166,32 @@ export function ledgerAccountId(entry: string): string {
 }
 
 /**
+ * The account rows that `ids` became, found through the ledger (id → content hash of the row
+ * as imported). An id the ledger holds for another account, or whose row has since been
+ * edited or deleted, is left out. Rows with identical content go to different ids, so two
+ * identical imports are never resolved to the same row.
+ */
+export function locateLedgerRows<E extends ExistingActivityLike>(
+  existing: E[],
+  ledger: ImportLedger,
+  accountId: string,
+  ids: string[],
+): Map<string, E> {
+  const pool = new Map<string, E[]>();
+  for (const e of existing) {
+    const v = ledgerValue(accountId, e);
+    pool.set(v, [...(pool.get(v) ?? []), e]);
+  }
+  const found = new Map<string, E>();
+  for (const id of ids) {
+    const v = ledger[id];
+    const row = v?.startsWith(`${accountId}:`) ? pool.get(v)?.shift() : undefined;
+    if (row) found.set(id, row);
+  }
+  return found;
+}
+
+/**
  * {@link selectNewActivities} for rows that carry a stable source id (`ActivityImport.id`).
  *
  * - A row whose id is in the ledger for this account (or in a legacy `[ref:…]` comment tag)

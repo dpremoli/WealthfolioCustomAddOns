@@ -27,12 +27,39 @@ describe("monzoSpendingRules", () => {
     expect(new RegExp(r.pattern).test("Pizza Place | Dining (out) [ref:tx_1]")).toBe(true);
   });
 
-  it("files spending (and refunds of it) as expense, income deposits as income", () => {
+  it("files spending as expense on withdrawals only, and refunds of it on credits only", () => {
     const rules = monzoSpendingRules({});
-    const groceries = rules.find((r) => r.ruleKey === "monzo-groceries")!;
-    expect(groceries).toMatchObject({ kind: "expense", priority: 0 });
-    expect(groceries.activityType).toBeUndefined(); // refunds are CREDITs
-    expect(rules.find((r) => r.ruleKey === "monzo-income")).toMatchObject({ kind: "income", activityType: "DEPOSIT" });
+    expect(rules.find((r) => r.ruleKey === "monzo-groceries")).toMatchObject({
+      kind: "expense",
+      priority: 0,
+      activityType: "WITHDRAWAL",
+    });
+    expect(rules.find((r) => r.ruleKey === "monzo-groceries-refund")).toMatchObject({
+      kind: "expense",
+      name: "Monzo: Groceries (refunds)",
+      pattern: rules.find((r) => r.ruleKey === "monzo-groceries")!.pattern,
+      categories: rules.find((r) => r.ruleKey === "monzo-groceries")!.categories,
+      activityType: "CREDIT",
+    });
+  });
+
+  it("never lets a spending rule match income or transfers", () => {
+    const rules = monzoSpendingRules({});
+    for (const r of rules.filter((x) => x.kind === "expense")) {
+      expect(["WITHDRAWAL", "CREDIT"]).toContain(r.activityType);
+    }
+    // "General" credits are deposits, not refunds, so General has no refund rule.
+    expect(rules.some((r) => r.ruleKey === "monzo-general-refund")).toBe(false);
+    expect(rules.find((r) => r.ruleKey === "monzo-general")!.activityType).toBe("WITHDRAWAL");
+  });
+
+  it("files Income deposits as income, above Wealthfolio's merchant presets", () => {
+    const income = monzoSpendingRules({}).find((r) => r.ruleKey === "monzo-income")!;
+    expect(income).toMatchObject({ kind: "income", activityType: "DEPOSIT" });
+    // The presets (priority 80) match merchant names such as "University of …", which would
+    // otherwise file a salary under Education.
+    expect(income.priority).toBeGreaterThan(80);
+    expect(new RegExp(income.pattern).test("University of Sheffield | Income")).toBe(true);
   });
 
   it("targets Wealthfolio's own category keys", () => {

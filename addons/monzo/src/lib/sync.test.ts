@@ -594,6 +594,11 @@ describe("runSync guards", () => {
 describe("isEligible / normaliseLegacyCash", () => {
   it("treats a Flex repayment as ineligible but a Flex purchase as eligible", () => {
     expect(isEligible(tx({ category: "transfers", description: "Flex" }), false)).toBe(false);
+    // ... unless the Flex account is tracked, when the repayment becomes a transfer pair.
+    expect(isEligible(tx({ category: "transfers", description: "Flex", amount: -5000 }), false, true)).toBe(true);
+    // A credit from Flex is never taken as a repayment: the add-on writes that side itself.
+    expect(isEligible(tx({ category: "transfers", description: "Flex", amount: 5000 }), false, true)).toBe(false);
+    expect(isEligible(tx({ category: "transfers", description: "Flex", amount: -5000 }), true, true)).toBe(false);
     expect(isEligible(tx({ category: "shopping", settled: "" }), true)).toBe(true);
     expect(isEligible(tx({ category: "shopping", settled: "" }), false)).toBe(false);
   });
@@ -803,5 +808,123 @@ describe("one sync or import at a time", () => {
     t.storage.set(KEY_MAPPING, JSON.stringify({ [MONZO_ACC]: WF_ACC }));
     expect((await runSync(t.ctx)).imported).toBe(1);
     expect(isBusy()).toBe(false);
+  });
+});
+
+describe("runSync Flex transfers", () => {
+  const CUR = "acc_cur";
+  const FLEX = "acc_flex";
+
+  /** A current account and a Flex account, each mapped to its own Wealthfolio account. */
+  function setupBoth(current: MonzoTransaction[], flex: MonzoTransaction[], mapFlex = true) {
+    const t = makeCtx({
+      wfAccounts: [
+        { id: "wf-cur", name: "Monzo Current" },
+        { id: "wf-flex", name: "Monzo Flex" },
+      ],
+      handler: (req) => {
+        const u = new URL(req.url);
+        if (u.pathname === "/accounts") {
+          return json(200, {
+            accounts: [
+              { id: CUR, type: "uk_retail" },
+              { id: FLEX, type: "uk_monzo_flex" },
+            ],
+          });
+        }
+        return json(200, { transactions: u.searchParams.get("account_id") === FLEX ? flex : current });
+      },
+    });
+    t.secrets.set(SECRET_ACCESS_TOKEN, "acc");
+    t.storage.set(KEY_EXPIRES_AT, String(Date.now() + 3_600_000));
+    t.storage.set(
+      KEY_MAPPING,
+      JSON.stringify(mapFlex ? { [CUR]: "wf-cur", [FLEX]: "wf-flex" } : { [CUR]: "wf-cur" }),
+    );
+    return t;
+  }
+
+  const repayment = () => tx({ category: "transfers", description: "Flex", amount: -5000 });
+  const types = (t: ReturnType<typeof makeCtx>, acc: string) =>
+    (t.activities.get(acc) ?? []).map((r) => [r.activityType, r.amount]);
+
+  it("repays Flex: TRANSFER_OUT on the current account, matching TRANSFER_IN on Flex, linked", async () => {
+    const t = setupBoth(
+      [tx({ amount: -350 }), repayment()],
+      [tx({ amount: -2500, settled: "", description: "Argos", category: "shopping" })],
+    );
+    const result = await runSync(t.ctx);
+    expect(result.imported).toBe(4);
+    expect(types(t, "wf-cur")).toEqual([["WITHDRAWAL", "3.5"], ["TRANSFER_OUT", "50"]]);
+    expect(types(t, "wf-flex")).toEqual([["WITHDRAWAL", "25"], ["TRANSFER_IN", "50"]]);
+    const outRow = t.activities.get("wf-cur")![1].id;
+    const inRow = t.activities.get("wf-flex")![1].id;
+    expect(t.links).toEqual([[outRow, inRow]]);
+    expect(result.log!.join("\n")).toMatch(/Flex transfers: 1 linked/);
+  });
+
+  it("creates no duplicates when synced again, and does not link twice", async () => {
+    const t = setupBoth([repayment()], []);
+    await runSync(t.ctx);
+    const again = await runSync(t.ctx);
+    expect(again.imported).toBe(0);
+    expect(t.activities.get("wf-cur")).toHaveLength(1);
+    expect(t.activities.get("wf-flex")).toHaveLength(1);
+    expect(t.links).toHaveLength(1);
+  });
+
+  it("does not duplicate a repayment that also arrives by CSV", async () => {
+    const r = repayment();
+    const t = setupBoth([r], []);
+    await runSync(t.ctx);
+    const outcomes = await importCsvFiles(
+      t.ctx,
+      [{ name: "current.csv", accountId: "wf-cur", transactions: [r] }],
+      {},
+      () => {},
+      { flexAccountId: "wf-flex" },
+    );
+    expect(outcomes[0]).toMatchObject({ imported: 0, duplicates: 1 });
+    expect(t.activities.get("wf-cur")).toHaveLength(1);
+    expect(t.activities.get("wf-flex")).toHaveLength(1);
+  });
+
+  it("turns both legs of a refunded Flex purchase into one linked transfer", async () => {
+    const base = { description: "Refunded (Flex)", category: "shopping" };
+    const t = setupBoth(
+      [tx({ ...base, amount: 1999 })],
+      [tx({ ...base, amount: -1999, settled: "" })],
+    );
+    await runSync(t.ctx);
+    expect(types(t, "wf-cur")).toEqual([["TRANSFER_IN", "19.99"]]);
+    expect(types(t, "wf-flex")).toEqual([["TRANSFER_OUT", "19.99"]]);
+    expect(t.links).toEqual([[t.activities.get("wf-flex")![0].id, t.activities.get("wf-cur")![0].id]]);
+  });
+
+  it("converts refund rows an earlier version imported as a withdrawal and a refund credit", async () => {
+    const base = { description: "Refunded (Flex)", category: "shopping" };
+    const flexLeg = tx({ ...base, amount: -1999, settled: "" });
+    const curLeg = tx({ ...base, amount: 1999 });
+    const t = setupBoth([curLeg], [flexLeg]);
+    // What 2.4.0 wrote: a WITHDRAWAL on Flex and a CREDIT/REFUND on the current account.
+    const old = (id: string, acc: string, a: MonzoTransaction, type: string) => ({
+      ...mapTransactionToActivity(a, acc),
+      activityType: type as never,
+      id,
+    });
+    await importNew(t.ctx, "wf-flex", [old(flexLeg.id, "wf-flex", flexLeg, "WITHDRAWAL")]);
+    await importNew(t.ctx, "wf-cur", [old(curLeg.id, "wf-cur", curLeg, "CREDIT")]);
+    await runSync(t.ctx);
+    expect(t.activities.get("wf-flex")).toHaveLength(1);
+    expect(t.activities.get("wf-cur")).toHaveLength(1);
+    expect(t.links).toHaveLength(1);
+  });
+
+  it("keeps skipping the repayment when no Flex account is mapped", async () => {
+    const t = setupBoth([tx({ amount: -350 }), repayment()], [], false);
+    const result = await runSync(t.ctx);
+    expect(result.imported).toBe(1);
+    expect(types(t, "wf-cur")).toEqual([["WITHDRAWAL", "3.5"]]);
+    expect(result.log!.join("\n")).toMatch(/Flex repayment.*not imported.*no Flex account/i);
   });
 });

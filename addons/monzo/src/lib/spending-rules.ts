@@ -46,23 +46,46 @@ function labelPattern(label: string): string {
 }
 
 /**
- * Categorisation rules for Monzo activities, using the user's category labels. Spending rules
- * match any activity type, so a refund (a `CREDIT`) lands in the same category and reduces
- * that spending. They sit below Wealthfolio's own merchant presets (priority 80), which are
- * more specific; "General" is only a last resort.
+ * Wealthfolio's own merchant presets run at this priority (so their category wins over a
+ * Monzo one for the same activity), and match on merchant names such as "University of …".
+ */
+const PRESET_PRIORITY = 80;
+
+/**
+ * Categorisation rules for Monzo activities, using the user's category labels.
+ *
+ * Spending rules are restricted by activity type, so they never touch income or transfers
+ * (an unrestricted rule filed salaries and friends' repayments under spending categories):
+ * one rule per category for `WITHDRAWAL`, and one for `CREDIT` so a refund lands in the same
+ * category and reduces that spending. They sit below the presets, which are more specific;
+ * "General" is only a last resort, and has no refund rule because a General credit is a
+ * deposit, not a refund (see `isRefund`). Monzo's "Income" deposits go to the income
+ * taxonomy, above the presets, so a salary paid by "University of …" is not filed as
+ * Education.
  */
 export function monzoSpendingRules(categoryLabels: Record<string, string>): SpendingRuleSpec[] {
-  const rules: SpendingRuleSpec[] = Object.entries(SPENDING_CATEGORY_CANDIDATES).map(([cat, categories]) => {
+  const rules: SpendingRuleSpec[] = Object.entries(SPENDING_CATEGORY_CANDIDATES).flatMap(([cat, categories]) => {
     const label = resolveCategory(cat, categoryLabels);
-    return {
+    const spending: SpendingRuleSpec = {
       ruleKey: `monzo-${cat}`,
       name: `Monzo: ${label}`,
       pattern: labelPattern(label),
       matchType: "regex",
       kind: "expense",
       categories,
+      activityType: "WITHDRAWAL" as ActivityType,
       priority: cat === "general" ? -10 : 0,
     };
+    if (cat === "general") return [spending];
+    return [
+      spending,
+      {
+        ...spending,
+        ruleKey: `monzo-${cat}-refund`,
+        name: `Monzo: ${label} (refunds)`,
+        activityType: "CREDIT" as ActivityType,
+      },
+    ];
   });
   const income = resolveCategory("income", categoryLabels);
   rules.push({
@@ -73,6 +96,7 @@ export function monzoSpendingRules(categoryLabels: Record<string, string>): Spen
     kind: "income",
     categories: INCOME_CANDIDATES,
     activityType: "DEPOSIT" as ActivityType,
+    priority: PRESET_PRIORITY + 10,
   });
   return rules;
 }

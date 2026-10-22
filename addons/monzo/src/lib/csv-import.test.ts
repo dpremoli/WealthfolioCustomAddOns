@@ -18,14 +18,28 @@ describe("filterCsvTransactions", () => {
     tx({ category: "savings", description: "Investments" }),
     tx({ category: "transfers", description: "Monzo Flex", amount: -5000 }),
     tx({ metadata: { pot_id: "pot_1" }, description: "Holiday" }),
+    tx({ category: "shopping", description: "Refunded (Flex)", amount: 1999 }),
   ];
 
-  it("always drops Flex repayments and pot transfers; transfers and savings only when asked", () => {
-    expect(filterCsvTransactions(rows, true).map((t) => t.description)).toEqual(["Coffee"]);
-    expect(filterCsvTransactions(rows, false).map((t) => t.description)).toEqual([
+  it("always drops pot transfers; transfers and savings only when asked", () => {
+    expect(filterCsvTransactions(rows, true, true).map((t) => t.description)).toEqual([
+      "Coffee",
+      "Monzo Flex",
+      "Refunded (Flex)",
+    ]);
+    expect(filterCsvTransactions(rows, false, true).map((t) => t.description)).toEqual([
       "Coffee",
       "Bank transfer",
       "Investments",
+      "Monzo Flex",
+      "Refunded (Flex)",
+    ]);
+  });
+
+  it("drops Flex repayments (but keeps the refund legs) when there is no Flex account to credit", () => {
+    expect(filterCsvTransactions(rows, true, false).map((t) => t.description)).toEqual([
+      "Coffee",
+      "Refunded (Flex)",
     ]);
   });
 });
@@ -149,5 +163,49 @@ describe("importCsvFiles", () => {
     };
     expect((await importCsvFiles(t.ctx, [{ name: "b.csv", accountId: "wf-2", transactions: [tx()] }]))[0].error).toBe("boom");
     expect(isBusy()).toBe(false);
+  });
+});
+
+describe("importCsvFiles Flex transfers", () => {
+  const repayment = () => tx({ category: "transfers", description: "Monzo Flex", amount: -5000 });
+
+  it("imports a repayment as TRANSFER_OUT here and TRANSFER_IN on the Flex account, then links them", async () => {
+    const t = setup();
+    const notes: string[] = [];
+    const outcomes = await importCsvFiles(
+      t.ctx,
+      [{ name: "current.csv", accountId: "wf-1", transactions: [tx(), repayment()] }],
+      {},
+      () => {},
+      { flexAccountId: "wf-2", onNote: (n) => notes.push(n) },
+    );
+    expect(outcomes).toEqual([{ name: "current.csv", imported: 2, updated: 0, duplicates: 0 }]);
+    expect(t.activities.get("wf-1")!.map((r) => r.activityType)).toEqual(["WITHDRAWAL", "TRANSFER_OUT"]);
+    expect(t.activities.get("wf-2")!.map((r) => [r.activityType, r.amount])).toEqual([["TRANSFER_IN", "50"]]);
+    expect(t.links).toHaveLength(1);
+    expect(notes.join(" ")).toMatch(/Flex transfers: 1 linked/);
+  });
+
+  it("is idempotent across re-imports", async () => {
+    const t = setup();
+    const file = [{ name: "current.csv", accountId: "wf-1", transactions: [repayment()] }];
+    const opts = { flexAccountId: "wf-2" };
+    await importCsvFiles(t.ctx, file, {}, () => {}, opts);
+    const again = await importCsvFiles(t.ctx, file, {}, () => {}, opts);
+    expect(again[0]).toMatchObject({ imported: 0, duplicates: 1 });
+    expect(t.activities.get("wf-2")).toHaveLength(1);
+    expect(t.links).toHaveLength(1);
+  });
+
+  it("links refund legs that come in separate files", async () => {
+    const t = setup();
+    const base = { description: "Refunded (Flex)", category: "shopping" };
+    await importCsvFiles(t.ctx, [
+      { name: "current.csv", accountId: "wf-1", transactions: [tx({ ...base, amount: 1999 })] },
+      { name: "flex.csv", accountId: "wf-2", transactions: [tx({ ...base, amount: -1999 })] },
+    ]);
+    expect(t.activities.get("wf-1")![0].activityType).toBe("TRANSFER_IN");
+    expect(t.activities.get("wf-2")![0].activityType).toBe("TRANSFER_OUT");
+    expect(t.links).toHaveLength(1);
   });
 });

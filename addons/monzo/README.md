@@ -30,15 +30,29 @@ Monzo, paste its details into the add-on, and connect.
   Restaurants, Transport, …), then re-runs rules over uncategorised activities, so new and
   already-imported transactions get their category. Wealthfolio's own merchant rules take
   precedence where they match (they are more specific); "General" goes to Other Expenses as a
-  last resort, Monzo's "Income" to Other Income, and transfers are left alone. Categories you
-  set by hand are never overwritten. Spending must be turned on for the account in
+  last resort, and transfers are left alone. Spending rules apply to **outflows only**: one
+  rule per category for withdrawals and one for refund credits, so a deposit is never filed
+  as spending. Monzo's "Income" deposits go to Other Income (the income categories), and that
+  rule outranks Wealthfolio's merchant rules. Categories you set by hand are never overwritten. Spending must be turned on for the account in
   Wealthfolio for the categories to show up there.
 - Keeps already-imported transactions up to date: when a re-fetched transaction differs from
   its Wealthfolio row (new notes, a better payee name, a settled amount), the row is
   rewritten in place rather than imported again.
 - Skips what should not count as spending: declined and zero-value transactions, pending
-  transactions (Flex purchases are the exception, they never "settle"), pot transfers, the monthly Flex repayment (the purchases
-  are already on the Flex account) and savings-category moves such as investment transfers.
+  transactions (Flex purchases are the exception, they never "settle"), pot transfers and savings-category moves such as investment transfers.
+- **Keeps the current account and Flex balances right.** The monthly Flex repayment is
+  imported as a `TRANSFER_OUT` on the current account and a matching `TRANSFER_IN` on the
+  Flex account (same amount and date), so the Flex balance is paid down and the current
+  account is no longer overstated. When a Flex purchase is refunded, Monzo moves the money
+  off Flex into the current account ("Refunded (Flex)"); both legs are imported as the same
+  kind of transfer pair (`TRANSFER_OUT` on Flex, `TRANSFER_IN` on the current account). Each
+  pair is linked as an internal transfer through Wealthfolio's transfer API, so neither side
+  counts as income or spending. Monzo's Flex feed has no row for a repayment, so the Flex side
+  is written by the add-on from the current account's debit (its id is the Monzo transaction
+  id plus `:flex-in`); the import ledger keeps re-syncs and CSV imports from duplicating it.
+  The repayment needs the Flex account to be mapped (or chosen on the CSV page); without one
+  it is skipped, and the log says so. A refund leg whose other half is not in the same
+  sync or import is imported unlinked: link it from Wealthfolio's Activities page.
 - Lets you rename Monzo categories (Settings -> Category labels).
 - Imports **Monzo CSV exports** (several files at once, each to its own account) for history older than the API shares (see below).
 
@@ -153,13 +167,36 @@ account, so different files usually go to different accounts; files are imported
 another, and a file that fails does not stop the rest. Columns are matched by header name
 (Transaction ID, Date, Time, Name, Category, Amount, Currency, Local amount, Local currency,
 Notes and #tags, Description, ...), so small changes to Monzo's export layout do not break it. Overlapping API and CSV imports
-are reconciled the same way as re-syncs. "Skip transfers & savings" is on by default.
+are reconciled the same way as re-syncs. "Skip transfers & savings" is on by default; it does
+not drop Flex repayments and refunds, which are imported as transfers. When a file contains
+repayments the page asks for the **Flex account** that receives them (the only credit card
+account is picked for you; choose "None" to skip the repayments).
 
 Because older history is not available, an account's balance in Wealthfolio reflects only
 the transactions imported. If you need it to match Monzo, add an opening-balance deposit
 dated just before your first imported transaction. Remove or adjust that deposit if you later
 import the full history (by reconnecting, or from CSV), or the balance will be off by the
 opening amount.
+
+### Upgrading to 2.5.0 (Flex repayments)
+
+Before 2.5.0 the monthly Flex repayment was never imported, so the Flex account's balance
+fell with every purchase and was never paid down, while the current account stayed overstated
+by the same amount (net worth was right, both balances were wrong). From 2.5.0 repayments are
+imported as transfers between the two accounts, as described above. Past repayments are not
+fetched by themselves: an ordinary sync only looks at the last 90 days (and nothing earlier
+than your last sync), so to bring in the earlier ones either
+
+- **disconnect, reconnect and let the add-on sync straight away** (Monzo shares the whole
+  history for 5 minutes after you connect), or
+- **import your current-account CSV exports** (Account -> Export transactions -> CSV) from the
+  Import CSV page, choosing your Flex account when asked.
+
+Either way, anything already imported is recognised and skipped. Refunded Flex purchases that
+an earlier version imported as a withdrawal on Flex and a deposit/refund on the current
+account are converted to the transfer pair in place on the next sync that sees them. If you
+already corrected the balances by hand (an adjustment or hand-made transfers), importing the
+past repayments will count them a second time: remove your manual entries first.
 
 ### Upgrading to 2.4.0
 
@@ -222,6 +259,7 @@ Only rows near the sync boundary could be affected, and only if Monzo returns th
 | "Enter your Monzo client ID and secret" | Upgrading from v1: see the upgrade notes. |
 | Only 90 days of transactions | A Monzo API limit: the whole history is shared only for 5 minutes after you connect. Disconnect, reconnect and let the add-on sync straight away, or use CSV import for older history. |
 | Only about 30 days imported | You synced with a version before 2.4.0, which fetched just the last 30 days on a first sync or after a reset. Upgrade to 2.4.0: its first sync re-checks the last 90 days. |
+| A salary or a friend's repayment is filed under a spending category (Education, Rideshare & Taxi, …) | Monzo's own rules only touch withdrawals and refund credits, and its Income rule outranks Wealthfolio's merchant presets. Wealthfolio's own **preset** merchant rules (for instance an Education rule matching a word like "University", or a Rideshare one) are outside the add-on's control, and if one is not limited to withdrawals it can still apply to a deposit whose comment contains such a word. Edit or delete that preset in **Settings → Spending → Rules**, or set the category by hand; categories you set by hand are never overwritten. Rows that were already categorised are not re-run, so fix those once by hand. |
 | "A sync or import is already running" | Only one sync or CSV import runs at a time. Wait for the running one to finish. |
 | "Account mapping is out of date" | A mapped Wealthfolio account was deleted. Open Settings to re-create and re-map it. |
 

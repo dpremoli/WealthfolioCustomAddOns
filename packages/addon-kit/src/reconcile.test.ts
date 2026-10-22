@@ -3,6 +3,7 @@ import {
   contentKey,
   ledgerAccountId,
   ledgerEntry,
+  locateLedgerRows,
   reconcileWithLedger,
   selectNewActivities,
   sourceRefOf,
@@ -200,5 +201,32 @@ describe("reconcileWithLedger", () => {
   it("imports one row per id when the same id appears twice in a batch", () => {
     const a = withId("tx_1", cash(3, "Coffee"));
     expect(reconcileWithLedger([a, a], [], {}, "acc").toImport).toHaveLength(1);
+  });
+});
+
+describe("locateLedgerRows", () => {
+  const withId = (id: string, a: ActivityImport): ActivityImport => ({ ...a, id });
+
+  it("finds the account row each imported id became, via the ledger", () => {
+    const a = withId("tx_1", cash(3, "Coffee"));
+    const b = withId("tx_2", cash(7, "Lunch"));
+    const { ledger } = reconcileWithLedger([a, b], [], {}, "acc");
+    const rowA = { ...stored(a), id: "act-1" };
+    const rowB = { ...stored(b), id: "act-2" };
+    const found = locateLedgerRows([rowB, rowA], ledger, "acc", ["tx_1", "tx_2"]);
+    expect(found.get("tx_1")).toBe(rowA);
+    expect(found.get("tx_2")).toBe(rowB);
+  });
+
+  it("gives identical rows to different ids, and omits ids it cannot place", () => {
+    const a = withId("tx_1", cash(3, "Coffee"));
+    const b = withId("tx_2", cash(3, "Coffee"));
+    const { ledger } = reconcileWithLedger([a, b], [], {}, "acc");
+    const rows = [{ ...stored(a), id: "act-1" }, { ...stored(a), id: "act-2" }];
+    const found = locateLedgerRows(rows, ledger, "acc", ["tx_1", "tx_2", "tx_unknown"]);
+    expect([found.get("tx_1")?.id, found.get("tx_2")?.id].sort()).toEqual(["act-1", "act-2"]);
+    expect(found.has("tx_unknown")).toBe(false);
+    // An id recorded for another account is not found here.
+    expect(locateLedgerRows(rows, ledger, "other", ["tx_1"]).size).toBe(0);
   });
 });

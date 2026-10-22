@@ -8,6 +8,7 @@ export {
   reconcileWithLedger,
   ledgerEntry,
   ledgerAccountId,
+  locateLedgerRows,
   type ImportLedger,
   type LedgerReconcileResult,
   type ExistingActivityLike,

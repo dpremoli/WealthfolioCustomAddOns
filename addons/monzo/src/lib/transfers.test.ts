@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { makeCtx, tx } from "../test-utils";
 import { flexRepaymentCredit, mapTransactionToActivity } from "./mapper";
 import { importNew } from "./sync";
-import { linkTransfers, pairTransferLegs } from "./transfers";
+import { linkNote, linkTransfers, pairTransferLegs } from "./transfers";
 
 const repayment = (over = {}) =>
   tx({ category: "transfers", description: "Flex", amount: -5000, ...over });
@@ -140,6 +140,25 @@ describe("linkTransfers", () => {
     const result = await linkTransfers(t.ctx, [out, inn]);
     expect(result).toEqual({ linked: 0, unlinked: 2, failed: [] });
     expect(t.links).toEqual([]);
+  });
+
+  it("reports rows that were edited but are already linked as already linked, not as unlinked", async () => {
+    const t = setup();
+    const { out, inn } = await importPair(t);
+    t.activities.get("wf-cur")![0].comment = "Edited by the user";
+    t.activities.get("wf-flex")![0].comment = "Edited by the user";
+    t.links.push([t.activities.get("wf-cur")![0].id as string, t.activities.get("wf-flex")![0].id as string]);
+    const result = await linkTransfers(t.ctx, [out, inn]);
+    expect(result).toEqual({ linked: 0, unlinked: 0, alreadyLinked: 2, failed: [] });
+    expect(linkNote(result)).toBe("Flex transfers: 0 linked, 2 already linked.");
+  });
+
+  it("reports a lone leg whose row is already linked as already linked", async () => {
+    const t = setup();
+    const lone = mapTransactionToActivity(refundLegs().inn, "wf-cur");
+    await importNew(t.ctx, "wf-cur", [lone]);
+    t.links.push([t.activities.get("wf-cur")![0].id as string, "other"]);
+    expect(await linkTransfers(t.ctx, [lone])).toEqual({ linked: 0, unlinked: 0, alreadyLinked: 1, failed: [] });
   });
 
   it("is a no-op when there is nothing to pair", async () => {

@@ -521,3 +521,14 @@ describe("importAssetFields", () => {
     expect(importAssetFields({ symbol: "LTC" })).toEqual({ symbol: "LTC", instrumentType: "EQUITY" });
   });
 });
+
+describe("SymbolResolver — concurrent lookups", () => {
+  it("shares one search between connections asking for the same ticker at once", async () => {
+    const search = vi.fn(async () => [result({ symbol: "AAPL", exchangeMic: "XNAS", currency: "USD" })]);
+    const r = new SymbolResolver(search);
+    const [a, b] = await Promise.all([r.resolveDetailed("AAPL_US_EQ"), r.resolveDetailed("AAPL_US_EQ")]);
+    expect(a).toEqual(b);
+    expect(search).toHaveBeenCalledTimes(1); // one base-ticker query, not one per connection
+    expect(r.snapshot()).toEqual({ AAPL_US_EQ: "AAPL|XNAS" });
+  });
+});

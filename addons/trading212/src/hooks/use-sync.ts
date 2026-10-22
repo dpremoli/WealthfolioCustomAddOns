@@ -41,6 +41,14 @@ import { SymbolResolver, importAssetFields, type ResolveDiag } from "../lib/symb
 import { ActivityImporter, describeRejected, type ImportUnit, type RejectedRow } from "../lib/importer";
 import { CARD_FUNDING_COMMENT, fundingForExisting, isFundingId, withCardFunding } from "../lib/card-funding";
 import {
+  PortfolioUpdates,
+  compareWithTrading212,
+  resolvePositions,
+  trading212Cash,
+  verificationLines,
+  type Verification,
+} from "../lib/verify";
+import {
   addImportedRefs,
   clearAccountData,
   connectionKind,
@@ -58,6 +66,7 @@ import {
   setCardLastSync,
   setLastSync,
   setSymbolMap,
+  setVerification,
   updateConnection,
 } from "./use-config";
 
@@ -570,6 +579,7 @@ async function syncOne(
   resolver: SymbolResolver,
   onProgress: ProgressFn,
   confirmedModeSwitches: Set<string>,
+  updates: PortfolioUpdates,
 ): Promise<SyncResult> {
   const log: string[] = [];
   const base = { connectionId: conn.id, accountId: conn.accountId, accountName: conn.name, log };
@@ -674,6 +684,8 @@ async function syncOne(
     // wrong, so the sync result says so loudly instead of only counting them.
     const droppedTrades: string[] = [];
     let cardResult: { imported: number; duplicates: number } | null = null;
+    // Whether this sync finished a full backfill (then the account is checked against Trading 212).
+    let backfillFinished = false;
 
     // Imports one batch (see `ActivityImporter`) and persists its refs, so an interrupted
     // backfill doesn't re-import what already landed. A unit is a row, or a card row with the
@@ -862,6 +874,7 @@ async function syncOne(
         // Card rows were routed inline during the backfill above — mark the card
         // pipeline backfilled so incremental syncs only fetch a recent top-up window.
         if (cardAccountId) await setCardLastSync(ctx, conn.id, watermark);
+        backfillFinished = true;
       } else {
         log.push("Backfill incomplete — next sync resumes from the checkpoint.");
       }
@@ -911,13 +924,40 @@ async function syncOne(
     logRejected(log, rejected);
     log.push(`Import: ${imported} imported, ${duplicates} duplicates, ${rejected.length} not imported.`);
 
+    // The acceptance test of a backfill: do Wealthfolio's holdings and cash match Trading 212's?
+    // Checked when a backfill finishes, and on every later sync until it matches.
+    let verification: Verification | undefined;
+    const previous = (await getSyncState(ctx, conn.id)).verification;
+    if (backfillFinished || (previous && !previous.ok)) {
+      try {
+        verification = await verifyAccount(ctx, client, accountId, resolver, importer, updates, onProgress);
+        await setVerification(ctx, conn.id, verification);
+        log.push(...verificationLines(verification));
+      } catch (e) {
+        log.push(`Could not compare with Trading 212's positions and cash: ${errDetail(e)}`);
+      }
+    }
+
     const finishedAt = new Date().toISOString();
-    const result: SyncResult = { ...base, imported, duplicates, unresolved, breakdown: tally, card: cardResult ?? undefined, finishedAt };
+    const result: SyncResult = {
+      ...base,
+      imported,
+      duplicates,
+      unresolved,
+      breakdown: tally,
+      card: cardResult ?? undefined,
+      finishedAt,
+      verification,
+    };
     // A trade that never reached the account leaves its position wrong: say so loudly.
     if (droppedTrades.length > 0) {
       result.error =
         `${droppedTrades.length} trade row${droppedTrades.length === 1 ? " was" : "s were"} not imported, so ` +
         `holdings will not match Trading 212 (see the log). First: ${droppedTrades[0]}`;
+    } else if (verification && !verification.ok && verification.settled) {
+      result.error =
+        `Does not match Trading 212: ${verification.mismatches.length} difference` +
+        `${verification.mismatches.length === 1 ? "" : "s"} (see the log). First: ${verification.mismatches[0]}`;
     } else if (imported === 0 && rejected.length > 0) {
       result.error = `${rejected.length} rows not imported: ${describeRejected(rejected[0])}`;
     }
@@ -929,6 +969,40 @@ async function syncOne(
     log.push(`Error: ${message}`);
     return { ...base, imported: 0, duplicates: 0, unresolved: 0, finishedAt: new Date().toISOString(), error: message };
   }
+}
+
+/** How long the check waits for Wealthfolio to finish recalculating after the import. */
+const VERIFY_WAIT_MS = 3 * 60 * 1000;
+
+/**
+ * Compares the account in Wealthfolio with Trading 212: the holdings Wealthfolio derived from the
+ * imported activities (`portfolio.getHoldings`, the numbers the user sees) against `/positions`,
+ * and the cash against `/account/summary` — the same calls HOLDINGS mode snapshots from. Waits
+ * for the recalculation the import queued first, since holdings read straight after an import
+ * are stale.
+ */
+async function verifyAccount(
+  ctx: AddonContext,
+  client: Trading212Client,
+  accountId: string,
+  resolver: SymbolResolver,
+  importer: ActivityImporter,
+  updates: PortfolioUpdates,
+  onProgress: ProgressFn,
+): Promise<Verification> {
+  onProgress({ phase: "done", message: "Checking holdings and cash against Trading 212…" });
+  const settled =
+    importer.lastWriteAt === 0 ? true : await updates.settledAfter(importer.lastWriteAt, VERIFY_WAIT_MS);
+  const summary = await client.getAccountSummary();
+  const positions = await resolvePositions(await client.getPositions(), resolver);
+  const holdings = await ctx.api.portfolio.getHoldings(accountId);
+  const cmp = compareWithTrading212({
+    positions,
+    cash: trading212Cash(summary),
+    accountCurrency: summary.currency || "GBP",
+    holdings,
+  });
+  return { ...cmp, checkedAt: new Date().toISOString(), settled };
 }
 
 /** Activity types whose loss leaves a position wrong. */
@@ -992,10 +1066,20 @@ export async function runSyncAll(
     await getSymbolMap(ctx),
   );
 
-  const perAccount: SyncResult[] = [];
-  for (const conn of connections) {
-    const report: ProgressFn = (p) => opts.onProgress?.({ accountName: conn.name, ...p });
-    perAccount.push(await syncOne(ctx, settings, conn, resolver, report, confirmedModeSwitches));
+  // Watches Wealthfolio's recalculations, so a check after an import reads settled holdings.
+  const updates = new PortfolioUpdates(ctx);
+  // Trading 212 rate-limits per API key, so connections (each with its own key) sync side by
+  // side: an Invest and an ISA backfill export and import at the same time.
+  let perAccount: SyncResult[];
+  try {
+    perAccount = await Promise.all(
+      connections.map((conn) => {
+        const report: ProgressFn = (p) => opts.onProgress?.({ accountName: conn.name, ...p });
+        return syncOne(ctx, settings, conn, resolver, report, confirmedModeSwitches, updates);
+      }),
+    );
+  } finally {
+    updates.stop();
   }
 
   if (resolver.isDirty) await setSymbolMap(ctx, resolver.snapshot());

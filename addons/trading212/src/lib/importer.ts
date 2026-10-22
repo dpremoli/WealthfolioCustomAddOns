@@ -44,6 +44,8 @@ type Progress = (done: number, total: number) => void;
  */
 export class ActivityImporter {
   private readonly existing = new Map<string, ExistingActivityLike[]>();
+  /** When the last import call that wrote rows returned (ms), 0 when none did. */
+  lastWriteAt = 0;
 
   constructor(
     private readonly ctx: AddonContext,
@@ -132,6 +134,7 @@ export class ActivityImporter {
     try {
       const res = await this.ctx.api.activities.import(units.flat());
       out.imported += res.summary.imported;
+      if (res.summary.imported > 0) this.lastWriteAt = Date.now();
       for (const a of units.flat()) {
         if (a.id) {
           out.accounted.push(a.id);

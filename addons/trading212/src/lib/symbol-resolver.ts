@@ -339,6 +339,9 @@ export async function resolveTickerSymbol(
  */
 export class SymbolResolver {
   private dirty = false;
+  // Lookups in flight: connections sync side by side, and two of them holding the same
+  // instrument share one search instead of racing.
+  private readonly pending = new Map<string, Promise<Resolution | null>>();
 
   constructor(
     private readonly search: SearchFn,
@@ -358,10 +361,18 @@ export class SymbolResolver {
     if (Object.prototype.hasOwnProperty.call(this.cache, ticker)) {
       return parseCacheValue(this.cache[ticker]);
     }
-    const resolved = await resolveTicker(this.search, ticker, instrument, onDiag);
-    this.cache[ticker] = formatCacheValue(resolved);
-    this.dirty = true;
-    return resolved;
+    let lookup = this.pending.get(ticker);
+    if (!lookup) {
+      lookup = resolveTicker(this.search, ticker, instrument, onDiag).then((resolved) => {
+        this.cache[ticker] = formatCacheValue(resolved);
+        this.dirty = true;
+        this.pending.delete(ticker);
+        return resolved;
+      });
+      lookup.catch(() => this.pending.delete(ticker));
+      this.pending.set(ticker, lookup);
+    }
+    return lookup;
   }
 
   /** Just the symbol (back-compat for activity-import callers). */
@@ -389,3 +400,4 @@ function parseCacheValue(v: string): Resolution | null {
   if (pipe < 0) return { symbol: v };
   return { symbol: v.slice(0, pipe), exchangeMic: v.slice(pipe + 1) || undefined };
 }
+

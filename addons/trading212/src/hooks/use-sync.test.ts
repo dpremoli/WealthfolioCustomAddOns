@@ -63,6 +63,7 @@ function makeCtx(opts: {
   existingAccounts?: { id: string; providerAccountId?: string; trackingMode?: string }[];
   existingActivities?: { id: string }[];
   existingSnapshots?: { snapshotDate: string }[];
+  holdings?: unknown[];
 }) {
   const connections = opts.connections ?? [
     { id: "c1", name: "Trading 212 (Invest)", accountId: "acc-1" },
@@ -138,6 +139,7 @@ function makeCtx(opts: {
           save: snapshotsSave,
           delete: snapshotsDelete,
         },
+        portfolio: { getHoldings: async () => opts.holdings ?? [] },
       },
     },
     storage,
@@ -975,6 +977,68 @@ describe("useSync — tracking-mode drift", () => {
     expect(snapshotsSave).toHaveBeenCalledTimes(1);
     // Connection's recorded mode updated to the new mode.
     expect(JSON.parse(storage.get("t212_connections")!)[0].trackingMode).toBe("HOLDINGS");
+  });
+});
+
+describe("useSync — checking a backfill against Trading 212", () => {
+  const backfill = (summaryCash: number) =>
+    net(async (url: string) => {
+      const u = String(url);
+      if (u.includes("amazonaws.com")) return textResponse(CSV_HDR);
+      if (u.includes("/exports")) return jsonResponse([FINISHED_REPORT]);
+      if (u.includes("account/summary")) return jsonResponse({ id: 1, currency: "GBP", cash: { availableToTrade: summaryCash } });
+      if (u.includes("/positions")) {
+        return jsonResponse([{ instrument: { ticker: "AAPL_US_EQ", isin: "US0378331005", currency: "USD" }, quantity: 2 }]);
+      }
+      return routeFetch(u);
+    });
+  const holdings = [
+    { holdingType: "security", instrument: { symbol: "AAPL" }, quantity: 2, localCurrency: "USD" },
+    { holdingType: "cash", quantity: 250, localCurrency: "GBP" },
+  ];
+
+  it("records a match after the backfill", async () => {
+    backfill(250);
+    const { ctx, storage } = makeCtx({ syncStates: { c1: { lastSync: null, importedRefs: [] } }, holdings });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { result } = renderHook(() => useSync(ctx as any));
+    await act(async () => {
+      await result.current.syncAll();
+    });
+    const r = result.current.results!.perAccount[0];
+    expect(r.error).toBeUndefined();
+    expect(r.verification).toMatchObject({ ok: true, positions: 1 });
+    expect(r.log).toContain("Matches Trading 212: 1 positions and the cash balance.");
+    expect(JSON.parse(storage.get("t212_sync_c1")!).verification.ok).toBe(true);
+  });
+
+  it("fails the sync with every difference, and checks again on the next sync until it matches", async () => {
+    backfill(1822);
+    const { ctx, storage } = makeCtx({ syncStates: { c1: { lastSync: null, importedRefs: [] } }, holdings });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { result } = renderHook(() => useSync(ctx as any));
+    await act(async () => {
+      await result.current.syncAll();
+    });
+    let r = result.current.results!.perAccount[0];
+    expect(r.error).toBe("Does not match Trading 212: 1 difference (see the log). First: Cash GBP: Trading 212 1822, Wealthfolio 250.");
+    expect(JSON.parse(storage.get("t212_sync_c1")!).verification.ok).toBe(false);
+
+    // The next (incremental) sync checks again; now it matches.
+    net(async (url: string) => {
+      const u = String(url);
+      if (u.includes("account/summary")) return jsonResponse({ id: 1, currency: "GBP", cash: { availableToTrade: 250 } });
+      if (u.includes("/positions")) {
+        return jsonResponse([{ instrument: { ticker: "AAPL_US_EQ", isin: "US0378331005", currency: "USD" }, quantity: 2 }]);
+      }
+      return jsonResponse({ items: [], nextPagePath: null });
+    });
+    await act(async () => {
+      await result.current.syncAll();
+    });
+    r = result.current.results!.perAccount[0];
+    expect(r.verification?.ok).toBe(true);
+    expect(r.error).toBeUndefined();
   });
 });
 

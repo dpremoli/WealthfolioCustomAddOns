@@ -321,6 +321,14 @@ export function setCardLastSync(ctx: AddonContext, id: string, iso: string): Pro
   return patchSyncState(ctx, id, { cardLastSync: iso });
 }
 
+export function setVerification(
+  ctx: AddonContext,
+  id: string,
+  verification: ConnectionSyncState["verification"],
+): Promise<void> {
+  return patchSyncState(ctx, id, { verification });
+}
+
 export async function getImportedRefs(ctx: AddonContext, id: string): Promise<Set<string>> {
   const state = await getSyncState(ctx, id);
   return new Set(state.importedRefs);

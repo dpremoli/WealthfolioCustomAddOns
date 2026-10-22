@@ -21,7 +21,7 @@ import {
 } from "@wealthfolio/ui";
 import { useQuery } from "@tanstack/react-query";
 import { connectionKind, getSymbolMap, getSyncState, kindLabel } from "../hooks/use-config";
-import type { SyncResult, T212Connection, T212Settings } from "../types";
+import type { ConnectionSyncState, SyncResult, T212Connection, T212Settings } from "../types";
 import { relativeTime } from "@wf-addons/kit";
 import { StatTiles, type Stat } from "@wf-addons/kit/ui";
 import { exchangeLabel, parseSymbolMap } from "../lib/format";
@@ -83,6 +83,7 @@ export function ConnectionCard({ ctx, settings, conn, result, isSyncing }: Conne
         </div>
         <CardDescription className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
           <LastSync label="Last sync" iso={lastSync ?? null} />
+          {mode === "TRANSACTIONS" && syncState?.verification && <VerificationBadge v={syncState.verification} />}
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
@@ -111,6 +112,42 @@ export function ConnectionCard({ ctx, settings, conn, result, isSyncing }: Conne
         {result && !result.error && <DetailTabs ctx={ctx} result={result} />}
       </CardContent>
     </Card>
+  );
+}
+
+/** Whether the account matched Trading 212's positions and cash when last checked. */
+function VerificationBadge({ v }: { v: NonNullable<ConnectionSyncState["verification"]> }) {
+  const badge = v.ok ? (
+    <Badge variant="success" className="gap-1">
+      <Icons.CheckCircle size={11} weight="duotone" />
+      Matches Trading 212
+    </Badge>
+  ) : (
+    <Badge variant="warning" className="gap-1">
+      <Icons.AlertTriangle size={11} weight="duotone" />
+      {v.mismatches.length} difference{v.mismatches.length === 1 ? "" : "s"} from Trading 212
+    </Badge>
+  );
+  return (
+    <TooltipProvider>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span className="cursor-default">{badge}</span>
+        </TooltipTrigger>
+        <TooltipContent side="bottom" className="max-w-md">
+          {v.ok ? (
+            `${v.positions} positions and the cash balance matched on ${new Date(v.checkedAt).toLocaleString()}.`
+          ) : (
+            <ul className="list-disc space-y-0.5 pl-4">
+              {v.mismatches.slice(0, 12).map((m) => (
+                <li key={m}>{m}</li>
+              ))}
+              {v.mismatches.length > 12 && <li>…and {v.mismatches.length - 12} more (see the sync log)</li>}
+            </ul>
+          )}
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
   );
 }
 

@@ -75,8 +75,13 @@
     },
     {
       "category": "events",
-      "functions": ["onUpdateComplete"],
-      "purpose": "Trigger a background refresh of already-synced accounts when Wealthfolio refreshes its portfolio"
+      "functions": ["onUpdateStart", "onUpdateComplete"],
+      "purpose": "Trigger a background refresh of already-synced accounts when Wealthfolio refreshes its portfolio, and wait for the recalculation an import queued before checking the account against Trading 212"
+    },
+    {
+      "category": "portfolio",
+      "functions": ["getHoldings"],
+      "purpose": "After a Transactions-mode backfill, compare the holdings and cash Wealthfolio derived from the imported activities with Trading 212's positions and cash"
     },
     {
       "category": "ui",

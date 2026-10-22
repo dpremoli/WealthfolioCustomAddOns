@@ -2,8 +2,11 @@ import type { AddonContext } from "@wealthfolio/addon-sdk";
 import {
   convertAndLinkMoves,
   isMoveMatch,
+  isTrading212Payee,
+  linkMovesBetween,
   matchMoves,
   moveLinkNote,
+  trading212Refs,
   type MoveRow,
 } from "./move-match";
 
@@ -216,5 +219,86 @@ describe("moveLinkNote", () => {
     expect(moveLinkNote("Trading 212", { linked: 2, ambiguous: ["a"], failed: [] })).toMatch(
       /Trading 212.*2 linked.*1 .*ambiguous/,
     );
+  });
+});
+
+describe("isTrading212Payee", () => {
+  it("recognises Trading 212 by name, including the spelled-out UK entity", () => {
+    for (const t of ["To Trading 212 UK Limited", "TRADING212", "T212 top-up", "Trading TwoOneTwo"]) {
+      expect(isTrading212Payee(t)).toBe(true);
+    }
+    expect(isTrading212Payee("Tesco")).toBe(false);
+    expect(isTrading212Payee(null)).toBe(false);
+  });
+
+  it("recognises a transfer quoting a Trading 212 account number, as a whole number only", () => {
+    expect(isTrading212Payee("Ref 4098937", ["4098937"])).toBe(true);
+    expect(isTrading212Payee("4098937", ["4098937"])).toBe(true);
+    expect(isTrading212Payee("Ref 140989371", ["4098937"])).toBe(false);
+    expect(isTrading212Payee("Ref 4098937", [])).toBe(false);
+  });
+});
+
+describe("trading212Refs", () => {
+  it("lists the Invest and Stocks ISA account numbers, not card or Cash ISA ids or other providers", () => {
+    expect(
+      trading212Refs([
+        { provider: "trading212-addon", providerAccountId: "4098937" },
+        { provider: "trading212-addon", providerAccountId: "4098937-card" },
+        { provider: "trading212-addon", providerAccountId: "t212-cash-isa" },
+        { provider: "monzo-addon", providerAccountId: "31764668" },
+        { provider: "trading212-addon", providerAccountId: "31764668" },
+      ]),
+    ).toEqual(["4098937", "31764668"]);
+  });
+});
+
+describe("linkMovesBetween", () => {
+  function setup(byAccount: Record<string, MoveRow[]>, accounts: { id: string; name: string }[]) {
+    const links: [string, string][] = [];
+    const ctx = {
+      api: {
+        logger: { warn: vi.fn(), info: vi.fn(), error: vi.fn() },
+        accounts: { getAll: async () => accounts },
+        activities: {
+          getAll: async (id: string) => byAccount[id] ?? [],
+          getTransferPair: async () => null,
+          saveMany: async () => ({ created: [], updated: [], deleted: [], createdMappings: [], errors: [] }),
+          linkTransfer: async (a: string, b: string) => {
+            links.push([a, b]);
+            return [{}, {}];
+          },
+        },
+      },
+    } as unknown as AddonContext;
+    return { ctx, links };
+  }
+
+  it("links my moves with the accepted accounts' rows that pass the filters", async () => {
+    const t = setup(
+      {
+        A: [row("w", "WITHDRAWAL", 300), row("int", "INTEREST", 300)],
+        B: [row("d", "DEPOSIT", 300, 1, { comment: "From Trading 212" }), row("x", "DEPOSIT", 300, 1, { comment: "Gym" })],
+        C: [row("c", "DEPOSIT", 300, 1, { accountId: "C", comment: "Trading 212" })],
+      },
+      [
+        { id: "A", name: "Invest" },
+        { id: "B", name: "Bank" },
+        { id: "C", name: "Ignored" },
+      ],
+    );
+    const out = await linkMovesBetween(t.ctx, {
+      mine: ["A"],
+      theirs: (a) => a.id === "B",
+      theirRow: (r) => isTrading212Payee(r.comment),
+    });
+    expect(out).toEqual({ linked: 1, ambiguous: [], failed: [] });
+    expect(t.links).toEqual([["w", "d"]]);
+  });
+
+  it("does nothing when no other account takes part, and reports instead of throwing", async () => {
+    expect((await linkMovesBetween(setup({}, [{ id: "A", name: "x" }]).ctx, { mine: ["A"], theirs: () => true })).linked).toBe(0);
+    const broken = { api: { accounts: { getAll: async () => { throw new Error("down"); } } } } as unknown as AddonContext;
+    expect(await linkMovesBetween(broken, { mine: ["A"], theirs: () => true })).toEqual({ linked: 0, ambiguous: [], failed: ["down"] });
   });
 });

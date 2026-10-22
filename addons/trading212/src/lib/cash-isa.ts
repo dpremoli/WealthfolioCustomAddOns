@@ -2,15 +2,15 @@ import type { ActivityImport, AddonContext } from "@wealthfolio/addon-sdk";
 import {
   MOVE_MATCH_WINDOW_MS,
   T212_CASH_ISA_PROVIDER_ID,
-  TRADING_212_PAYEE,
   adoptUntrackedRows,
-  convertAndLinkMoves,
+  isTrading212Payee,
   jsonStore,
   ledgerAccountId,
+  linkMovesBetween,
   moveLinkNote,
   reconcileWithLedger,
+  trading212Refs,
   type ImportLedger,
-  type MoveRow,
 } from "@wf-addons/kit";
 import { PROVIDER } from "../constants";
 import { mapCsvRow, parseCsv } from "./csv";
@@ -213,32 +213,26 @@ export async function importCashIsa(
   };
 }
 
-const MOVE_TYPES = ["WITHDRAWAL", "DEPOSIT", "TRANSFER_OUT", "TRANSFER_IN"];
-
 /**
  * Finds the other half of the Cash ISA's deposits and withdrawals in the user's other cash
  * accounts (a Monzo account that the Monzo add-on synced, say) and, for each confident pair,
- * converts both rows to a linked transfer (see kit `convertAndLinkMoves`). Only rows whose
- * payee reads "Trading 212" are considered on the other side, so unrelated moves of the same
- * amount are not mistaken for each other. Deposits from accounts that are not in Wealthfolio
- * have no counterpart, so they stay deposits (an unlinked transfer would drop them from the ISA
- * allowance). Never throws.
+ * converts both rows to a linked transfer (see kit `linkMovesBetween`). Only rows whose payee
+ * points at Trading 212 (its name or one of the user's Trading 212 account numbers) are
+ * considered on the other side, so unrelated moves of the same amount are not mistaken for each
+ * other. Deposits from accounts that are not in Wealthfolio have no counterpart, so they stay
+ * deposits (an unlinked transfer would drop them from the ISA allowance). Never throws.
  */
 export async function matchWithOtherAccounts(ctx: AddonContext, isaAccountId: string) {
-  const none = { linked: 0, ambiguous: [] as string[], failed: [] as string[] };
   try {
-    const others = (await ctx.api.accounts.getAll()).filter(
-      (a) => a.id !== isaAccountId && a.accountType === "CASH" && a.provider !== PROVIDER,
-    );
-    if (others.length === 0) return none;
-    const rowsOf = async (ids: string[]) =>
-      (await Promise.all(ids.map((id) => ctx.api.activities.getAll(id))))
-        .flat()
-        .filter((r) => MOVE_TYPES.includes(r.activityType)) as unknown as MoveRow[];
-    const theirs = (await rowsOf(others.map((a) => a.id))).filter((r) => TRADING_212_PAYEE.test(r.comment ?? ""));
-    if (theirs.length === 0) return none;
-    return await convertAndLinkMoves(ctx, await rowsOf([isaAccountId]), theirs);
+    const accounts = await ctx.api.accounts.getAll();
+    const refs = trading212Refs(accounts);
+    return await linkMovesBetween(ctx, {
+      accounts,
+      mine: [isaAccountId],
+      theirs: (a) => a.accountType === "CASH" && a.provider !== PROVIDER,
+      theirRow: (r) => isTrading212Payee(r.comment, refs),
+    });
   } catch (err) {
-    return { ...none, failed: [(err as Error).message] };
+    return { linked: 0, ambiguous: [] as string[], failed: [(err as Error).message] };
   }
 }

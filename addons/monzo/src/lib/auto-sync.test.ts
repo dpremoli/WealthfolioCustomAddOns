@@ -1,13 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { KEY_AUTO_SYNC, KEY_LAST_RUN, KEY_LAST_SYNC } from "../constants";
+import {
+  KEY_AUTO_SYNC,
+  KEY_AUTO_SYNC_ERROR,
+  KEY_LAST_RUN,
+  KEY_LAST_SYNC,
+  KEY_RECHECKED_90_DAYS,
+} from "../constants";
 import { makeCtx } from "../test-utils";
 import type { SyncResult } from "../types";
-import { runExclusive } from "./busy";
+import { BUSY_MESSAGE, runExclusive } from "./busy";
 import {
   CHECK_INTERVAL_MS,
   MIN_SYNC_GAP_MS,
   STARTUP_DELAY_MS,
   isDueForBackgroundSync,
+  loadAutoSyncError,
   startAutoSync,
   type AutoSyncHandle,
 } from "./auto-sync";
@@ -48,12 +55,15 @@ describe("startAutoSync", () => {
   const result: SyncResult = { imported: 1, skipped: 0, duplicates: 0, log: ["ok"] };
   let handle: AutoSyncHandle | undefined;
 
-  function setup(opts: { lastSync?: string | null; lastRun?: string | null; autoSync?: boolean } = {}) {
+  function setup(
+    opts: { lastSync?: string | null; lastRun?: string | null; autoSync?: boolean; rechecked?: boolean } = {},
+  ) {
     const t = makeCtx();
     const set = (k: string, v: unknown) => t.storage.set(k, JSON.stringify(v));
     if (opts.lastSync !== null) set(KEY_LAST_SYNC, opts.lastSync ?? ago(MIN_SYNC_GAP_MS + HOUR));
     if (opts.lastRun !== null) set(KEY_LAST_RUN, opts.lastRun ?? ago(MIN_SYNC_GAP_MS + HOUR));
     if (opts.autoSync !== undefined) set(KEY_AUTO_SYNC, opts.autoSync);
+    if (opts.rechecked !== false) set(KEY_RECHECKED_90_DAYS, true);
     const listeners: (() => void)[] = [];
     const api = t.ctx.api as unknown as Record<string, unknown>;
     api.events = {
@@ -159,7 +169,8 @@ describe("startAutoSync", () => {
     const t = setup({ lastRun: ago(HOUR) });
     handle = startAutoSync(t.ctx);
     await vi.advanceTimersByTimeAsync(STARTUP_DELAY_MS);
-    t.set(KEY_LAST_RUN, ago(MIN_SYNC_GAP_MS + HOUR));
+    // The gap passes (the clock jumps, e.g. the laptop wakes up) before any hourly check fires.
+    vi.setSystemTime(NOW.getTime() + MIN_SYNC_GAP_MS);
     t.listeners.forEach((cb) => cb());
     await vi.advanceTimersByTimeAsync(0);
     expect(runSyncMock).toHaveBeenCalledTimes(1);
@@ -184,5 +195,89 @@ describe("startAutoSync", () => {
     t.listeners.forEach((cb) => cb());
     await vi.advanceTimersByTimeAsync(STARTUP_DELAY_MS + 3 * CHECK_INTERVAL_MS);
     expect(runSyncMock).not.toHaveBeenCalled();
+  });
+
+  it("does not treat a manual sync that grabbed the lock first as a failure", async () => {
+    runSyncMock.mockRejectedValueOnce(new Error(BUSY_MESSAGE));
+    const t = setup();
+    handle = startAutoSync(t.ctx);
+    await vi.advanceTimersByTimeAsync(STARTUP_DELAY_MS);
+    expect(runSyncMock).toHaveBeenCalledTimes(1);
+    expect(t.logger.error).not.toHaveBeenCalled();
+    expect(t.storage.has(KEY_AUTO_SYNC_ERROR)).toBe(false);
+    // Not backed off for 6 hours: the next hourly check tries again.
+    await vi.advanceTimersByTimeAsync(CHECK_INTERVAL_MS);
+    expect(runSyncMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not start a sync once the add-on has been stopped while it was checking", async () => {
+    const t = setup();
+    const realGet = t.ctx.api.storage.get.bind(t.ctx.api.storage);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    t.ctx.api.storage.get = async (k: string) => {
+      await gate;
+      return realGet(k);
+    };
+    handle = startAutoSync(t.ctx);
+    await vi.advanceTimersByTimeAsync(STARTUP_DELAY_MS);
+    handle.stop();
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(runSyncMock).not.toHaveBeenCalled();
+  });
+
+  it("leaves the one-off 90-day re-check to a manual sync", async () => {
+    const t = setup({ rechecked: false });
+    handle = startAutoSync(t.ctx);
+    await vi.advanceTimersByTimeAsync(STARTUP_DELAY_MS);
+    expect(runSyncMock).not.toHaveBeenCalled();
+    t.set(KEY_RECHECKED_90_DAYS, true);
+    await vi.advanceTimersByTimeAsync(CHECK_INTERVAL_MS);
+    expect(runSyncMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("records why a background sync failed, and clears it after one succeeds", async () => {
+    runSyncMock.mockRejectedValueOnce(new Error("Monzo refused access"));
+    const t = setup();
+    handle = startAutoSync(t.ctx);
+    await vi.advanceTimersByTimeAsync(STARTUP_DELAY_MS);
+    expect(JSON.parse(t.storage.get(KEY_AUTO_SYNC_ERROR)!)).toEqual({
+      at: new Date(NOW.getTime() + STARTUP_DELAY_MS).toISOString(),
+      message: "Monzo refused access",
+    });
+    await vi.advanceTimersByTimeAsync(MIN_SYNC_GAP_MS + HOUR);
+    expect(runSyncMock).toHaveBeenCalledTimes(2);
+    expect(t.storage.has(KEY_AUTO_SYNC_ERROR)).toBe(false);
+  });
+
+  it("does not re-read storage on every portfolio refresh while nothing is due", async () => {
+    const t = setup({ lastRun: ago(HOUR) });
+    const get = vi.spyOn(t.ctx.api.storage, "get");
+    handle = startAutoSync(t.ctx);
+    await vi.advanceTimersByTimeAsync(STARTUP_DELAY_MS);
+    const reads = get.mock.calls.length;
+    for (let i = 0; i < 5; i++) t.listeners.forEach((cb) => cb());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(get.mock.calls.length).toBe(reads);
+  });
+});
+
+describe("loadAutoSyncError", () => {
+  const withError = (at: string) => {
+    const t = makeCtx();
+    t.storage.set(KEY_AUTO_SYNC_ERROR, JSON.stringify({ at, message: "Monzo refused access" }));
+    return t.ctx;
+  };
+
+  it("returns the failure while no later sync has succeeded", async () => {
+    const ctx = withError(ago(HOUR));
+    expect(await loadAutoSyncError(ctx, ago(2 * HOUR))).toEqual({ at: ago(HOUR), message: "Monzo refused access" });
+    expect(await loadAutoSyncError(ctx, null)).toMatchObject({ message: "Monzo refused access" });
+  });
+
+  it("returns null once a later sync succeeded, or when nothing failed", async () => {
+    expect(await loadAutoSyncError(withError(ago(2 * HOUR)), ago(HOUR))).toBeNull();
+    expect(await loadAutoSyncError(makeCtx().ctx, null)).toBeNull();
   });
 });

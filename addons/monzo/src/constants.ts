@@ -53,6 +53,8 @@ export const KEY_RECHECKED_90_DAYS = "monzo_rechecked_90_days";
 export const KEY_LAST_RESULT = "monzo_last_result";
 /** JSON boolean: sync in the background while Wealthfolio is open. On unless `false`. */
 export const KEY_AUTO_SYNC = "monzo_auto_sync";
+/** JSON `{ at: ISO, message }`: why the last background sync failed; cleared when one succeeds. */
+export const KEY_AUTO_SYNC_ERROR = "monzo_auto_sync_error";
 /** JSON: category id -> custom label. */
 export const KEY_CATEGORY_LABELS = "monzo_category_labels";
 

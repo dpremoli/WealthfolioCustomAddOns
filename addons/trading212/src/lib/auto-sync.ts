@@ -1,4 +1,5 @@
-import type { AddonContext, UnlistenFn } from "@wealthfolio/addon-sdk";
+import type { AddonContext } from "@wealthfolio/addon-sdk";
+import { startBackgroundChecks } from "@wf-addons/kit";
 import { ensureMigrated, getConnections, getSettings, getSyncState } from "../hooks/use-config";
 import { runSyncAll } from "../hooks/use-sync";
 
@@ -53,9 +54,6 @@ export interface AutoSyncHandle {
 export function startAutoSync(ctx: AddonContext): AutoSyncHandle {
   let stopped = false;
   let running = false; // re-entrancy guard so overlapping triggers don't double-sync
-  let startupTimer: ReturnType<typeof setTimeout> | undefined;
-  let intervalTimer: ReturnType<typeof setInterval> | undefined;
-  const unlisteners: UnlistenFn[] = [];
 
   async function tick(trigger: string): Promise<void> {
     if (stopped || running) return;
@@ -87,37 +85,17 @@ export function startAutoSync(ctx: AddonContext): AutoSyncHandle {
     }
   }
 
-  // 1. On load / app open.
-  startupTimer = setTimeout(() => void tick("startup"), STARTUP_DELAY_MS);
-
-  // 2. Periodic re-check while the app stays open.
-  intervalTimer = setInterval(() => void tick("interval"), CHECK_INTERVAL_MS);
-
-  // 3. Piggyback on Wealthfolio's own portfolio refreshes. The due-gate keeps this
-  //    from re-firing repeatedly: once today's sync lands, the account isn't due
-  //    again until tomorrow, so a snapshot-triggered portfolio update is a no-op.
-  ctx.api.events.portfolio.onUpdateComplete(() => void tick("portfolio-update")).then(
-    (un) => {
-      if (stopped) un();
-      else unlisteners.push(un);
-    },
-    () => {
-      /* events unavailable — startup + interval triggers still cover us */
-    },
-  );
-
+  // Shortly after load, hourly while the app stays open, and on Wealthfolio's own portfolio
+  // refreshes. The due-gate keeps the last from re-firing: once today's sync lands, the account
+  // isn't due again until tomorrow, so a snapshot-triggered portfolio update is a no-op.
+  const checks = startBackgroundChecks(ctx, tick, {
+    startupDelayMs: STARTUP_DELAY_MS,
+    intervalMs: CHECK_INTERVAL_MS,
+  });
   return {
     stop: () => {
       stopped = true;
-      if (startupTimer) clearTimeout(startupTimer);
-      if (intervalTimer) clearInterval(intervalTimer);
-      for (const un of unlisteners) {
-        try {
-          un();
-        } catch {
-          /* ignore */
-        }
-      }
+      checks.stop();
     },
   };
 }

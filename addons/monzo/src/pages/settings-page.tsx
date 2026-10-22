@@ -41,6 +41,7 @@ import {
   pendingState,
   saveSettings,
 } from "../lib/auth";
+import { loadAutoSyncError } from "../lib/auto-sync";
 import { copyText } from "../lib/clipboard";
 import { DEFAULT_CATEGORY_LABELS, MONZO_CATEGORIES } from "../lib/category-map";
 import { ensureMigrated } from "../lib/migrate";
@@ -166,14 +167,24 @@ export default function SettingsPage({ ctx }: AddonPageProps) {
       (await store.get<string | null>(KEY_LAST_SYNC, null)),
   });
 
-  const { data: autoSyncOn = true } = useQuery({
+  const { data: autoSyncOn } = useQuery({
     queryKey: ["monzo_auto_sync"],
     queryFn: () => store.get<boolean>(KEY_AUTO_SYNC, true),
   });
+  const { data: autoSyncError } = useQuery({
+    queryKey: ["monzo_auto_sync_error", lastRunIso],
+    queryFn: () => loadAutoSyncError(ctx, lastRunIso),
+  });
+  const [autoSyncSaveError, setAutoSyncSaveError] = useState<string | null>(null);
 
   async function setAutoSync(on: boolean) {
-    await store.set(KEY_AUTO_SYNC, on);
-    queryClient.invalidateQueries({ queryKey: ["monzo_auto_sync"] });
+    setAutoSyncSaveError(null);
+    try {
+      await store.set(KEY_AUTO_SYNC, on);
+      await queryClient.invalidateQueries({ queryKey: ["monzo_auto_sync"] });
+    } catch (err) {
+      setAutoSyncSaveError(`Could not save the setting: ${(err as Error).message}`);
+    }
   }
 
   useEffect(() => {
@@ -702,27 +713,38 @@ export default function SettingsPage({ ctx }: AddonPageProps) {
             <input
               type="checkbox"
               className="mt-1"
-              checked={autoSyncOn}
+              checked={autoSyncOn === true}
+              disabled={autoSyncOn === undefined}
               onChange={(e) => void setAutoSync(e.target.checked)}
             />
             <span>
               <span className="font-medium">Automatic sync</span>
               <span className="text-muted-foreground block text-xs">
                 While Wealthfolio is open, sync in the background when the last sync is more than 6
-                hours old. The first sync after connecting always stays manual.
+                hours old. The first sync after connecting always stays manual, and so does the
+                first one after Reset sync history.
               </span>
+              {autoSyncError && (
+                <span className="text-destructive block text-xs">
+                  The last automatic sync ({relativeTime(autoSyncError.at)}) failed:{" "}
+                  {autoSyncError.message}
+                </span>
+              )}
+              {autoSyncSaveError && (
+                <span className="text-destructive block text-xs">{autoSyncSaveError}</span>
+              )}
             </span>
           </label>
           <div className="flex items-center justify-between gap-3">
             <div>
               <p className="text-sm font-medium">Reset sync history</p>
               <p className="text-muted-foreground text-xs">
-                Forces the next sync to re-fetch the last 90 days (the whole history if you reconnected within the last few minutes).
+                Forces the next sync to re-fetch the last 90 days (the whole history if you reconnected within the last few minutes). Automatic sync resumes after that sync, which you start yourself.
               </p>
             </div>
             <ActionConfirm
               confirmTitle="Reset sync history?"
-              confirmMessage="The next sync will re-fetch the last 90 days (the whole history if you reconnected within the last few minutes). Transactions already in Wealthfolio are recognised and skipped, so this is safe; it just takes a little longer."
+              confirmMessage="The next sync will re-fetch the last 90 days (the whole history if you reconnected within the last few minutes). Transactions already in Wealthfolio are recognised and skipped, so this is safe; it just takes a little longer. Automatic sync pauses until you have run that sync yourself."
               confirmButtonText="Reset"
               isPending={false}
               handleConfirm={onResetSyncHistory}

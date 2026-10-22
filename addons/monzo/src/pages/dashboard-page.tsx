@@ -1,9 +1,10 @@
 import { useQuery } from "@tanstack/react-query";
 import { Button, Card, CardContent, EmptyPlaceholder, Icons } from "@wealthfolio/ui";
-import { addonRoute, jsonStore, type AddonPageProps } from "@wf-addons/kit";
+import { addonRoute, jsonStore, relativeTime, type AddonPageProps } from "@wf-addons/kit";
 import { PageShell, SyncActivity, type SyncPhase } from "@wf-addons/kit/ui";
 import { StatusCard } from "../components/status-card";
 import { ADDON_ID, KEY_LAST_RUN, KEY_LAST_SYNC } from "../constants";
+import { loadAutoSyncError } from "../lib/auto-sync";
 import { getConnectionStatus } from "../lib/auth";
 import { ensureMigrated } from "../lib/migrate";
 import { useSync } from "../hooks/use-sync";
@@ -36,6 +37,11 @@ export default function DashboardPage({ ctx }: AddonPageProps) {
         (await store.get<string | null>(KEY_LAST_SYNC, null))
       );
     },
+  });
+
+  const { data: autoSyncError } = useQuery({
+    queryKey: ["monzo_auto_sync_error", isSyncing, lastSyncIso],
+    queryFn: () => loadAutoSyncError(ctx, lastSyncIso),
   });
 
   const openSettings = () => ctx.api.navigation.navigate(addonRoute(ADDON_ID, "settings"));
@@ -79,6 +85,18 @@ export default function DashboardPage({ ctx }: AddonPageProps) {
                 Go to Settings →
               </button>
             )}
+          </CardContent>
+        </Card>
+      )}
+
+      {autoSyncError && !error && (
+        <Card>
+          <CardContent className="text-muted-foreground flex items-start gap-2 pt-6 text-sm">
+            <Icons.AlertTriangle size={18} className="shrink-0" weight="duotone" />
+            <span>
+              The last automatic sync ({relativeTime(autoSyncError.at)}) failed: {autoSyncError.message}{" "}
+              Press Sync Now to see the details, or check the connection in Settings.
+            </span>
           </CardContent>
         </Card>
       )}

@@ -211,27 +211,42 @@ export async function ensureCardAccount(
   return created.id;
 }
 
-/** Removes all data this add-on synced into an account under a given mode, then
- *  resets the connection's sync state. Used when a tracking-mode change is detected
- *  and confirmed: the stale data from the previous mode is cleared before re-syncing. */
+/**
+ * Gets an account ready to re-sync after its tracking mode changed away from `mode`, then resets
+ * the connection's sync state so the new mode starts from scratch. Returns a line for the log.
+ *
+ * - Away from TRANSACTIONS: the imported activities are deleted (a HOLDINGS account is read from
+ *   its snapshots, and the old trades would otherwise linger in Activities and income).
+ * - Away from HOLDINGS: nothing is deleted. Wealthfolio reads a TRANSACTIONS account from its
+ *   activities and keeps the old snapshots aside, unread, for a switch back
+ *   (`snapshot_service.rs` `is_read`). It would not let them be deleted anyway: a snapshot of an
+ *   account with a provider id can only be deleted when its date is invalid, so the delete failed
+ *   on every try and the backfill never started.
+ */
 export async function clearAccountData(
   ctx: AddonContext,
   connectionId: string,
   accountId: string,
   mode: T212TrackingMode,
-): Promise<void> {
+): Promise<string> {
+  let note: string;
   if (mode === "HOLDINGS") {
-    const snapshots = await ctx.api.snapshots.getAll(accountId);
-    for (const s of snapshots) await ctx.api.snapshots.delete(accountId, s.snapshotDate);
+    note =
+      "Kept the Holdings snapshots: Wealthfolio ignores them in Transactions mode and reads them " +
+      "again if you switch back.";
   } else {
     const activities = await ctx.api.activities.getAll(accountId);
     const ids = activities.map((a) => a.id).filter((id): id is string => Boolean(id));
     // Chunk deletes so a large history stays under the backend's batch limit.
     for (let i = 0; i < ids.length; i += CLEAR_CHUNK_SIZE) {
-      await ctx.api.activities.saveMany({ deleteIds: ids.slice(i, i + CLEAR_CHUNK_SIZE) });
+      const res = await ctx.api.activities.saveMany({ deleteIds: ids.slice(i, i + CLEAR_CHUNK_SIZE) });
+      const errors = (res as { errors?: { message: string }[] } | undefined)?.errors ?? [];
+      if (errors.length > 0) throw new Error(errors.map((e) => e.message).join("; "));
     }
+    note = `Deleted ${ids.length} Transactions-mode activities.`;
   }
   await resetSyncState(ctx, connectionId);
+  return note;
 }
 
 const CLEAR_CHUNK_SIZE = 100;

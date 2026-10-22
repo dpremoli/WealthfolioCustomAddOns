@@ -637,9 +637,18 @@ async function syncOne(
           error: `Tracking mode changed to ${liveMode}. Run Sync All and confirm to re-sync.`,
         };
       }
-      log.push(`Tracking mode changed ${current} → ${liveMode}; clearing ${current} data and re-syncing.`);
-      onProgress({ phase: "map", message: `Clearing ${current.toLowerCase()} data…` });
-      await clearAccountData(ctx, conn.id, accountId, current);
+      log.push(`Tracking mode changed ${current} → ${liveMode}; re-syncing in ${liveMode} mode.`);
+      onProgress({ phase: "map", message: `Switching to ${liveMode.toLowerCase()} mode…` });
+      try {
+        log.push(await clearAccountData(ctx, conn.id, accountId, current));
+      } catch (e) {
+        // Leave the connection on its old mode so the user can retry (or switch back) knowingly.
+        const message =
+          `Could not switch to ${liveMode} mode: deleting the ${current} data failed (${errDetail(e)}). ` +
+          "Nothing was re-synced; try again, or switch the account back in Wealthfolio.";
+        log.push(message);
+        return { ...base, imported: 0, duplicates: 0, unresolved: 0, finishedAt: new Date().toISOString(), error: message };
+      }
       await updateConnection(ctx, conn.id, { trackingMode: liveMode });
       mode = liveMode;
     }

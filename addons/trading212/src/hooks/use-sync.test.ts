@@ -967,6 +967,56 @@ describe("useSync — tracking-mode drift", () => {
   });
 });
 
+describe("useSync — switching a Holdings account to Transactions", () => {
+  it("keeps the snapshots (never calls the refused delete) and starts the full backfill", async () => {
+    let downloads = 0;
+    net(async (url: string) => {
+      const u = String(url);
+      if (u.includes("amazonaws.com")) return textResponse(++downloads === 1 ? SAMPLE_CSV : CSV_HDR);
+      if (u.includes("/exports")) return jsonResponse([FINISHED_REPORT]);
+      return routeFetch(u);
+    });
+    const { ctx, snapshotsDelete, importFn, storage } = makeCtx({
+      connections: [{ id: "c1", name: "Invest", accountId: "acc-1", trackingMode: "HOLDINGS" }],
+      existingAccounts: [{ id: "acc-1", trackingMode: "TRANSACTIONS" }],
+      existingSnapshots: [{ snapshotDate: "2026-01-01" }],
+      syncStates: { c1: { lastSync: "2026-03-01T00:00:00.000Z", importedRefs: [] } },
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { result } = renderHook(() => useSync(ctx as any));
+    await act(async () => {
+      await result.current.syncAll(new Set(["c1"]));
+    });
+
+    const r = result.current.results!.perAccount[0];
+    expect(r.error).toBeUndefined();
+    expect(snapshotsDelete).not.toHaveBeenCalled();
+    expect(r.log.join("\n")).toMatch(/Kept the Holdings snapshots[\s\S]*Full backfill/);
+    expect(importFn).toHaveBeenCalled();
+    expect(JSON.parse(storage.get("t212_connections")!)[0].trackingMode).toBe("TRANSACTIONS");
+  });
+
+  it("stops with a clear message, and keeps the old mode, when deleting the old activities fails", async () => {
+    net((url) => routeHoldingsFetch(url));
+    const { ctx, snapshotsSave, activitiesSaveMany, storage } = makeCtx({
+      connections: [{ id: "c1", name: "Invest", accountId: "acc-1", trackingMode: "TRANSACTIONS" }],
+      existingAccounts: [{ id: "acc-1", trackingMode: "HOLDINGS" }],
+      existingActivities: [{ id: "a1" }],
+    });
+    activitiesSaveMany.mockRejectedValueOnce(new Error("database is locked"));
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { result } = renderHook(() => useSync(ctx as any));
+    await act(async () => {
+      await result.current.syncAll(new Set(["c1"]));
+    });
+
+    const r = result.current.results!.perAccount[0];
+    expect(r.error).toMatch(/Could not switch to HOLDINGS mode.*database is locked/);
+    expect(snapshotsSave).not.toHaveBeenCalled();
+    expect(JSON.parse(storage.get("t212_connections")!)[0].trackingMode).toBe("TRANSACTIONS");
+  });
+});
+
 describe("runSyncAll — onlyConnectionIds filter (background scheduler)", () => {
   beforeEach(() => {
     net((url) => routeFetch(url));

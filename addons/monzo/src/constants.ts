@@ -51,6 +51,8 @@ export const KEY_AUTHENTICATED_AT = "monzo_authenticated_at";
 export const KEY_RECHECKED_90_DAYS = "monzo_rechecked_90_days";
 /** JSON: what the dashboard shows of the last successful sync (its result and step list). */
 export const KEY_LAST_RESULT = "monzo_last_result";
+/** JSON boolean: sync in the background while Wealthfolio is open. On unless `false`. */
+export const KEY_AUTO_SYNC = "monzo_auto_sync";
 /** JSON: category id -> custom label. */
 export const KEY_CATEGORY_LABELS = "monzo_category_labels";
 

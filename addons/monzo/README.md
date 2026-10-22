@@ -120,6 +120,16 @@ link that did not come from your own Connect click is rejected.
 
 ## Syncing
 
+- **Automatic sync** (on by default; Settings -> Advanced to turn it off). Once you have synced
+  at least once, the add-on syncs by itself in the background whenever the last sync is more
+  than 6 hours old: shortly after Wealthfolio loads, every hour after that, and when Wealthfolio
+  finishes refreshing its portfolio. It only runs **while Wealthfolio is open** (the add-on
+  lives inside the app, there is no server-side job), so a self-hosted install needs a browser
+  tab open, and Monzo's 90-day limit still applies if you stay away longer. The first sync
+  after connecting stays manual. Background runs never overlap a manual sync or CSV import.
+  If one fails (for instance Monzo wants the connection approved in its app), it is logged
+  quietly and not retried for 6 hours; **Sync Now** shows the error. The dashboard shows the
+  result of background syncs like any other.
 - **Sync Now** fetches transactions since the last sync, 100 per request, for each mapped
   account, filters them, and imports what is new.
 - Re-syncing is safe. Instead of relying on Wealthfolio's content-hash duplicate detection

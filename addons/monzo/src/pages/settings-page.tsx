@@ -18,6 +18,7 @@ import { PageShell } from "@wf-addons/kit/ui";
 import { useEffect, useRef, useState } from "react";
 import {
   ADDON_ID,
+  KEY_AUTO_SYNC,
   KEY_CATEGORY_LABELS,
   KEY_LAST_RUN,
   KEY_LAST_SYNC,
@@ -164,6 +165,16 @@ export default function SettingsPage({ ctx }: AddonPageProps) {
       (await store.get<string | null>(KEY_LAST_RUN, null)) ??
       (await store.get<string | null>(KEY_LAST_SYNC, null)),
   });
+
+  const { data: autoSyncOn = true } = useQuery({
+    queryKey: ["monzo_auto_sync"],
+    queryFn: () => store.get<boolean>(KEY_AUTO_SYNC, true),
+  });
+
+  async function setAutoSync(on: boolean) {
+    await store.set(KEY_AUTO_SYNC, on);
+    queryClient.invalidateQueries({ queryKey: ["monzo_auto_sync"] });
+  }
 
   useEffect(() => {
     if (savedCategoryLabels) setCategoryOverrides(savedCategoryLabels);
@@ -687,6 +698,21 @@ export default function SettingsPage({ ctx }: AddonPageProps) {
           <CardDescription>Sync management and troubleshooting.</CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
+          <label className="flex items-start gap-2 text-sm cursor-pointer">
+            <input
+              type="checkbox"
+              className="mt-1"
+              checked={autoSyncOn}
+              onChange={(e) => void setAutoSync(e.target.checked)}
+            />
+            <span>
+              <span className="font-medium">Automatic sync</span>
+              <span className="text-muted-foreground block text-xs">
+                While Wealthfolio is open, sync in the background when the last sync is more than 6
+                hours old. The first sync after connecting always stays manual.
+              </span>
+            </span>
+          </label>
           <div className="flex items-center justify-between gap-3">
             <div>
               <p className="text-sm font-medium">Reset sync history</p>

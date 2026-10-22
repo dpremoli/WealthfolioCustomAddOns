@@ -1,7 +1,7 @@
 {
   "id": "monzo-addon",
   "name": "Monzo Bank Sync",
-  "version": "2.5.0",
+  "version": "2.6.0",
   "description": "Sync Monzo Bank transactions straight into your Wealthfolio cash accounts, for the spending module. No proxy server needed.",
   "author": "dpremoli",
   "license": "GPL-3.0-only",
@@ -63,6 +63,11 @@
       "category": "network",
       "functions": ["request"],
       "purpose": "Call the Monzo API (api.monzo.com) to exchange OAuth codes and fetch accounts and transactions"
+    },
+    {
+      "category": "events",
+      "functions": ["onUpdateComplete"],
+      "purpose": "Check whether a background sync is due when Wealthfolio refreshes its portfolio"
     },
     {
       "category": "ui",

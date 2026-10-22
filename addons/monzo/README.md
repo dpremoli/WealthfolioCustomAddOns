@@ -48,7 +48,9 @@ Monzo, paste its details into the add-on, and connect.
   breakdown.
 - **Links moves with your Trading 212 Cash ISA.** When the Trading 212 add-on's Cash ISA
   account is in Wealthfolio too (the account it creates, or one whose name mentions Trading 212 and ISA),
-  each sync looks for the other half of every savings move whose payee reads "Trading 212": same
+  each sync looks for the other half of every savings move whose payee points at Trading 212
+  ("Trading 212", "Trading TwoOneTwo", or one of your Trading 212 account numbers as the
+  reference): same
   amount and currency, opposite direction, dated within 3 days, neither row already linked. For
   a confident match (the closest date; an exact tie is skipped and logged) both rows are turned
   into a `TRANSFER_OUT` / `TRANSFER_IN` in place and linked through Wealthfolio's transfer-link
@@ -57,7 +59,8 @@ Monzo, paste its details into the add-on, and connect.
   towards its allowance. A transfer you already made by hand (and linked) is recognised as the
   same move, not imported again, even when its date is up to 3 days from the Monzo one. The
   Trading 212 add-on does the same from its side when you import the Cash ISA CSV, so it does
-  not matter which add-on sees the pair second. Known limit: "Trading 212" is also the payee
+  not matter which add-on sees the pair second. (The Trading 212 add-on, from 2.6.0, links your
+  Invest and Stocks ISA top-ups with these Monzo rows the same way.) Known limit: "Trading 212" is also the payee
   when you top up a Trading 212 Invest or Stocks ISA account, which this matcher cannot see, so
   if you fund both and two same-amount moves fall within 3 days, one can be linked to the wrong
   row (unlink it in Wealthfolio's Link Transfer dialog).

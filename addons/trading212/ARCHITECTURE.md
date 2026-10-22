@@ -58,6 +58,10 @@ can no longer be expressed, so a key ID **and** secret are required.
 | `src/lib/symbol-resolver.ts` | Maps a Trading 212 ticker to a Wealthfolio symbol via `market.searchTicker`, with in-memory + persisted caching. Shared across all connections (mapping is account-independent). |
 | `src/lib/mapper.ts` / `csv.ts` | Pure functions: Trading 212 order/dividend/transaction (JSON) and export CSV rows → `ActivityImport` (take `accountId` as a param). Final-cash and FX rules live here. |
 | `src/lib/auto-sync.ts` | Background scheduler (startup, hourly, `onUpdateComplete`). |
+| `src/lib/importer.ts` | `ActivityImporter`: reconcile (kit `selectNewActivities`, each account read once per sync) → `checkImport` → `import` in 1000-row calls, halving a refused call, keeping an `ImportUnit` (rows that must land in one call) together, and returning every row it could not import with Wealthfolio's reason. |
+| `src/lib/card-funding.ts` | The transfer pair that funds each card row from the investing account (and the pairs for card rows imported before). |
+| `src/lib/verify.ts` | The backfill check: Wealthfolio's holdings/cash vs `/positions` + `/account/summary`, and `PortfolioUpdates`, which waits for the recalculation an import queued. |
+| `src/lib/interest.ts` | Optional folding of daily interest on cash into monthly totals during a backfill. |
 | `src/hooks/use-config.ts` | All storage/secret reads/writes (shared settings, connections list, credentials, per-connection sync state, shared symbol map) + the one-time v1→v2 migration (`ensureMigrated`). |
 | `src/hooks/use-sync.ts` | Sync orchestration: `runSyncAll()` loops connections sequentially → fetch → resolve → map → `checkImport` → `import`; `useSync` wraps it for React. |
 | `src/pages/settings-page.tsx` | Shared env/auto-sync/card settings, connected-accounts list (health, update key, reset, remove), "Add account" form (Invest/ISA picker → editable name, key ID + secret). |
@@ -113,10 +117,13 @@ request the next page; a `null` `nextPagePath` ends the loop.
 ## Sync flow (`use-sync.ts`)
 
 `syncAll()` loads the shared settings + the connections list, builds **one shared**
-`SymbolResolver` from the cached symbol map, then iterates the connections
-**sequentially** (Trading 212 is rate-limited; parallel keys would multiply 429s).
-Each connection is synced by `syncOne()`; one failing key is caught and reported per
-account without aborting the rest. After the loop the symbol cache is written **once**.
+`SymbolResolver` from the cached symbol map, then syncs the connections **side by side**
+(Trading 212 rate-limits per API key, and each connection has its own; the resolver shares a
+lookup already in flight). Each connection is synced by `syncOne()`; one failing key is caught
+and reported per account without aborting the rest. Afterwards each Transactions-mode account's
+deposits and withdrawals are linked with the bank side of the move (kit `linkMovesBetween`, bank
+rows whose payee is Trading 212 or one of the user's Trading 212 account numbers), one account at
+a time, and the symbol cache is written **once**.
 
 `syncOne(ctx, settings, conn, resolver)`:
 
@@ -134,11 +141,14 @@ account without aborting the rest. After the loop the symbol cache is written **
      symbol (see below). A trade with no resolvable symbol is skipped and counted as
      `unresolved`. Interest needs no symbol.
    - Build the `ActivityImport` via the mapper (with `conn.accountId`) and a **stable `id`**.
-4. Reconcile against `activities.getAll(conn.accountId)` with the kit's
-   `selectNewActivities` (content key, **by count**), then `checkImport` the rest for
-   validation → drop `isValid === false` → `import` with `forceImport`. checkImport's own
-   `duplicateOfId` is ignored: it is a content hash, so it would drop the second of two
-   genuinely identical same-day rows (two equal deposits).
+4. Hand the rows to the connection's `ActivityImporter`: reconcile against the account's
+   activities (read once per sync, kept current in memory) with the kit's
+   `selectNewActivities` (content key, **by count**), `checkImport` the rest, leave out
+   `isValid === false` rows (reported with Wealthfolio's reason), and `import` with
+   `forceImport` in calls of up to 1000 rows. checkImport's own `duplicateOfId` is ignored: it is
+   a content hash, so it would drop the second of two genuinely identical same-day rows (two
+   equal deposits). A refused call is halved until the offending row is isolated and reported;
+   the sync carries on, and ends with an error if a trade was left out.
 5. Record the ids of imported + already-present rows into this connection's imported-ref
    set, and set its `lastSync` watermark to when this run **started** (pages are read
    newest-first from that instant; a full backfill uses the instant it first started,
@@ -164,9 +174,21 @@ API has no `update`, so the add-on can only set the mode at `accounts.create(...
 user changes the mode natively in Wealthfolio afterwards, `syncOne` **detects the drift**
 (live `account.trackingMode` ≠ the connection's recorded mode). Because reconciling means
 deleting the data synced under the old mode, the dashboard shows an **AlertDialog** and only
-the confirmed connections (passed to `syncAll(confirmedModeSwitches)`) are cleared via
-`clearAccountData` (`activities.saveMany({deleteIds})` for TRANSACTIONS, `snapshots.delete`
-per date for HOLDINGS) and re-synced; unconfirmed drifted connections are skipped.
+the confirmed connections (passed to `syncAll(confirmedModeSwitches)`) are prepared by
+`clearAccountData` and re-synced; unconfirmed drifted connections are skipped. Away from
+TRANSACTIONS the imported activities are deleted (`activities.saveMany({deleteIds})`). Away from
+HOLDINGS nothing is deleted: Wealthfolio reads a TRANSACTIONS account from its activities and
+keeps the old snapshots aside, unread (`snapshot_service.rs` `is_read`), and it refuses to
+delete a snapshot of an account with a provider id unless the date is invalid — which is why
+the old `snapshots.delete` loop failed on every try and the backfill never started. A refused
+delete ends the sync with a clear error and leaves the connection on its old mode.
+
+**Backfill check.** When a TRANSACTIONS backfill finishes (and on every later sync until it
+matches), `verifyAccount` waits for the recalculation the import queued (`PortfolioUpdates`:
+an `onUpdateStart` after the last import, then its `onUpdateComplete`; up to 3 min), then
+compares `portfolio.getHoldings(accountId)` with `/equity/positions` (resolved with the same
+resolver) and the account-currency cash from `/account/summary`. Differences are logged, fail the
+sync, and are kept in `t212_sync_{id}.verification` for the dashboard badge.
 
 ### Background auto-sync (`auto-sync.ts`)
 
@@ -261,6 +283,13 @@ mode) calls `ensureCardAccount` to create a dedicated **CASH** account `"<name> 
 card rows there via `mapCsvRow(row, accountId, resolver, cardAccountId)` — so card spend stays
 out of the investing account and Wealthfolio 3.5.0's Spending module can categorise it.
 
+Trading 212 pays card spending out of the investing account's cash, so each card row is imported
+as an `ImportUnit` with a transfer pair (`withCardFunding`): investing → card for a purchase,
+card → investing for a refund or cashback, same date, currency and amount. Wealthfolio links a
+TRANSFER_OUT/TRANSFER_IN pair in different accounts when both arrive in **one** import call, so
+the importer never splits a unit. `fundExistingCardRows` adds the pair for card rows imported
+before (deduplicated by content, so it is a no-op once done).
+
 `spending-category.ts` maps the T212 `Merchant category` onto a Wealthfolio spending label
 (`mapSpendingCategory`), appended to the activity comment as `"MERCHANT · Label"`. The add-on
 SDK (3.3.0) has **no structured spending-category field** on `ActivityImport`, so the label is
@@ -317,8 +346,12 @@ Trading 212 tickers look like `AAPL_US_EQ`. `resolveTicker` queries the host
    same-exchange collisions like TSM vs TSMN at XNYS/XNAS.
 
 `resolveTicker` returns `{ symbol, exchangeMic? }`; the HOLDINGS sync forwards the
-MIC into `SnapshotHoldingInput.exchangeMic` so Wealthfolio pins the asset to the
-right listing (without it, ticker collisions resolve to Yahoo's default). It also
+MIC into `SnapshotHoldingInput.exchangeMic`, and every imported trade and dividend carries it
+too (`importAssetFields`: symbol, `exchangeMic`, `instrumentType: "EQUITY"`), so Wealthfolio pins
+the asset to the right listing in both modes. Without a MIC it resolves ticker collisions to its
+default listing, and its import infers a bare `LTC`/`BTC`… as crypto
+(`activities_service.rs` `infer_asset_kind`). Search hits that are crypto pairs, currencies or
+indices (`isNonSecurity`) are never picked. It also
 takes an optional `onDiag` callback: on a live lookup (cache miss) the HOLDINGS
 sync logs the raw candidate pool + chosen symbol into the sync report's Details
 panel, so cross-listing resolution can be verified against real search output.
@@ -425,8 +458,10 @@ versions must match or packaging refuses. The bundle imports only host-provided 
 
 ## Extension points & known limitations
 
-- **Stock splits / distributions**: non-`TRADE` fills are currently skipped. Mapping
-  them to `SPLIT` is the natural next step (`mapper.ts`).
+- **Stock splits / distributions / result adjustments / currency conversions**: still skipped
+  (listed in the log; the backfill check reports what they leave wrong). Wealthfolio's `SPLIT`
+  takes the ratio in `amount`, needs the asset, and applies to lots bought strictly before the
+  split day. The CSV row formats are not documented, so they wait for real export rows.
 - **Instruments metadata**: the ~5 MB feed can't pass the 2 MB cap, so HOLDINGS relies on the
   instrument data embedded in positions/orders. A future metadata fallback would need a
   different source.

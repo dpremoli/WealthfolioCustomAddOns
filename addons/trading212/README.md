@@ -92,7 +92,10 @@ are verified before they replace the stored ones.
 >
 > The mode is fixed when the account is created — the add-on can't change it afterwards.
 > To switch, change the account's tracking mode in Wealthfolio, then **Sync All**: the
-> add-on detects the change and asks before clearing the old data and re-syncing.
+> add-on detects the change and asks before re-syncing. **Holdings → Transactions** imports
+> the full history and keeps the old snapshots (Wealthfolio ignores them in Transactions mode
+> and uses them again if you switch back; it would not let an add-on delete them anyway).
+> **Transactions → Holdings** deletes the imported activities and writes a snapshot.
 
 > **Automatic sync (on by default):** once an account has been synced once, the add-on
 > refreshes it on its own — about once a day, and whenever Wealthfolio refreshes its
@@ -113,11 +116,23 @@ are verified before they replace the stored ones.
 > activities. Categories you set by hand are never overwritten. Works in both Holdings and
 > Transactions modes.
 >
+> Card purchases are paid out of the investing account's cash, so each card row comes with a
+> linked **transfer** that moves the money from the investing account to the card account
+> (refunds and cashback go back the other way). The card account therefore stays at zero, the
+> investing account's cash matches Trading 212, and the purchases still count as spending. Card
+> rows imported by earlier versions get their transfer on the next sync.
+>
 > You can also choose the **card account type** (Cash or Credit Card) right below the toggle.
 > *Cash* is accurate for the debit card; *Credit Card* models it as a liability so Wealthfolio
 > can link payments from a tracked cash account as transfers (avoiding double-counted spending).
 > The type is applied when the card account is first created — to retype an existing one, use
 > Wealthfolio's **Update Account** dialog.
+
+> **Monthly interest totals (off by default):** Trading 212 pays interest on cash every day,
+> which adds up to thousands of rows. With **Settings → Connection → Monthly interest totals**
+> on, a Transactions-mode backfill imports one interest row per month (for the months before
+> the backfill; the current month stays daily). It applies to the next full backfill, and
+> switching it never counts interest twice.
 
 > **Renaming / removing:** rename or delete the accounts in Wealthfolio's own **Accounts**
 > page. Removing an account in the add-on only forgets the stored credentials — the Wealthfolio
@@ -138,17 +153,48 @@ are verified before they replace the stored ones.
 | Withdrawal | `WITHDRAWAL` |
 | Fee | `FEE` |
 | Transfer | `TRANSFER_IN` / `TRANSFER_OUT` |
+| Card debit / credit / cashback (with card extraction on) | `WITHDRAWAL` / `DEPOSIT` / `INTEREST` on the card account, plus a linked transfer pair with the investing account |
 
 Holdings are derived by Wealthfolio from these activities — make sure the account
 stays in **`TRANSACTIONS`** tracking mode.
+
+**Not imported yet:** stock splits, stock distributions, result adjustments and currency
+conversions. They are listed in the sync log ("Skipped (not imported): …"), and the check
+below reports the positions and cash they leave wrong.
+
+### Checking a backfill against Trading 212
+
+When a Transactions-mode backfill finishes, the add-on waits for Wealthfolio to recalculate the
+account and compares what it shows with Trading 212 — every position from `/equity/positions`
+(the call Holdings mode uses) and the cash from `/equity/account/summary`. Each difference is
+listed in the sync log (a wrong quantity, a position on one side only, an instrument that did not
+match a symbol, cash in the wrong amount or left in another currency), the sync ends with an
+error, and the dashboard shows **"N differences from Trading 212"** with the list on hover. The
+check runs again on every sync until the account matches, then shows **"Matches Trading 212"**.
+
+Every row Wealthfolio did not import is listed too, with its type, date, symbol, Trading 212
+id and Wealthfolio's reason, as is every trade whose instrument did not match a symbol; a sync
+that left out a trade ends with an error saying holdings will not match.
+
+### Moves to and from your bank
+
+After a Transactions-mode sync, each deposit and withdrawal is paired with the bank side of the
+move in your other Wealthfolio accounts (a Monzo or Revolut account another add-on keeps, say)
+and turned into a **linked transfer**: same amount and currency within 3 days, and the bank row's
+payee must point at Trading 212 — "Trading 212", "Trading TwoOneTwo", or one of your Trading 212
+account numbers as the reference. Ties are left alone, and so is a deposit with no counterpart:
+it stays a deposit, which is what Wealthfolio's ISA allowance counts.
 
 ### Symbol matching
 
 Each Trading 212 ticker (e.g. `AAPL_US_EQ`) is matched to a Wealthfolio symbol
 using Wealthfolio's own market-data search (`searchTicker`), trying the instrument
 ISIN, then the base ticker, then the name, and preferring symbols you already hold.
-Resolutions are cached. Trades whose symbol can't be matched are skipped and
-reported as "unmatched symbols" on the dashboard.
+Crypto pairs, currencies and indices are never picked. Resolutions are cached and shared by
+both sync modes, and every imported trade and dividend carries the listing's exchange (MIC),
+like Holdings snapshots do, so both modes land on the same asset (without it Wealthfolio picks
+its own default listing, and a ticker such as `LTC` becomes Litecoin). Trades whose symbol
+can't be matched are skipped and listed in the sync log.
 
 ### Incremental & idempotent sync
 
@@ -164,7 +210,8 @@ per-account **Reset sync** button in Settings to force a full re-scan of that ac
 Trading 212 enforces strict per-endpoint limits (instruments 1/50s, history
 6/min, account 1/5s). The client backs off and retries on `429`, honouring
 `Retry-After` / `x-ratelimit-reset`, so a first sync of a long history can take a
-little while.
+little while. The limits are per API key, so your accounts sync side by side, and activities
+are imported up to 1,000 per call (each call makes Wealthfolio recalculate the portfolio).
 
 Card transactions only exist in CSV exports, and Trading 212 takes 15–80 s to prepare each
 export under its rate limits. So recent card history is refreshed **at most every 3 hours**
@@ -247,6 +294,19 @@ never a separate fee.
 - Requests can only reach the hosts declared in the manifest, over HTTPS.
 
 ---
+
+## Upgrading to 2.6.0
+
+- **Switching an account from Holdings to Transactions works now.** It used to stop at
+  "Clearing holdings data…" because Wealthfolio refuses to delete an add-on account's snapshots;
+  the old snapshots are now kept (Wealthfolio ignores them in Transactions mode).
+- **Card accounts get their funding transfers** on the next sync, so the card account's balance
+  goes to zero and the investing account's cash goes down by what the card spent.
+- **A Transactions-mode backfill is checked against Trading 212** (see above). Existing accounts
+  are checked after their next full backfill; use **Reset** in Settings to run one.
+- Deposits and withdrawals are linked with your bank's side of the move.
+- Updating adds two permissions (`portfolio.getHoldings`, `events.onUpdateStart`), so
+  Wealthfolio asks you to approve the add-on's permissions again.
 
 ## Upgrading to 2.5.0 (Cash ISA moves)
 

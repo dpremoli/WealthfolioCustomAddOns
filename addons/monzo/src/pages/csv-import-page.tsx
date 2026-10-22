@@ -302,7 +302,7 @@ export default function CsvImportPage({ ctx }: AddonPageProps) {
                 disabled={locked}
                 onChange={(e) => setSkipTransfers(e.target.checked)}
               />
-              Skip transfers &amp; savings (bank transfers, Trading 212, etc.). Flex repayments and refunds are kept.
+              Skip bank transfers. Flex repayments and refunds, and savings moves (to Trading 212 and the like), are kept.
             </label>
 
             <Button onClick={doImport} disabled={locked || ready.length === 0}>

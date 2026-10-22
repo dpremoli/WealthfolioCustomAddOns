@@ -1,5 +1,14 @@
 import type { ActivityImport, AddonContext } from "@wealthfolio/addon-sdk";
-import { jsonStore, locateLedgerRows, type ImportLedger } from "@wf-addons/kit";
+import {
+  T212_CASH_ISA_PROVIDER_ID,
+  TRADING_212_PAYEE,
+  convertAndLinkMoves,
+  jsonStore,
+  locateLedgerRows,
+  type ImportLedger,
+  type MoveLinkOutcome,
+  type MoveRow,
+} from "@wf-addons/kit";
 import { KEY_IMPORTED_IDS } from "../constants";
 import type { MonzoTransaction } from "../types";
 import { FLEX_CREDIT_SUFFIX, flexRepaymentCredit, isFlexRepaymentDebit } from "./mapper";
@@ -147,4 +156,42 @@ export function flexCreditsOf(
   return transactions
     .filter(isFlexRepaymentDebit)
     .map((tx) => flexRepaymentCredit(tx, flexAccountId, categoryLabels, ownNames));
+}
+
+const MOVE_TYPES = ["WITHDRAWAL", "DEPOSIT", "TRANSFER_OUT", "TRANSFER_IN"];
+
+/**
+ * Pairs Monzo savings moves with Trading 212 Cash ISA rows and, for each confident pair, converts
+ * both to a linked transfer (see kit `convertAndLinkMoves`). The Cash ISA is the account the
+ * Trading 212 add-on keeps it in (`providerAccountId`), or one named "... Cash ISA". Only Monzo
+ * rows whose payee reads "Trading 212" take part, so two unrelated moves of the same amount are
+ * not mistaken for each other; a row with no counterpart, or a tie, is left as it is (an unlinked
+ * transfer would drop an ISA deposit from the allowance). Does nothing when there is no Cash ISA.
+ */
+export async function matchWithCashIsa(
+  ctx: AddonContext,
+  monzoAccountIds: string[],
+): Promise<MoveLinkOutcome> {
+  const none: MoveLinkOutcome = { linked: 0, ambiguous: [], failed: [] };
+  try {
+    const accounts = await ctx.api.accounts.getAll();
+    const isaIds = accounts
+      .filter(
+        (a) =>
+          !monzoAccountIds.includes(a.id) &&
+          (a.providerAccountId === T212_CASH_ISA_PROVIDER_ID || /cash\s*isa/i.test(a.name)),
+      )
+      .map((a) => a.id);
+    if (isaIds.length === 0) return none;
+
+    const rowsOf = async (ids: string[]) =>
+      (await Promise.all(ids.map((id) => ctx.api.activities.getAll(id))))
+        .flat()
+        .filter((r) => MOVE_TYPES.includes(r.activityType)) as unknown as MoveRow[];
+    const mine = (await rowsOf(monzoAccountIds)).filter((r) => TRADING_212_PAYEE.test(r.comment ?? ""));
+    if (mine.length === 0) return none;
+    return await convertAndLinkMoves(ctx, mine, await rowsOf(isaIds));
+  } catch (err) {
+    return { ...none, failed: [(err as Error).message] };
+  }
 }

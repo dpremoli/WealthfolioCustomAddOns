@@ -1,5 +1,6 @@
 import type { ActivityImport } from "@wealthfolio/addon-sdk";
 import {
+  adoptUntrackedRows,
   contentKey,
   ledgerAccountId,
   ledgerEntry,
@@ -238,5 +239,58 @@ describe("locateLedgerRows", () => {
     // Asking only for tx_2 must not return the row tx_1 already stands for.
     expect(locateLedgerRows(rows, ledger, "acc", ["tx_2"]).get("tx_2")?.id).toBe("act-2");
     expect(locateLedgerRows(rows, ledger, "acc", ["tx_1"]).get("tx_1")?.id).toBe("act-1");
+  });
+});
+
+describe("adoptUntrackedRows", () => {
+  const incoming = (id: string, type: string, amount: number, date: string, comment = "Trading 212 | Savings") => ({
+    ...cash(amount, comment, date),
+    id,
+    activityType: type as ActivityImport["activityType"],
+  });
+  const hand = (type: string, amount: number, date: string) => ({
+    ...stored(incoming("x", type, amount, date, "moved by hand")),
+    id: "act-1",
+  });
+  const opts = { equivalents: { DEPOSIT: ["TRANSFER_IN"], WITHDRAWAL: ["TRANSFER_OUT"] } };
+
+  it("takes a hand-made transfer for the same move instead of importing it again", () => {
+    const desired = incoming("tx_1", "DEPOSIT", 300, "2026-10-04T10:00:00.000Z");
+    const row = hand("TRANSFER_IN", 300, "2026-10-04T00:00:00.000Z");
+    const r = reconcileWithLedger([desired], [row], {}, "acc");
+    expect(r.toImport).toHaveLength(1);
+    const out = adoptUntrackedRows(r.toImport, [row], r.ledger, "acc", opts);
+    expect(out.toImport).toEqual([]);
+    expect(out.adopted.map((a) => a.id)).toEqual(["tx_1"]);
+  });
+
+  it("uses each hand-made row once, and only for a matching direction, amount and date", () => {
+    const row = hand("TRANSFER_OUT", 300, "2026-10-04T00:00:00.000Z");
+    const a = incoming("tx_1", "WITHDRAWAL", 300, "2026-10-04T10:00:00.000Z");
+    const b = incoming("tx_2", "WITHDRAWAL", 300, "2026-10-04T11:00:00.000Z");
+    const wrongAmount = incoming("tx_3", "WITHDRAWAL", 301, "2026-10-04T10:00:00.000Z");
+    const wrongDay = incoming("tx_4", "WITHDRAWAL", 300, "2026-10-09T10:00:00.000Z");
+    const wrongWay = incoming("tx_5", "DEPOSIT", 300, "2026-10-04T10:00:00.000Z");
+    const out = adoptUntrackedRows([a, b, wrongAmount, wrongDay, wrongWay], [row], {}, "acc", opts);
+    expect(out.adopted.map((x) => x.id)).toEqual(["tx_1"]);
+    expect(out.toImport.map((x) => x.id)).toEqual(["tx_2", "tx_3", "tx_4", "tx_5"]);
+  });
+
+  it("only adopts rows the caller allows, and never a row the ledger already accounts for", () => {
+    const row = hand("TRANSFER_IN", 300, "2026-10-04T00:00:00.000Z");
+    const coffee = incoming("tx_1", "DEPOSIT", 300, "2026-10-04T10:00:00.000Z", "Refund | Shopping");
+    const only = (a: ActivityImport) => a.id !== "tx_1";
+    expect(adoptUntrackedRows([coffee], [row], {}, "acc", { ...opts, eligible: only }).toImport).toHaveLength(1);
+
+    const first = incoming("tx_2", "DEPOSIT", 300, "2026-10-04T10:00:00.000Z");
+    const { ledger } = reconcileWithLedger([first], [], {}, "acc");
+    const tracked = { ...stored({ ...first, activityType: "TRANSFER_IN" as ActivityImport["activityType"] }), id: "act-2" };
+    // The ledger holds tx_2 as a DEPOSIT row; this TRANSFER_IN row is not that row, so a hand edit.
+    const second = incoming("tx_3", "DEPOSIT", 300, "2026-10-04T11:00:00.000Z");
+    const r = reconcileWithLedger([second], [tracked], ledger, "acc");
+    expect(adoptUntrackedRows(r.toImport, [tracked], r.ledger, "acc", opts).adopted).toHaveLength(1);
+    const sameRow = { ...stored(first), id: "act-3" };
+    const r2 = reconcileWithLedger([second], [sameRow], ledger, "acc");
+    expect(adoptUntrackedRows(r2.toImport, [sameRow], r2.ledger, "acc", opts).adopted).toEqual([]);
   });
 });

@@ -1,4 +1,5 @@
 import type { ActivityImport, AddonContext } from "@wealthfolio/addon-sdk";
+import { moveLinkNote } from "@wf-addons/kit";
 import type { MonzoTransaction } from "../types";
 import { runExclusive } from "./busy";
 import {
@@ -6,15 +7,17 @@ import {
   isFlexRepayment,
   isFlexRepaymentDebit,
   isPotTransfer,
+  isSavingsMove,
   legacyActivity,
   mapTransactionToActivity,
 } from "./mapper";
 import { importNew } from "./sync";
-import { flexCreditsOf, linkNote, linkTransfers } from "./transfers";
+import { flexCreditsOf, linkNote, linkTransfers, matchWithCashIsa } from "./transfers";
 
 /**
  * Drops what should not count as spending: pot transfers always, and (with `skipTransfers`)
- * the `transfers` and `savings` categories. Flex repayments and refunds are not spending
+ * the `transfers` category. Savings moves (to Trading 212 and the like) are kept: they change the
+ * balance, so they are imported as ordinary withdrawals and deposits. Flex repayments and refunds are not spending
  * either, but they are not dropped by `skipTransfers`: they move money between the current
  * account and Flex, and are kept as transfers. A repayment needs a Flex account to credit
  * (`flexTracked`) and is dropped without one; a credit that looks like a repayment is always
@@ -29,7 +32,7 @@ export function filterCsvTransactions(
 ): MonzoTransaction[] {
   return transactions.filter((tx) => {
     if (isPotTransfer(tx)) return false;
-    if (isFlexRefund(tx)) return true;
+    if (isFlexRefund(tx) || isSavingsMove(tx)) return true;
     if (isFlexRepayment(tx)) return flexTracked && !isFlexFile && isFlexRepaymentDebit(tx);
     return !skipTransfers || (tx.category !== "transfers" && tx.category !== "savings");
   });
@@ -87,6 +90,7 @@ async function importFiles(
   const outcomes: CsvImportOutcome[] = [];
   const imported: ActivityImport[] = [];
   const credits = new Map<string, ActivityImport>();
+  const savingsIds = new Set<string>();
   for (const [i, file] of todo.entries()) {
     onProgress(file.name, i, todo.length);
     try {
@@ -101,7 +105,9 @@ async function importFiles(
       const legacy = new Map(
         file.transactions.map((tx) => [tx.id, legacyActivity(tx, file.accountId, categoryLabels)]),
       );
-      const outcome = await importNew(ctx, file.accountId, activities, legacy);
+      const savings = new Set(transactions.filter(isSavingsMove).map((tx) => tx.id));
+      savings.forEach((id) => savingsIds.add(id));
+      const outcome = await importNew(ctx, file.accountId, activities, legacy, savings);
       imported.push(...activities);
       if (flexAccountId) {
         for (const credit of flexCreditsOf(transactions, flexAccountId, categoryLabels)) {
@@ -135,5 +141,10 @@ async function importFiles(
   }
   const note = linkNote(await linkTransfers(ctx, imported));
   if (note) onNote(note);
+  if (savingsIds.size > 0) {
+    const current = [...new Set(todo.map((f) => f.accountId))].filter((id) => id !== flexAccountId);
+    const isaNote = moveLinkNote("Trading 212", await matchWithCashIsa(ctx, current));
+    if (isaNote) onNote(isaNote);
+  }
   return outcomes;
 }

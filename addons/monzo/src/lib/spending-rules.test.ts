@@ -74,4 +74,16 @@ describe("monzoSpendingRules", () => {
     expect(general).toMatchObject({ priority: -10, categories: ["other_expense", "other expenses"] });
     expect(new RegExp(general.pattern).test(comment({ category: "general", description: "Flex" }))).toBe(true);
   });
+
+  it("never categorises savings moves: no rule matches a Savings row of any direction", () => {
+    const rules = monzoSpendingRules({});
+    const rows = [
+      mapTransactionToActivity(tx({ category: "savings", description: "Trading 212", amount: -30000 }), "wf"),
+      mapTransactionToActivity(tx({ category: "savings", description: "Trading 212", amount: 30000 }), "wf"),
+    ];
+    for (const row of rows) {
+      expect(row.comment).toBe("Trading 212 | Savings");
+      expect(rules.filter((r) => new RegExp(r.pattern).test(row.comment!))).toEqual([]);
+    }
+  });
 });

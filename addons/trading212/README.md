@@ -193,6 +193,20 @@ are recognised by their Trading 212 id (taken from the Notes when the ID column 
 or derived from the row when there is none), and two genuinely identical deposits on the
 same day are both kept.
 
+**Moves to and from Monzo.** Deposits and withdrawals stay `DEPOSIT` and `WITHDRAWAL`: that
+is right for everyone, and it is what makes a deposit count towards the ISA allowance. If the
+other half of a move is in Wealthfolio too (a Monzo current account synced by the Monzo
+add-on), the import looks for it among your other cash accounts: a row whose payee reads
+"Trading 212", with the same amount and currency, the opposite direction, dated within 3 days
+and not linked yet. For a confident match (the closest date; an exact tie is skipped and logged)
+both rows are turned into a `TRANSFER_IN` / `TRANSFER_OUT` in place and linked as an internal
+transfer; if linking fails they are put back. A deposit from a bank that is not in Wealthfolio
+(Chase, say) has no counterpart and stays a deposit on purpose: an unlinked transfer into an
+ISA would not count towards the allowance. A transfer you already made by hand is recognised as
+the same row, not imported again. The Monzo add-on does the same from its side, so it does not
+matter which one sees the pair second. Anything left can be linked in Wealthfolio's **Link
+Transfer** dialog.
+
 ### "Wealthfolio has not approved network access to …"
 
 Wealthfolio only lets an add-on reach the network hosts you ticked in its permission
@@ -233,6 +247,15 @@ never a separate fee.
 - Requests can only reach the hosts declared in the manifest, over HTTPS.
 
 ---
+
+## Upgrading to 2.5.0 (Cash ISA moves)
+
+Nothing to re-import. Old Cash ISA deposits and withdrawals stay as they are; when the Monzo
+add-on (2.6.0) imports the matching savings moves, or the next time you import a Cash ISA CSV,
+each pair is converted to a linked transfer. To bring in Monzo's side of past moves, follow the
+upgrade note in the Monzo add-on's README (reconnect and sync straight away, or import the
+current-account CSV). Updating adds two activity permissions (`getTransferPair`,
+`linkTransfer`), so Wealthfolio asks you to approve the add-on's permissions again.
 
 ## Upgrading from v1.x
 

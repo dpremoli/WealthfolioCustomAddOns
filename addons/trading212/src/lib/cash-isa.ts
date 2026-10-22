@@ -1,5 +1,16 @@
 import type { ActivityImport, AddonContext } from "@wealthfolio/addon-sdk";
-import { jsonStore, ledgerAccountId, reconcileWithLedger, type ImportLedger } from "@wf-addons/kit";
+import {
+  T212_CASH_ISA_PROVIDER_ID,
+  TRADING_212_PAYEE,
+  adoptUntrackedRows,
+  convertAndLinkMoves,
+  jsonStore,
+  ledgerAccountId,
+  moveLinkNote,
+  reconcileWithLedger,
+  type ImportLedger,
+  type MoveRow,
+} from "@wf-addons/kit";
 import { PROVIDER } from "../constants";
 import { mapCsvRow, parseCsv } from "./csv";
 import type { SymbolResolver } from "./symbol-resolver";
@@ -11,7 +22,7 @@ import type { SymbolResolver } from "./symbol-resolver";
  */
 
 /** Wealthfolio account id of the Cash ISA account this add-on created, by providerAccountId. */
-export const CASH_ISA_PROVIDER_ID = "t212-cash-isa";
+export const CASH_ISA_PROVIDER_ID = T212_CASH_ISA_PROVIDER_ID;
 /** Import ledger (kit `ImportLedger`) of Cash ISA rows already imported. */
 const LEDGER_KEY = "t212_cash_isa_ledger";
 /** {@link CashIsaState}: which Wealthfolio account holds the Cash ISA. */
@@ -148,27 +159,41 @@ export interface CashIsaImportResult {
   imported: number;
   /** Already in the account (same Trading 212 id, or the same row imported earlier). */
   duplicates: number;
+  /** Deposits/withdrawals converted to transfers and linked with a Monzo row (usually 0). */
+  linked: number;
+  /** One line about the matching with other accounts, when there was anything to say. */
+  moveNote?: string;
 }
 
 /**
  * Imports parsed Cash ISA rows. Safe to repeat and to overlap exports: rows are recognised by
  * their Trading 212 id through an import ledger, and genuine identical rows (two equal
- * deposits on one day) are kept, since every row is force-imported after reconciling.
+ * deposits on one day) are kept, since every row is force-imported after reconciling. A row the
+ * user already turned into a transfer by hand is taken for the same row, not imported again.
+ *
+ * Deposits and withdrawals stay as they are, which is right for everyone (they count towards the
+ * ISA allowance) and is all that happens unless another Wealthfolio account holds the other half
+ * of the move: see {@link matchWithOtherAccounts}.
  */
 export async function importCashIsa(
   ctx: AddonContext,
   accountId: string,
   activities: ActivityImport[],
 ): Promise<CashIsaImportResult> {
-  if (activities.length === 0) return { imported: 0, duplicates: 0 };
+  if (activities.length === 0) return { imported: 0, duplicates: 0, linked: 0 };
   const store = jsonStore(ctx.api.storage);
   const rows = activities.map((a) => ({ ...a, accountId }));
-  const { toImport, present, ledger } = reconcileWithLedger(
+  const existing = await ctx.api.activities.getAll(accountId);
+  const reconciled = reconcileWithLedger(
     rows,
-    await ctx.api.activities.getAll(accountId),
+    existing,
     await store.get<ImportLedger>(LEDGER_KEY, {}),
     accountId,
   );
+  const { present, ledger } = reconciled;
+  const { toImport, adopted } = adoptUntrackedRows(reconciled.toImport, existing, ledger, accountId, {
+    equivalents: { DEPOSIT: ["TRANSFER_IN"], WITHDRAWAL: ["TRANSFER_OUT"] },
+  });
   let imported = 0;
   if (toImport.length > 0) {
     const res = await ctx.api.activities.import(toImport);
@@ -176,5 +201,41 @@ export async function importCashIsa(
   }
   await store.set(LEDGER_KEY, ledger);
   await store.set<CashIsaState>(STATE_KEY, { accountId, lastImport: new Date().toISOString() });
-  return { imported, duplicates: present.length };
+  const moves = await matchWithOtherAccounts(ctx, accountId);
+  return {
+    imported,
+    duplicates: present.length + adopted.length,
+    linked: moves.linked,
+    moveNote: moveLinkNote("your bank account", moves) ?? undefined,
+  };
+}
+
+const MOVE_TYPES = ["WITHDRAWAL", "DEPOSIT", "TRANSFER_OUT", "TRANSFER_IN"];
+
+/**
+ * Finds the other half of the Cash ISA's deposits and withdrawals in the user's other cash
+ * accounts (a Monzo account that the Monzo add-on synced, say) and, for each confident pair,
+ * converts both rows to a linked transfer (see kit `convertAndLinkMoves`). Only rows whose
+ * payee reads "Trading 212" are considered on the other side, so unrelated moves of the same
+ * amount are not mistaken for each other. Deposits from accounts that are not in Wealthfolio
+ * have no counterpart, so they stay deposits (an unlinked transfer would drop them from the ISA
+ * allowance). Never throws.
+ */
+export async function matchWithOtherAccounts(ctx: AddonContext, isaAccountId: string) {
+  const none = { linked: 0, ambiguous: [] as string[], failed: [] as string[] };
+  try {
+    const others = (await ctx.api.accounts.getAll()).filter(
+      (a) => a.id !== isaAccountId && a.accountType === "CASH" && a.provider !== PROVIDER,
+    );
+    if (others.length === 0) return none;
+    const rowsOf = async (ids: string[]) =>
+      (await Promise.all(ids.map((id) => ctx.api.activities.getAll(id))))
+        .flat()
+        .filter((r) => MOVE_TYPES.includes(r.activityType)) as unknown as MoveRow[];
+    const theirs = (await rowsOf(others.map((a) => a.id))).filter((r) => TRADING_212_PAYEE.test(r.comment ?? ""));
+    if (theirs.length === 0) return none;
+    return await convertAndLinkMoves(ctx, await rowsOf([isaAccountId]), theirs);
+  } catch (err) {
+    return { ...none, failed: [(err as Error).message] };
+  }
 }

@@ -1,6 +1,7 @@
 export { parseCsv, parseCsvRecords, headerIndex } from "./csv";
 export { round2, cashSymbol, fnv1a } from "./money";
 export {
+  adoptUntrackedRows,
   selectNewActivities,
   contentKey,
   withSourceRef,
@@ -36,3 +37,17 @@ export {
   type SpendingRuleSpec,
   type SpendingRulesOutcome,
 } from "./spending";
+export {
+  MOVE_MATCH_WINDOW_MS,
+  T212_CASH_ISA_PROVIDER_ID,
+  TRADING_212_PAYEE,
+  convertAndLinkMoves,
+  isMoneyIn,
+  isMoneyOut,
+  isMoveMatch,
+  matchMoves,
+  moveLinkNote,
+  type MoveLinkOutcome,
+  type MoveMatches,
+  type MoveRow,
+} from "./move-match";

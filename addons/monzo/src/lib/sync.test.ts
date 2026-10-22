@@ -117,13 +117,12 @@ describe("runSync reconcile", () => {
     expect(outcome.duplicates).toBe(1);
   });
 
-  it("skips pending, declined, zero, pot, Flex-repayment and savings transactions", async () => {
+  it("skips pending, declined, zero, pot and Flex-repayment transactions, but not savings moves", async () => {
     const t = setup([
       tx({ amount: -100 }),
       tx({ amount: -200, settled: "" }), // pending
       tx({ amount: -300, metadata: { provider_category: "uk_retail_pot" } }),
       tx({ amount: -400, category: "transfers", description: "Monzo Flex" }),
-      tx({ amount: -500, category: "savings" }),
       tx({ amount: -600, scheme: "uk_retail_pot" }),
       tx({ amount: -700, metadata: { pot_id: "pot_1" } }),
       tx({ amount: -800, decline_reason: "INSUFFICIENT_FUNDS" }),
@@ -588,6 +587,68 @@ describe("runSync guards", () => {
     t.wfAccounts.length = 0;
     await expect(runSync(t.ctx)).rejects.toThrow(/mapping is out of date/);
     expect(t.importCalls).toHaveLength(0);
+  });
+});
+
+describe("savings moves", () => {
+  const move = (over: Partial<MonzoTransaction> = {}) =>
+    tx({ category: "savings", description: "Trading 212", amount: -30000, ...over });
+
+  it("are eligible, but pot moves never are", () => {
+    expect(isEligible(move(), false)).toBe(true);
+    expect(isEligible(move({ amount: 30000 }), false)).toBe(true);
+    expect(isEligible(move({ metadata: { pot_id: "pot_1" } }), false)).toBe(false);
+    expect(isEligible(move({ scheme: "uk_retail_pot" }), false)).toBe(false);
+  });
+
+  it("are imported as ordinary withdrawals and deposits, and only once", async () => {
+    const t = setup([move(), move({ amount: 12000, created: "2026-05-03T12:00:00.000Z" })]);
+    const result = await runSync(t.ctx);
+    expect(result.imported).toBe(2);
+    expect(t.importCalls[0].map((a) => [a.activityType, a.amount])).toEqual([
+      ["WITHDRAWAL", 300],
+      ["DEPOSIT", 120],
+    ]);
+    expect((await runSync(t.ctx)).imported).toBe(0);
+    expect(t.activities.get(WF_ACC)).toHaveLength(2);
+  });
+
+  it("do not duplicate a transfer the user already made by hand", async () => {
+    const m = move({ amount: 30000, created: "2026-10-04T12:00:00.000Z" });
+    const t = setup([m]);
+    t.activities.set(WF_ACC, [
+      {
+        id: "hand-1",
+        accountId: WF_ACC,
+        activityType: "TRANSFER_IN",
+        date: new Date("2026-10-04T00:00:00.000Z"),
+        amount: "300",
+        currency: "GBP",
+        comment: "from my ISA",
+        assetSymbol: "$CASH-GBP",
+      },
+    ]);
+    const result = await runSync(t.ctx);
+    expect(result.imported).toBe(0);
+    expect(t.activities.get(WF_ACC)).toHaveLength(1);
+    expect((await runSync(t.ctx)).imported).toBe(0);
+  });
+
+  it("only adopt a hand-made row for savings moves, not for an ordinary deposit", async () => {
+    const t = setup([tx({ amount: 30000, category: "income", description: "Salary", created: "2026-10-04T12:00:00.000Z" })]);
+    t.activities.set(WF_ACC, [
+      {
+        id: "hand-1",
+        accountId: WF_ACC,
+        activityType: "TRANSFER_IN",
+        date: new Date("2026-10-04T00:00:00.000Z"),
+        amount: "300",
+        currency: "GBP",
+        comment: "by hand",
+        assetSymbol: "$CASH-GBP",
+      },
+    ]);
+    expect((await runSync(t.ctx)).imported).toBe(1);
   });
 });
 

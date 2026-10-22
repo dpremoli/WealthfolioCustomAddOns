@@ -634,6 +634,23 @@ describe("savings moves", () => {
     expect((await runSync(t.ctx)).imported).toBe(0);
   });
 
+  it("recognise a hand-made transfer dated up to three days from the Monzo transaction", async () => {
+    const t = setup([move({ amount: 30000, created: "2026-10-05T08:00:00.000Z" })]);
+    t.activities.set(WF_ACC, [
+      {
+        id: "hand-1",
+        accountId: WF_ACC,
+        activityType: "TRANSFER_IN",
+        date: new Date("2026-10-02T20:00:00.000Z"),
+        amount: "300",
+        currency: "GBP",
+        comment: "from my ISA",
+        assetSymbol: "$CASH-GBP",
+      },
+    ]);
+    expect((await runSync(t.ctx)).imported).toBe(0);
+  });
+
   it("only adopt a hand-made row for savings moves, not for an ordinary deposit", async () => {
     const t = setup([tx({ amount: 30000, category: "income", description: "Salary", created: "2026-10-04T12:00:00.000Z" })]);
     t.activities.set(WF_ACC, [

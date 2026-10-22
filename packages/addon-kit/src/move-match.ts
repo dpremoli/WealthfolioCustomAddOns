@@ -129,6 +129,15 @@ export async function convertAndLinkMoves(
     return linkedCache.get(id)!;
   };
 
+  // Fresh (uncached) look at a row's link state; unknown counts as not linked.
+  const linkedNow = async (id: string): Promise<boolean> => {
+    try {
+      return (await activities.getTransferPair(id)) != null;
+    } catch {
+      return false;
+    }
+  };
+
   try {
     // Only look up link state for rows that could match at all.
     const open = async (rows: MoveRow[], others: MoveRow[]) => {
@@ -160,15 +169,11 @@ export async function convertAndLinkMoves(
       comment: r.comment ?? null,
     });
     for (const { out: o, in: i } of pairs) {
+      // Someone else (the other add-on, or the user) may have linked them since we looked.
+      if ((await linkedNow(o.id)) || (await linkedNow(i.id))) continue;
       const changes: { row: MoveRow; to: string }[] = [];
       if (o.activityType !== "TRANSFER_OUT") changes.push({ row: o, to: "TRANSFER_OUT" });
       if (i.activityType !== "TRANSFER_IN") changes.push({ row: i, to: "TRANSFER_IN" });
-      const revert = () =>
-        changes.length > 0
-          ? activities
-              .saveMany({ updates: changes.map((c) => update(c.row, c.row.activityType)) })
-              .catch(() => null)
-          : Promise.resolve(null);
       try {
         if (changes.length > 0) {
           const res = await activities.saveMany({ updates: changes.map((c) => update(c.row, c.to)) });
@@ -177,8 +182,23 @@ export async function convertAndLinkMoves(
         await activities.linkTransfer(o.id, i.id);
         out.linked++;
       } catch (err) {
-        await revert();
         out.failed.push(`${o.id} / ${i.id}: ${(err as Error).message}`);
+        if (changes.length === 0) continue;
+        // Put the legs back as they were, unless the pair got linked in the meantime (then it is
+        // someone else's, and turning its rows back would break it).
+        if ((await linkedNow(o.id)) || (await linkedNow(i.id))) {
+          out.failed.push(`${o.id} / ${i.id}: already linked, left as they are.`);
+          continue;
+        }
+        const back = await activities
+          .saveMany({ updates: changes.map((c) => update(c.row, c.row.activityType)) })
+          .catch((e: unknown) => ({ errors: [{ message: (e as Error).message }] }));
+        if (back.errors?.length) {
+          out.failed.push(
+            `${o.id} / ${i.id}: could not be put back (${back.errors.map((e) => e.message).join("; ")}); ` +
+              "they are unlinked transfers now, so check them in Wealthfolio's Activities.",
+          );
+        }
       }
     }
   } catch (err) {

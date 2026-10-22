@@ -47,7 +47,7 @@ Monzo, paste its details into the add-on, and connect.
   (they are your own money changing place), and they are left out of the dashboard's spending
   breakdown.
 - **Links moves with your Trading 212 Cash ISA.** When the Trading 212 add-on's Cash ISA
-  account is in Wealthfolio too (the account it creates, or any account named "... Cash ISA"),
+  account is in Wealthfolio too (the account it creates, or one whose name mentions Trading 212 and ISA),
   each sync looks for the other half of every savings move whose payee reads "Trading 212": same
   amount and currency, opposite direction, dated within 3 days, neither row already linked. For
   a confident match (the closest date; an exact tie is skipped and logged) both rows are turned
@@ -55,8 +55,12 @@ Monzo, paste its details into the add-on, and connect.
   API. If linking fails the rows are put back as they were. A move with no counterpart stays a
   plain withdrawal or deposit **on purpose**: an unlinked transfer into an ISA would not count
   towards its allowance. A transfer you already made by hand (and linked) is recognised as the
-  same move, not imported again. The Trading 212 add-on does the same from its side when you
-  import the Cash ISA CSV, so it does not matter which add-on sees the pair second.
+  same move, not imported again, even when its date is up to 3 days from the Monzo one. The
+  Trading 212 add-on does the same from its side when you import the Cash ISA CSV, so it does
+  not matter which add-on sees the pair second. Known limit: "Trading 212" is also the payee
+  when you top up a Trading 212 Invest or Stocks ISA account, which this matcher cannot see, so
+  if you fund both and two same-amount moves fall within 3 days, one can be linked to the wrong
+  row (unlink it in Wealthfolio's Link Transfer dialog).
 - **Keeps the current account and Flex balances right.** The monthly Flex repayment is
   imported as a `TRANSFER_OUT` on the current account and a matching `TRANSFER_IN` on the
   Flex account (same amount and date), so the Flex balance is paid down and the current

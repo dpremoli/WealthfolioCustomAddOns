@@ -78,7 +78,17 @@ describe("matchMoves", () => {
 
 describe("convertAndLinkMoves", () => {
   type Stored = MoveRow & { accountId: string };
-  function setup(rows: Stored[], opts: { linked?: string[]; saveErrors?: string[]; linkFails?: boolean } = {}) {
+  function setup(
+    rows: Stored[],
+    opts: {
+      linked?: string[];
+      saveErrors?: string[];
+      linkFails?: boolean;
+      revertFails?: boolean;
+      /** Someone else links the pair while we are converting it. */
+      linkedMeanwhile?: boolean;
+    } = {},
+  ) {
     const store = new Map(rows.map((r) => [r.id, { ...r }]));
     const linked = new Set(opts.linked ?? []);
     const links: [string, string][] = [];
@@ -91,8 +101,10 @@ describe("convertAndLinkMoves", () => {
           getTransferPair: async (id: string) => (linked.has(id) ? { transferOut: {}, transferIn: {} } : null),
           saveMany: async (req: { updates: { id: string; activityType: string }[] }) => {
             saves.push(req.updates);
+            if (opts.revertFails && saves.length > 1) throw new Error("revert refused");
+            if (opts.linkedMeanwhile) req.updates.forEach((u) => linked.add(u.id));
             const errors = req.updates
-              .filter((u) => opts.saveErrors?.includes(u.id))
+              .filter((u) => saves.length === 1 && opts.saveErrors?.includes(u.id))
               .map((u) => ({ id: u.id, action: "update", message: "no" }));
             for (const u of req.updates) if (!errors.some((e) => e.id === u.id)) store.get(u.id)!.activityType = u.activityType;
             return { created: [], updated: [], deleted: [], createdMappings: [], errors };
@@ -173,6 +185,19 @@ describe("convertAndLinkMoves", () => {
     expect(out.failed).toEqual([expect.stringContaining("host says no")]);
     expect(t.store.get("w")!.activityType).toBe("WITHDRAWAL");
     expect(t.store.get("d")!.activityType).toBe("DEPOSIT");
+  });
+
+  it("says so when the rows could not be put back", async () => {
+    const t = setup([withdrawal(), deposit()], { linkFails: true, revertFails: true });
+    const out = await convertAndLinkMoves(t.ctx, [withdrawal()], [deposit()]);
+    expect(out.failed.join(" ")).toMatch(/w \/ d: could not be put back/);
+  });
+
+  it("does not put rows back when someone else linked them in the meantime", async () => {
+    const t = setup([withdrawal(), deposit()], { linkFails: true, linkedMeanwhile: true });
+    const out = await convertAndLinkMoves(t.ctx, [withdrawal()], [deposit()]);
+    expect(t.saves).toHaveLength(1); // the conversion only, no revert
+    expect(out.failed.join(" ")).toMatch(/already linked/);
   });
 
   it("puts the rows back when converting one leg failed", async () => {

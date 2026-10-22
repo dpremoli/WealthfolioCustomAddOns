@@ -1,5 +1,6 @@
 import type { ActivityImport, AddonContext } from "@wealthfolio/addon-sdk";
 import {
+  MOVE_MATCH_WINDOW_MS,
   T212_CASH_ISA_PROVIDER_ID,
   TRADING_212_PAYEE,
   adoptUntrackedRows,
@@ -193,6 +194,8 @@ export async function importCashIsa(
   const { present, ledger } = reconciled;
   const { toImport, adopted } = adoptUntrackedRows(reconciled.toImport, existing, ledger, accountId, {
     equivalents: { DEPOSIT: ["TRANSFER_IN"], WITHDRAWAL: ["TRANSFER_OUT"] },
+    // The two legs of a move can be dated days apart; a transfer made by hand carries one date.
+    windowMs: MOVE_MATCH_WINDOW_MS,
   });
   let imported = 0;
   if (toImport.length > 0) {

@@ -2,6 +2,7 @@ import type { ActivityImport, AddonContext } from "@wealthfolio/addon-sdk";
 import {
   adoptUntrackedRows,
   jsonStore,
+  MOVE_MATCH_WINDOW_MS,
   ledgerEntry,
   moveLinkNote,
   reconcileWithLedger,
@@ -166,6 +167,8 @@ export async function importNew(
   const { toImport, adopted } = adoptUntrackedRows(reconciled.toImport, existing, ledger, accountId, {
     equivalents: { DEPOSIT: ["TRANSFER_IN"], WITHDRAWAL: ["TRANSFER_OUT"] },
     eligible: (a) => !!a.id && savingsIds.has(a.id),
+    // The two legs of a move can be dated days apart; a transfer made by hand carries one date.
+    windowMs: MOVE_MATCH_WINDOW_MS,
   });
   let imported = 0;
   let skipped = 0;

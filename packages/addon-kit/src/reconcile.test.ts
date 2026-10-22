@@ -285,12 +285,34 @@ describe("adoptUntrackedRows", () => {
     const first = incoming("tx_2", "DEPOSIT", 300, "2026-10-04T10:00:00.000Z");
     const { ledger } = reconcileWithLedger([first], [], {}, "acc");
     const tracked = { ...stored({ ...first, activityType: "TRANSFER_IN" as ActivityImport["activityType"] }), id: "act-2" };
-    // The ledger holds tx_2 as a DEPOSIT row; this TRANSFER_IN row is not that row, so a hand edit.
+    // The ledger holds tx_2 as a DEPOSIT row; this TRANSFER_IN row is that row converted in place
+    // (same amount, date and comment), so it is accounted for too.
     const second = incoming("tx_3", "DEPOSIT", 300, "2026-10-04T11:00:00.000Z");
     const r = reconcileWithLedger([second], [tracked], ledger, "acc");
-    expect(adoptUntrackedRows(r.toImport, [tracked], r.ledger, "acc", opts).adopted).toHaveLength(1);
+    expect(adoptUntrackedRows(r.toImport, [tracked], r.ledger, "acc", opts).adopted).toEqual([]);
     const sameRow = { ...stored(first), id: "act-3" };
     const r2 = reconcileWithLedger([second], [sameRow], ledger, "acc");
     expect(adoptUntrackedRows(r2.toImport, [sameRow], r2.ledger, "acc", opts).adopted).toEqual([]);
+  });
+
+  it("does not take a row this add-on converted to a transfer for a hand-made one", () => {
+    const first = incoming("tx_1", "WITHDRAWAL", 300, "2026-04-01T09:00:00.000Z");
+    const { ledger } = reconcileWithLedger([first], [], {}, "acc");
+    // Later converted in place (type only; amount, date and comment kept), so its hash no longer
+    // matches the ledger's.
+    const converted = { ...stored(first), id: "act-1", activityType: "TRANSFER_OUT" };
+    const second = incoming("tx_2", "WITHDRAWAL", 300, "2026-04-01T18:00:00.000Z");
+    const r = reconcileWithLedger([second], [converted], ledger, "acc");
+    const out = adoptUntrackedRows(r.toImport, [converted], r.ledger, "acc", opts);
+    expect(out.toImport.map((a) => a.id)).toEqual(["tx_2"]);
+    expect(out.adopted).toEqual([]);
+  });
+
+  it("looks as far either side as the caller says (a transfer pair's legs can be days apart)", () => {
+    const row = hand("TRANSFER_IN", 300, "2026-10-02T20:00:00.000Z");
+    const desired = incoming("tx_1", "DEPOSIT", 300, "2026-10-05T08:00:00.000Z");
+    expect(adoptUntrackedRows([desired], [row], {}, "acc", opts).adopted).toEqual([]);
+    const wide = adoptUntrackedRows([desired], [row], {}, "acc", { ...opts, windowMs: 3 * 24 * 60 * 60 * 1000 });
+    expect(wide.adopted.map((a) => a.id)).toEqual(["tx_1"]);
   });
 });

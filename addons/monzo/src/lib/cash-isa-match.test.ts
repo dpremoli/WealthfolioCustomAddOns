@@ -109,11 +109,23 @@ describe("matchWithCashIsa", () => {
     expect(await matchWithCashIsa(t.ctx, [MONZO])).toEqual({ linked: 0, ambiguous: [], failed: [] });
   });
 
+  it("does not take a cash ISA at another provider for the Trading 212 one", async () => {
+    const t = makeCtx({
+      wfAccounts: [
+        { id: MONZO, name: "Monzo Current", accountType: "CASH" },
+        { id: ISA, name: "Barclays Cash ISA", accountType: "CASH" },
+      ],
+    });
+    await importNew(t.ctx, MONZO, [mapTransactionToActivity(monzoMove(-30000, "2026-04-01T09:00:00.000Z"), MONZO)]);
+    await importNew(t.ctx, ISA, [isaRow("DEPOSIT", 300, "2026-04-02T09:00:00.000Z")]);
+    expect((await matchWithCashIsa(t.ctx, [MONZO])).linked).toBe(0);
+  });
+
   it("also finds an ISA account by its name", async () => {
     const t = makeCtx({
       wfAccounts: [
         { id: MONZO, name: "Monzo Current", accountType: "CASH" },
-        { id: ISA, name: "My Cash ISA", accountType: "CASH" },
+        { id: ISA, name: "My Trading 212 Cash ISA", accountType: "CASH" },
       ],
     });
     await importNew(t.ctx, MONZO, [mapTransactionToActivity(monzoMove(-30000, "2026-04-01T09:00:00.000Z"), MONZO)]);
@@ -121,3 +133,22 @@ describe("matchWithCashIsa", () => {
     expect((await matchWithCashIsa(t.ctx, [MONZO])).linked).toBe(1);
   });
 });
+
+describe("a move after a converted one", () => {
+  it("is still imported when it has the same amount on the same day (Monzo side)", async () => {
+    const t = setup();
+    const first = monzoMove(-30000, "2026-04-01T09:00:00.000Z");
+    const second = monzoMove(-30000, "2026-04-01T18:00:00.000Z");
+    const ids = new Set([first.id, second.id]);
+    await importNew(t.ctx, MONZO, [mapTransactionToActivity(first, MONZO)], new Map(), ids);
+    await importNew(t.ctx, ISA, [isaRow("DEPOSIT", 300, "2026-04-02T09:00:00.000Z")]);
+    expect((await matchWithCashIsa(t.ctx, [MONZO])).linked).toBe(1);
+    expect(t.activities.get(MONZO)![0].activityType).toBe("TRANSFER_OUT");
+
+    const out = await importNew(t.ctx, MONZO, [mapTransactionToActivity(second, MONZO)], new Map(), ids);
+    expect(out.imported).toBe(1);
+    expect(types(t.activities.get(MONZO)!)).toEqual(["TRANSFER_OUT", "WITHDRAWAL"]);
+  });
+});
+
+const types = (rows: Record<string, unknown>[]) => rows.map((r) => r.activityType);

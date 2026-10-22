@@ -224,12 +224,23 @@ export function adoptUntrackedRows<E extends ExistingActivityLike>(
     if (incoming.has(id) || !v.startsWith(`${accountId}:`)) continue;
     tracked.set(v, (tracked.get(v) ?? 0) + 1);
   }
-  const free = existing.filter((e) => {
-    const v = ledgerValue(accountId, e);
+  // A row an add-on converted in place (a WITHDRAWAL made a TRANSFER_OUT, say, keeping its amount,
+  // date and comment) no longer matches the hash the ledger holds for it, but it is not a
+  // hand-made row: it still matches when put back to the type it was imported as.
+  const original: Record<string, string> = {};
+  for (const [type, equivalent] of Object.entries(opts.equivalents)) {
+    for (const e of equivalent) original[e] = type;
+  }
+  const claim = (v: string) => {
     const n = tracked.get(v) ?? 0;
-    if (n === 0) return true;
+    if (n === 0) return false;
     tracked.set(v, n - 1);
-    return false;
+    return true;
+  };
+  const free = existing.filter((e) => {
+    if (claim(ledgerValue(accountId, e))) return false;
+    const was = original[e.activityType];
+    return !(was && claim(ledgerValue(accountId, { ...e, activityType: was })));
   });
 
   const time = (d: Date | string | undefined | null) => new Date(d ?? 0).getTime();

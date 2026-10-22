@@ -203,4 +203,21 @@ describe("Cash ISA import: match with Monzo", () => {
     const { activities } = await parseCashIsaCsv(EXPORT, "");
     expect((await importCashIsa(t.ctx, ISA, activities)).linked).toBe(0);
   });
+
+  it("still imports a second same-amount deposit on the day of one that was converted", async () => {
+    const t = fakeCtx();
+    t.addMonzo("WITHDRAWAL", 300, "2026-04-02T08:00:00.000Z");
+    const first = await parseCashIsaCsv(EXPORT, "");
+    await importCashIsa(t.ctx, ISA, first.activities);
+    expect(types(t.rows, ISA)[0]).toBe("TRANSFER_IN");
+
+    const later = [
+      EXPORT,
+      "Deposit,2026-04-02 18:00:00+00:00,Bank Transfer,9f1c2d3e-0000-4000-8000-000000000009,300.00,GBP",
+    ].join("\n");
+    const second = await parseCashIsaCsv(later, "");
+    const out = await importCashIsa(t.ctx, ISA, second.activities);
+    expect(out.imported).toBe(1);
+    expect(types(t.rows, ISA).filter((x) => x === "DEPOSIT")).toHaveLength(2);
+  });
 });

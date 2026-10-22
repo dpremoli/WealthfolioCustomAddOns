@@ -980,6 +980,48 @@ describe("useSync — tracking-mode drift", () => {
   });
 });
 
+describe("useSync — linking deposits and withdrawals with the bank", () => {
+  it("links a deposit with the bank withdrawal that paid Trading 212, leaving other rows alone", async () => {
+    net((url) => routeFetch(url));
+    const rows: Record<string, Record<string, unknown>[]> = {
+      "acc-1": [
+        { id: "dep", accountId: "acc-1", activityType: "DEPOSIT", date: new Date("2026-03-02T10:00:00Z"), amount: "500", currency: "EUR" },
+        { id: "fund", accountId: "acc-1", activityType: "TRANSFER_OUT", date: new Date("2026-03-02T10:00:00Z"), amount: "500", currency: "EUR", comment: "Card funding" },
+      ],
+      bank: [
+        { id: "w1", accountId: "bank", activityType: "WITHDRAWAL", date: new Date("2026-03-01T09:00:00Z"), amount: "500", currency: "EUR", comment: "Trading TwoOneTwo 4098937" },
+        { id: "w2", accountId: "bank", activityType: "WITHDRAWAL", date: new Date("2026-03-02T09:00:00Z"), amount: "500", currency: "EUR", comment: "Rent" },
+      ],
+    };
+    const { ctx } = makeCtx({
+      existingAccounts: [
+        { id: "acc-1", providerAccountId: "4098937" },
+        { id: "bank", providerAccountId: "m1" },
+      ],
+    });
+    const api = ctx.api as unknown as Record<string, Record<string, unknown>>;
+    (api.accounts.getAll as unknown) = async () => [
+      { id: "acc-1", provider: "trading212-addon", providerAccountId: "4098937", accountType: "SECURITIES" },
+      { id: "bank", provider: "monzo-addon", providerAccountId: "m1", accountType: "CASH" },
+    ];
+    const links: [string, string][] = [];
+    Object.assign(api.activities, {
+      getAll: async (id: string) => rows[id] ?? [],
+      getTransferPair: async () => null,
+      saveMany: async () => ({ errors: [] }),
+      linkTransfer: async (o: string, i: string) => void links.push([o, i]),
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { result } = renderHook(() => useSync(ctx as any));
+    await act(async () => {
+      await result.current.syncAll();
+    });
+
+    expect(links).toEqual([["w1", "dep"]]);
+    expect(result.current.results!.perAccount[0].log).toContain("Moves to and from your bank accounts: 1 linked.");
+  });
+});
+
 describe("useSync — checking a backfill against Trading 212", () => {
   const backfill = (summaryCash: number) =>
     net(async (url: string) => {

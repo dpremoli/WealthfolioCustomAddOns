@@ -1,9 +1,14 @@
 import { useState } from "react";
 import type { Account, ActivityImport, AddonContext, SnapshotHoldingInput } from "@wealthfolio/addon-sdk";
 import {
+  T212_PROVIDER,
   appendStep,
+  isTrading212Payee,
+  linkMovesBetween,
   markLastDone,
+  moveLinkNote,
   round2,
+  trading212Refs,
   type ExistingActivityLike,
   spendingRulesNote,
   syncSpendingRules,
@@ -1026,6 +1031,32 @@ function errDetail(e: unknown): string {
   }
 }
 
+/**
+ * Finds the bank side of an investing account's deposits and withdrawals (a Monzo or Revolut
+ * account another add-on keeps in Wealthfolio, say) and turns each confident pair into a linked
+ * transfer (kit `linkMovesBetween`: same amount and currency, within 3 days, unique). Only bank
+ * rows whose payee points at Trading 212 take part — its name ("To Trading 212 UK Limited",
+ * "Trading TwoOneTwo") or one of the user's Trading 212 account numbers quoted as the reference.
+ * Rows without a counterpart stay deposits and withdrawals: Wealthfolio's ISA allowance counts a
+ * deposit, and a linked transfer from outside the ISA, but not an unlinked transfer. The card
+ * funding pairs are already linked and are left out. Never throws.
+ */
+async function linkWithBankAccounts(ctx: AddonContext, accountId: string) {
+  try {
+    const accounts = await ctx.api.accounts.getAll();
+    const refs = trading212Refs(accounts);
+    return await linkMovesBetween(ctx, {
+      accounts,
+      mine: [accountId],
+      theirs: (a) => a.provider !== T212_PROVIDER && a.accountType !== "SECURITIES",
+      mineRow: (r) => r.comment !== CARD_FUNDING_COMMENT,
+      theirRow: (r) => isTrading212Payee(r.comment, refs),
+    });
+  } catch (err) {
+    return { linked: 0, ambiguous: [] as string[], failed: [(err as Error).message] };
+  }
+}
+
 /** Options for {@link runSyncAll}. */
 export interface RunSyncOptions {
   /** Connection ids the user confirmed clearing+re-syncing after a mode drift. */
@@ -1080,6 +1111,15 @@ export async function runSyncAll(
     );
   } finally {
     updates.stop();
+  }
+
+  // Pair each account's deposits and withdrawals with the bank side of the move, one account at a
+  // time so two accounts never race for the same bank row.
+  for (const r of perAccount) {
+    const conn = connections.find((c) => c.id === r.connectionId);
+    if (!conn || conn.needsCredentials || connectionMode(conn) !== "TRANSACTIONS") continue;
+    const note = moveLinkNote("your bank accounts", await linkWithBankAccounts(ctx, r.accountId));
+    if (note) r.log.push(note);
   }
 
   if (resolver.isDirty) await setSymbolMap(ctx, resolver.snapshot());

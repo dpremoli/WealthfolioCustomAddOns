@@ -1,7 +1,7 @@
 {
   "id": "monzo-addon",
   "name": "Monzo Bank Sync",
-  "version": "2.7.0",
+  "version": "2.8.0",
   "description": "Sync Monzo Bank transactions straight into your Wealthfolio cash accounts, for the spending module. No proxy server needed.",
   "author": "dpremoli",
   "license": "GPL-3.0-only",
@@ -56,8 +56,8 @@
     },
     {
       "category": "spending",
-      "functions": ["getCategories", "saveRule", "rerunRules"],
-      "purpose": "Create rules that file Monzo transactions under the matching Wealthfolio spending categories (Groceries, Eating Out, …)"
+      "functions": ["getCategories", "getRules", "saveRule", "deleteRule", "rerunRules"],
+      "purpose": "Create rules that file Monzo transactions under the matching Wealthfolio spending categories (Groceries, Eating Out, …), and remove this add-on's older rules that would still file deposits and transfers as spending"
     },
     {
       "category": "network",

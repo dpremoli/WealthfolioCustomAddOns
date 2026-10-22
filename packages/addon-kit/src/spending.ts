@@ -29,6 +29,12 @@ export interface SpendingRulesOutcome {
   categorised: number;
   /** Set when the Spending API is unavailable or refused; nothing else was done. */
   error?: string;
+  /** With `pruneStale`: older rules of this add-on that were removed. */
+  removed?: number;
+  /** With `pruneStale`: names of older rules that are still there after trying to remove them. */
+  staleKept?: string[];
+  /** With `pruneStale`: why the older rules could not be looked up. */
+  pruneError?: string;
 }
 
 const norm = (s: string) => s.trim().toLowerCase().replace(/[\s_-]+/g, " ");
@@ -66,19 +72,29 @@ export function escapeRegex(text: string): string {
 export async function syncSpendingRules(
   ctx: AddonContext,
   specs: SpendingRuleSpec[],
+  opts: {
+    /**
+     * Also remove the add-on's own older rules that this run did not save (found through
+     * `getRules()`, which lists only the add-on's rules): rules from earlier versions, saved under
+     * keys the current ones no longer use, would otherwise keep applying. Needs the `getRules`
+     * and `deleteRule` permissions. Checked afterwards, so the outcome says what is really gone.
+     */
+    pruneStale?: boolean;
+  } = {},
 ): Promise<SpendingRulesOutcome> {
   const out: SpendingRulesOutcome = { saved: 0, unmatched: [], categorised: 0 };
   const spending = ctx.api.spending;
   if (!spending) return { ...out, error: "Wealthfolio's Spending API is not available." };
   try {
     const categories = await spending.getCategories();
+    const savedIds = new Set<string>();
     for (const spec of specs) {
       const category = pickSpendCategory(categories, spec.kind, spec.categories);
       if (!category) {
         out.unmatched.push(spec.name);
         continue;
       }
-      await spending.saveRule({
+      const rule = await spending.saveRule({
         ruleKey: spec.ruleKey,
         name: spec.name,
         pattern: spec.pattern,
@@ -88,13 +104,36 @@ export async function syncSpendingRules(
         activityType: spec.activityType,
         priority: spec.priority ?? 0,
       });
+      savedIds.add(rule.id);
       out.saved++;
     }
+    if (opts.pruneStale) await pruneStaleRules(spending, savedIds, out);
     out.categorised = await spending.rerunRules(true);
   } catch (err) {
     out.error = describeSpendingError(err instanceof Error ? err.message : String(err));
   }
   return out;
+}
+
+/**
+ * Deletes the add-on's rules that are not in `keep` (ids), then reads the rules again to see which
+ * are really gone. The host deletes by the key a rule was saved under, which `getRules()` does not
+ * give back, so the rule's id is what is tried; whatever remains is reported, never assumed gone.
+ */
+async function pruneStaleRules(
+  spending: NonNullable<AddonContext["api"]["spending"]>,
+  keep: ReadonlySet<string>,
+  out: SpendingRulesOutcome,
+): Promise<void> {
+  try {
+    const stale = (await spending.getRules()).filter((r) => !keep.has(r.id));
+    for (const r of stale) await spending.deleteRule(r.id).catch(() => {});
+    const left = new Set((await spending.getRules()).map((r) => r.id));
+    out.removed = stale.filter((r) => !left.has(r.id)).length;
+    out.staleKept = stale.filter((r) => left.has(r.id)).map((r) => r.name);
+  } catch (err) {
+    out.pruneError = err instanceof Error ? err.message : String(err);
+  }
 }
 
 /**
@@ -118,5 +157,13 @@ export function spendingRulesNote(o: SpendingRulesOutcome): string | null {
   const parts = [`${o.saved} categorisation rule(s) up to date`];
   if (o.categorised) parts.push(`${o.categorised} activit${o.categorised === 1 ? "y" : "ies"} categorised`);
   if (o.unmatched.length) parts.push(`no matching Wealthfolio category for: ${o.unmatched.join(", ")}`);
+  if (o.removed) parts.push(`${o.removed} older rule${o.removed === 1 ? "" : "s"} removed`);
+  if (o.staleKept?.length) {
+    parts.push(
+      `could not remove ${o.staleKept.length} older rule${o.staleKept.length === 1 ? "" : "s"} ` +
+        `(${o.staleKept.join(", ")}): delete them in Settings → Spending → Rules`,
+    );
+  }
+  if (o.pruneError) parts.push(`could not check for older rules (${o.pruneError})`);
   return `Spending: ${parts.join("; ")}.`;
 }

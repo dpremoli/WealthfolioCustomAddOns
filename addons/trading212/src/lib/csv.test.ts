@@ -522,3 +522,9 @@ describe("final-cash contract for plain cash rows", () => {
     expect(act!.symbol).toBe("$CASH-GBP");
   });
 });
+
+describe("mapCsvRow — currency conversion", () => {
+  it("does not book a plain currency conversion as a fee (that took the whole amount out)", async () => {
+    expect(await mapCsvRow(cashRow("Currency conversion", { Total: "1000", ID: "CC1" }), ACC, makeResolver())).toBeNull();
+  });
+});

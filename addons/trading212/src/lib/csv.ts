@@ -390,11 +390,13 @@ export async function mapCsvRow(
   }
 
   // ── FEE / CHARGE (standalone rows — fees embedded in trades are in the fee field) ─
+  // A plain "Currency conversion" row moves cash from one currency to another; it is not a fee
+  // (booking it as one took the whole converted amount out of the account). Its fee, when
+  // charged, has its own "Currency conversion fee" row.
   if (
     actionLower.includes("fee") ||
     actionLower.includes("charge") ||
-    actionLower.includes("stamp duty") ||
-    actionLower.includes("currency conversion")
+    actionLower.includes("stamp duty")
   ) {
     if (total <= 0) return null;
     return {

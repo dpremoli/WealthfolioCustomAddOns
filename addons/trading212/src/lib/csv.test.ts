@@ -2,10 +2,18 @@ import { describe, it, expect } from "vitest";
 import { parseCsv, mapCsvRow } from "./csv";
 import type { SymbolResolver } from "./symbol-resolver";
 
-// Minimal stub: resolves only known tickers, returns null for unknown ones.
+// Minimal stub: resolves only known tickers, returns null for unknown ones. A value "SYM|MIC"
+// resolves with an exchange MIC, like the real resolver's cache entries.
 function makeResolver(map: Record<string, string> = {}): SymbolResolver {
+  const detailed = (ticker: string) => {
+    const v = map[ticker];
+    if (!v) return null;
+    const [symbol, exchangeMic] = v.split("|");
+    return exchangeMic ? { symbol, exchangeMic } : { symbol };
+  };
   return {
-    resolve: async (ticker: string) => map[ticker] ?? null,
+    resolve: async (ticker: string) => detailed(ticker)?.symbol ?? null,
+    resolveDetailed: async (ticker: string) => detailed(ticker),
   } as unknown as SymbolResolver;
 }
 
@@ -119,6 +127,23 @@ describe("parseCsv", () => {
 // ── mapCsvRow ─────────────────────────────────────────────────────────────────
 
 describe("mapCsvRow", () => {
+  describe("listing", () => {
+    // HOLDINGS pins each position to the resolver's listing; the trades and dividends must land on
+    // the same asset, so they carry the MIC too (without one Wealthfolio picks its own default
+    // listing, or a crypto asset for tickers such as LTC).
+    const pinned = makeResolver({ AAPL_US_EQ: "AAPL|XNAS" });
+    it("pins trades and dividends to the resolved listing as equities", async () => {
+      for (const row of [
+        tradeRow("Market buy"),
+        tradeRow("Market sell", { ID: "S2" }),
+        { ...tradeRow("Market buy"), ...cashRow("Dividend (Ordinary)", { Total: "12.34", ID: "DIV9" }), Ticker: "AAPL_US_EQ" },
+      ]) {
+        const act = await mapCsvRow(row, ACC, pinned);
+        expect(act).toMatchObject({ symbol: "AAPL", exchangeMic: "XNAS", instrumentType: "EQUITY" });
+      }
+    });
+  });
+
   describe("BUY", () => {
     it("maps a market buy", async () => {
       const act = await mapCsvRow(tradeRow("Market buy"), ACC, RESOLVER);

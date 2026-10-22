@@ -1,7 +1,7 @@
 import type { ActivityImport } from "@wealthfolio/addon-sdk";
 import { cashSymbol } from "@wf-addons/kit";
 import { accountPerActivityRate, chargesInActivityCurrency } from "./mapper";
-import type { SymbolResolver } from "./symbol-resolver";
+import { importAssetFields, type SymbolResolver } from "./symbol-resolver";
 import { mapSpendingCategory } from "./spending-category";
 
 type ActivityType = ActivityImport["activityType"];
@@ -218,15 +218,15 @@ export async function mapCsvRow(
     const priceCurrency = col(row, "Currency (Price / share)") || currency;
     // Pass the share's quote currency so cross-listings resolve to the right
     // exchange (e.g. a USD price picks TSM over the MXN-quoted TSMN).
-    const symbol = await resolver.resolve(ticker, { isin, name, currency: priceCurrency });
-    if (!symbol) return null;
+    const resolved = await resolver.resolveDetailed(ticker, { isin, name, currency: priceCurrency });
+    if (!resolved) return null;
     const { fxRate, fee } = tradeFxAndFee(row, qty, unitPrice, priceCurrency, currency);
     return {
       id: `t212-order-${csvId}`,
       accountId,
       activityType: "BUY" as ActivityType,
       date,
-      symbol,
+      ...importAssetFields(resolved),
       quantity: qty,
       unitPrice,
       fee: fee > 0 ? fee : undefined,
@@ -245,15 +245,15 @@ export async function mapCsvRow(
     const unitPrice = parseAmount(row["Price / share"]);
     if (qty <= 0 || unitPrice <= 0) return null;
     const priceCurrency = col(row, "Currency (Price / share)") || currency;
-    const symbol = await resolver.resolve(ticker, { isin, name, currency: priceCurrency });
-    if (!symbol) return null;
+    const resolved = await resolver.resolveDetailed(ticker, { isin, name, currency: priceCurrency });
+    if (!resolved) return null;
     const { fxRate, fee } = tradeFxAndFee(row, qty, unitPrice, priceCurrency, currency);
     return {
       id: `t212-order-${csvId}`,
       accountId,
       activityType: "SELL" as ActivityType,
       date,
-      symbol,
+      ...importAssetFields(resolved),
       quantity: qty,
       unitPrice,
       fee: fee > 0 ? fee : undefined,
@@ -270,14 +270,17 @@ export async function mapCsvRow(
     if (total <= 0) return null;
     // A dividend tied to a security (has a ticker) → DIVIDEND on that symbol.
     if (ticker) {
-      const symbol = await resolver.resolve(ticker, { isin, name });
-      if (!symbol) return null;
+      // Same hints as the trades, so the cached listing is the one the trades and the HOLDINGS
+      // snapshot use (the per-share price column carries the instrument's currency).
+      const priceCurrency = col(row, "Currency (Price / share)") || undefined;
+      const resolved = await resolver.resolveDetailed(ticker, { isin, name, currency: priceCurrency });
+      if (!resolved) return null;
       return {
         id: `t212-div-${stableId(actionLower)}`,
         accountId,
         activityType: "DIVIDEND" as ActivityType,
         date,
-        symbol,
+        ...importAssetFields(resolved),
         amount: total,
         currency,
         isValid: true,

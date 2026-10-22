@@ -16,6 +16,32 @@ export interface Resolution {
   exchangeMic?: string;
 }
 
+/**
+ * The asset fields an imported trade, dividend or split carries for a resolution: the symbol,
+ * the listing's MIC and the instrument type. Without a MIC Wealthfolio picks its own default
+ * listing, and a bare symbol it knows as a crypto ticker (`LTC`, `BTC`) becomes the crypto
+ * asset, so LTC Properties would turn into Litecoin. Trading 212 Invest and Stocks ISA accounts
+ * hold equities and ETFs only, so the type is always EQUITY. HOLDINGS snapshots pin the same
+ * listing (`SnapshotHoldingInput.exchangeMic`), so both modes land on one asset.
+ */
+export function importAssetFields(r: Resolution): {
+  symbol: string;
+  exchangeMic?: string;
+  instrumentType: string;
+} {
+  return { symbol: r.symbol, ...(r.exchangeMic ? { exchangeMic: r.exchangeMic } : {}), instrumentType: "EQUITY" };
+}
+
+// Search hits that can never be a Trading 212 Invest/ISA holding: crypto, currencies, indices.
+const NON_SECURITY_QUOTE_TYPES = new Set(["CRYPTOCURRENCY", "CRYPTO", "CURRENCY", "FX", "INDEX"]);
+
+/** True for a search hit that is a crypto pair, a currency or an index rather than a security. */
+export function isNonSecurity(r: Pick<SymbolSearchResult, "quoteType" | "symbol">): boolean {
+  if (NON_SECURITY_QUOTE_TYPES.has((r.quoteType ?? "").toUpperCase())) return true;
+  // Crypto pairs (LTC-EUR, BTC/USD) and FX tickers (EURUSD=X) by shape.
+  return /^[A-Z0-9]{2,10}[-/](USD|EUR|GBP|USDT|USDC|BTC|ETH)$/i.test(r.symbol ?? "") || /=X$/i.test(r.symbol ?? "");
+}
+
 /** Trading 212 tickers look like `AAPL_US_EQ` — the base symbol is the first segment. */
 export function parseBaseSymbol(ticker: string): string {
   return ticker.split("_")[0] || ticker;
@@ -151,7 +177,10 @@ export function pickBest(
 ): SymbolSearchResult | null {
   if (!results || results.length === 0) return null;
 
-  let candidates = results;
+  // A Trading 212 Invest/ISA instrument is a security: never a crypto pair, currency or index,
+  // whatever the search ranks first (an ISIN or a ticker such as `LTC` can match one).
+  let candidates = results.filter((r) => !isNonSecurity(r));
+  if (candidates.length === 0) return null;
 
   const wantCurrency = normalizeCurrency(hints?.currency);
   if (wantCurrency) {
@@ -217,7 +246,7 @@ export type DiagFn = (d: ResolveDiag) => void;
  * through to the base-ticker query instead.
  */
 function isAuthoritative(r: SymbolSearchResult, hints: Hints): boolean {
-  if (!r.symbol || isIsinLike(r.symbol)) return false;
+  if (!r.symbol || isIsinLike(r.symbol) || isNonSecurity(r)) return false;
   const wantCcy = normalizeCurrency(hints.currency);
   const haveCcy = normalizeCurrency(r.currency);
   if (wantCcy && haveCcy && wantCcy !== haveCcy) return false;

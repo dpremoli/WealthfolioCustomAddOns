@@ -2,7 +2,9 @@ import { describe, it, expect, vi } from "vitest";
 import type { SymbolSearchResult } from "@wealthfolio/addon-sdk";
 import {
   SymbolResolver,
+  importAssetFields,
   isIsinLike,
+  isNonSecurity,
   marketCurrency,
   marketMics,
   normalizeCurrency,
@@ -482,5 +484,40 @@ describe("SymbolResolver caching", () => {
     // A pre-v1.7.2 entry (just the symbol) still decodes — MIC is undefined.
     expect(await r.resolveDetailed("AAPL_US_EQ")).toEqual({ symbol: "AAPL" });
     expect(search).not.toHaveBeenCalled();
+  });
+});
+
+describe("never a crypto pair, currency or index", () => {
+  const litecoin = result({ symbol: "LTC-EUR", quoteType: "CRYPTOCURRENCY", currency: "EUR", score: 900 });
+  const ltcProperties = result({ symbol: "LTC", exchangeMic: "XNYS", currency: "USD", score: 10 });
+
+  it("recognises crypto, currency and index hits by type or shape", () => {
+    expect(isNonSecurity(litecoin)).toBe(true);
+    expect(isNonSecurity(result({ symbol: "LTC/EUR" }))).toBe(true);
+    expect(isNonSecurity(result({ symbol: "EURUSD=X", quoteType: "CURRENCY" }))).toBe(true);
+    expect(isNonSecurity(result({ symbol: "^GSPC", quoteType: "INDEX" }))).toBe(true);
+    expect(isNonSecurity(ltcProperties)).toBe(false);
+    expect(isNonSecurity(result({ symbol: "VUAA", quoteType: "ETF" }))).toBe(false);
+  });
+
+  it("resolves LTC Properties to its NYSE listing, not Litecoin, even when Litecoin scores higher", async () => {
+    const search = vi.fn(async (q: string) => (q === "US5021751020" ? [litecoin] : [litecoin, ltcProperties]));
+    const r = await resolveTicker(search, "LTC_US_EQ", { isin: "US5021751020", currency: "USD" });
+    expect(r).toEqual({ symbol: "LTC", exchangeMic: "XNYS" });
+  });
+
+  it("finds nothing rather than a crypto asset when that is all the search returns", async () => {
+    expect(await resolveTicker(async () => [litecoin], "LTC_US_EQ")).toBeNull();
+  });
+});
+
+describe("importAssetFields", () => {
+  it("pins the listing and the instrument type on an imported row", () => {
+    expect(importAssetFields({ symbol: "NVD", exchangeMic: "XETR" })).toEqual({
+      symbol: "NVD",
+      exchangeMic: "XETR",
+      instrumentType: "EQUITY",
+    });
+    expect(importAssetFields({ symbol: "LTC" })).toEqual({ symbol: "LTC", instrumentType: "EQUITY" });
   });
 });

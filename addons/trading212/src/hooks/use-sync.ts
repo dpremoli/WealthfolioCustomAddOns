@@ -37,7 +37,7 @@ import {
 } from "../lib/mapper";
 import { parseCsv, mapCsvRow } from "../lib/csv";
 import { cardSpendingRules } from "../lib/spending-category";
-import { SymbolResolver, type ResolveDiag } from "../lib/symbol-resolver";
+import { SymbolResolver, importAssetFields, type ResolveDiag } from "../lib/symbol-resolver";
 import {
   addImportedRefs,
   clearAccountData,
@@ -183,25 +183,26 @@ async function collectJsonActivities(
     if (!activity) continue;
     const ticker = o.instrument?.ticker ?? o.ticker;
     if (!ticker) continue;
-    const symbol = await resolver.resolve(ticker, o.instrument);
-    if (!symbol) {
+    const resolved = await resolver.resolveDetailed(ticker, o.instrument);
+    if (!resolved) {
       unresolved++;
       continue;
     }
-    activities.push({ ...activity, symbol });
+    activities.push({ ...activity, ...importAssetFields(resolved) });
   }
 
   for (const d of dividends) {
     if (importedRefs.has(`t212-div-${d.reference}`)) continue;
-    let symbol: string | null = null;
-    if (d.type !== "INTEREST") {
-      symbol = d.ticker ? await resolver.resolve(d.ticker, d.instrument) : null;
-      if (!symbol) {
-        unresolved++;
-        continue;
-      }
+    if (d.type === "INTEREST") {
+      activities.push(mapDividendToActivity(d, accountId, null));
+      continue;
     }
-    activities.push(mapDividendToActivity(d, accountId, symbol));
+    const resolved = d.ticker ? await resolver.resolveDetailed(d.ticker, d.instrument) : null;
+    if (!resolved) {
+      unresolved++;
+      continue;
+    }
+    activities.push({ ...mapDividendToActivity(d, accountId, resolved.symbol), ...importAssetFields(resolved) });
   }
 
   for (const t of transactions) {

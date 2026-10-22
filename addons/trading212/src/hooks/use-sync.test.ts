@@ -196,6 +196,18 @@ describe("useSync — JSON incremental path", () => {
     expect(result.current.steps[result.current.steps.length - 1].status).toBe("done");
   });
 
+  it("pins a trade to the listing the resolver chose, as an equity (same asset as HOLDINGS)", async () => {
+    const { ctx, importFn } = makeCtx({
+      searchTicker: async () => [{ symbol: "AAPL", score: 1, exchangeMic: "XNAS", quoteType: "EQUITY" }],
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { result } = renderHook(() => useSync(ctx as any));
+    await act(async () => {
+      await result.current.syncAll();
+    });
+    expect(importFn.mock.calls[0][0][0]).toMatchObject({ symbol: "AAPL", exchangeMic: "XNAS", instrumentType: "EQUITY" });
+  });
+
   it("adaptively halves batches the backend rejects, importing everything", async () => {
     // 120 distinct orders. The starting chunk size (20) exceeds the simulated
     // backend limit of 10, so each chunk must be halved before it's accepted.

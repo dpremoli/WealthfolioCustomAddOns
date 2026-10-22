@@ -209,8 +209,8 @@ describe("useSync — JSON incremental path", () => {
   });
 
   it("adaptively halves batches the backend rejects, importing everything", async () => {
-    // 120 distinct orders. The starting chunk size (20) exceeds the simulated
-    // backend limit of 10, so each chunk must be halved before it's accepted.
+    // 120 distinct orders, sent as one chunk; the simulated backend limit of 10 makes the
+    // importer halve it until every call is accepted.
     const orders = Array.from({ length: 120 }, (_, i) => ({
       order: {
         id: i + 1,
@@ -243,11 +243,12 @@ describe("useSync — JSON incremental path", () => {
 
     expect(result.current.error).toBeNull();
     expect(result.current.results?.totals.imported).toBe(120);
-    // 6 chunks of 20 → each halved to 10+10 → 12 accepted import batches.
-    expect(importFn).toHaveBeenCalledTimes(12);
+    // 120 → 60 → 30 → 15 → 8 + 7: sixteen accepted calls of at most 10 rows.
+    expect(importFn).toHaveBeenCalledTimes(16);
+    expect(Math.max(...importFn.mock.calls.map((c) => c[0].length))).toBeLessThanOrEqual(10);
   });
 
-  it("surfaces the payload when a single activity is genuinely rejected", async () => {
+  it("reports each trade the host refuses (no abort) and flags the holdings as wrong", async () => {
     const orders = Array.from({ length: 5 }, (_, i) => ({
       order: {
         id: i + 1,
@@ -277,8 +278,10 @@ describe("useSync — JSON incremental path", () => {
     });
 
     const r = result.current.results!.perAccount[0];
-    expect(r.error).toContain("checkImport rejected a single activity");
-    expect(r.error).toContain("payload=");
+    expect(r.error).toMatch(/^5 trade rows were not imported, so holdings will not match Trading 212/);
+    const notImported = r.log.filter((l) => l.startsWith("Not imported: BUY 2026-04-01 AAPL"));
+    expect(notImported).toHaveLength(5);
+    expect(notImported[0]).toMatch(/\(t212-order-1\): checkImport refused it: Unprocessable Entity/);
   });
 
   it("skips activities the account already holds without importing", async () => {
@@ -781,6 +784,14 @@ describe("useSync — HOLDINGS mode", () => {
     expect(card).toBeTruthy();
     expect(card!.accountId).toBe("acc-new");
     expect(card!.comment).toBe("SAINSBURYS · Shopping");
+    // The purchase is funded from the investing account in the same import call, so Wealthfolio
+    // links the transfer pair and both balances match Trading 212.
+    const call = importFn.mock.calls.find((c) => c[0].some((a) => a.id === "t212-txn-CARD1"))![0];
+    expect(call.map((a) => [a.id, a.accountId, a.activityType, a.amount])).toEqual([
+      ["t212-txn-CARD1", "acc-new", "WITHDRAWAL", 12.34],
+      ["t212-txn-CARD1-fund-out", "acc-1", "TRANSFER_OUT", 12.34],
+      ["t212-txn-CARD1-fund-in", "acc-new", "TRANSFER_IN", 12.34],
+    ]);
     expect(JSON.parse(storage.get("t212_sync_c1")!).cardLastSync).toBeTruthy();
     // HOLDINGS breakdown surfaces Holdings + Card so the Summary tab isn't greyed out.
     const r = result.current.results!.perAccount[0];

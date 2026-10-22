@@ -518,7 +518,9 @@ async function syncAll(ctx: AddonContext, onProgress: SyncProgressHandler): Prom
   // Keep Wealthfolio's Spending categories in step with Monzo's (rules keyed on the category
   // label in each comment). Best effort: never fails the sync.
   onProgress({ phase: "import", message: "Updating spending categories…" });
-  const note = spendingRulesNote(await syncSpendingRules(ctx, monzoSpendingRules(categoryLabels)));
+  const note = spendingRulesNote(
+    await syncSpendingRules(ctx, monzoSpendingRules(categoryLabels), { pruneStale: true })
+  );
   if (note) log.push(note);
   if (watermark !== startedAt.toISOString()) {
     log.push(`Next sync re-checks from ${watermark} (a transaction was still pending).`);

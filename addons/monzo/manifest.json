@@ -65,6 +65,11 @@
       "purpose": "Call the Monzo API (api.monzo.com) to exchange OAuth codes and fetch accounts and transactions"
     },
     {
+      "category": "events",
+      "functions": ["onUpdateComplete"],
+      "purpose": "Check whether a background sync is due when Wealthfolio refreshes its portfolio"
+    },
+    {
       "category": "ui",
       "functions": ["router.add", "navigation.navigate"],
       "purpose": "Show the Monzo dashboard, settings and CSV import pages"

@@ -51,3 +51,4 @@ export {
   type MoveMatches,
   type MoveRow,
 } from "./move-match";
+export { startBackgroundChecks, type BackgroundChecksOptions } from "./scheduler";

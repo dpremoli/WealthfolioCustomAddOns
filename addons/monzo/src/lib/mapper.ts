@@ -7,6 +7,11 @@ import { SPENDING_CATEGORY_CANDIDATES } from "./spending-rules";
 const DEPOSIT = "DEPOSIT" as ActivityImport["activityType"];
 const WITHDRAWAL = "WITHDRAWAL" as ActivityImport["activityType"];
 const CREDIT = "CREDIT" as ActivityImport["activityType"];
+const TRANSFER_IN = "TRANSFER_IN" as ActivityImport["activityType"];
+const TRANSFER_OUT = "TRANSFER_OUT" as ActivityImport["activityType"];
+
+/** Suffix of the id of the Flex-account credit the add-on writes for a repayment. */
+export const FLEX_CREDIT_SUFFIX = ":flex-in";
 
 /**
  * Money back on a spending category (a refund, or Monzo's "Refunded (Flex)"), as opposed to
@@ -52,18 +57,44 @@ export function isDeclined(tx: MonzoTransaction): boolean {
 }
 
 export function isFlexRepayment(tx: MonzoTransaction): boolean {
-  // The monthly Flex repayment debited from the current account is an internal
-  // transfer paying down the Flex balance, not new spending. The matching spend
-  // is already imported on the Flex account, so importing this too double-counts.
+  // The monthly Flex repayment debited from the current account: the money that pays down
+  // the Flex balance. It is a transfer between two of the user's own accounts, not spending.
   const name = (merchantOf(tx)?.name || tx.description || "").toLowerCase();
-  return tx.category === "transfers" && name.includes("flex");
+  return tx.category === "transfers" && name.includes("flex") && !isFlexRefund(tx);
+}
+
+/**
+ * The debit side of a Flex repayment, on the current account. Monzo's Flex feed has no row
+ * for the repayment, so the add-on writes the Flex side itself ({@link flexRepaymentCredit});
+ * a credit that looks like a repayment is never imported, which would count it twice.
+ */
+export function isFlexRepaymentDebit(tx: MonzoTransaction): boolean {
+  return tx.amount < 0 && isFlexRepayment(tx);
+}
+
+const FLEX_REFUND = /refunded\s*\(flex\)/i;
+
+/**
+ * One leg of a refunded Flex purchase. Monzo moves the refunded money off the Flex account
+ * ("Refunded (Flex)") and into the current account, a debit on Flex and a credit on the
+ * current account. Both are transfers between the user's own accounts, not income or spending.
+ */
+export function isFlexRefund(tx: MonzoTransaction): boolean {
+  return [tx.description, tx.notes, merchantOf(tx)?.name, tx.counterparty?.name].some((t) =>
+    FLEX_REFUND.test(t ?? ""),
+  );
+}
+
+/** A transaction that moves money between the current account and Flex. */
+export function isFlexTransfer(tx: MonzoTransaction): boolean {
+  return isFlexRefund(tx) || isFlexRepaymentDebit(tx);
 }
 
 /**
  * Tallies spending transactions (debits) by their resolved category label, for the
  * dashboard breakdown. Credits (income/refunds) are ignored. Reuses the same
  * `resolveCategory` + user overrides as the comment, so labels match. Pure + testable;
- * the sync passes its eligible (non-pending, non-pot, non-Flex-repayment) transactions in.
+ * the sync passes its eligible (non-pending, non-pot) transactions in; Flex transfers are skipped.
  */
 export function tallyByCategory(
   txs: MonzoTransaction[],
@@ -71,7 +102,7 @@ export function tallyByCategory(
 ): Record<string, number> {
   const out: Record<string, number> = {};
   for (const tx of txs) {
-    if (tx.amount >= 0) continue; // spending only
+    if (tx.amount >= 0 || isFlexTransfer(tx)) continue; // spending only
     const label = resolveCategory(tx.category || "general", categoryLabels);
     out[label] = (out[label] ?? 0) + 1;
   }
@@ -180,12 +211,23 @@ export function mapTransactionToActivity(
 ): ActivityImport {
   const currency = tx.currency || "GBP";
   const amountInMajorUnits = round2(Math.abs(tx.amount) / 100);
+  const transfer = isFlexTransfer(tx);
 
   return {
     id: tx.id,
     accountId: wealthfolioAccountId,
-    activityType: isRefund(tx) ? CREDIT : tx.amount >= 0 ? DEPOSIT : WITHDRAWAL,
-    subtype: isRefund(tx) ? "REFUND" : undefined,
+    activityType: transfer
+      ? tx.amount >= 0
+        ? TRANSFER_IN
+        : TRANSFER_OUT
+      : isRefund(tx)
+        ? CREDIT
+        : tx.amount >= 0
+          ? DEPOSIT
+          : WITHDRAWAL,
+    subtype: !transfer && isRefund(tx) ? "REFUND" : undefined,
+    // Between the user's own accounts: neither income nor spending.
+    ...(transfer ? { isExternal: false } : {}),
     date: tx.created,
     amount: amountInMajorUnits,
     currency,
@@ -197,5 +239,23 @@ export function mapTransactionToActivity(
     // `id` is the Monzo transaction id; `importNew` remembers imported ids so a re-fetch (or
     // a CSV import of the same transaction) is recognised even after its comment changed.
     comment: buildComment(tx, categoryLabels, ownNames) || undefined,
+  };
+}
+
+/**
+ * The Flex-account side of a repayment: the same amount and date as the debit on the current
+ * account, as a `TRANSFER_IN` that pays the Flex balance down. Its id is the debit's plus
+ * {@link FLEX_CREDIT_SUFFIX}, so the import ledger tells the two rows apart.
+ */
+export function flexRepaymentCredit(
+  tx: MonzoTransaction,
+  flexAccountId: string,
+  categoryLabels: Record<string, string> = {},
+  ownNames: ReadonlySet<string> = new Set(),
+): ActivityImport {
+  return {
+    ...mapTransactionToActivity(tx, flexAccountId, categoryLabels, ownNames),
+    id: `${tx.id}${FLEX_CREDIT_SUFFIX}`,
+    activityType: TRANSFER_IN,
   };
 }

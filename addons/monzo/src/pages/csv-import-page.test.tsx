@@ -14,11 +14,11 @@ const rowWithNotes = (id: string, amount: string, notes: string) =>
   `${id},05/03/2026,14:30:00,Card payment,Cafe,,Eating out,${amount},GBP,${amount},GBP,${notes},,,CAFE,,${amount},`;
 const csv = (...rows: string[]) => [HEADER, ...rows].join("\n");
 
-function renderPage() {
+function renderPage(flexType?: string) {
   const t = makeCtx({
     wfAccounts: [
       { id: "wf-1", name: "Current" },
-      { id: "wf-2", name: "Flex" },
+      { id: "wf-2", name: "Flex", accountType: flexType },
     ],
   });
   (t.ctx.api as unknown as { navigation: unknown }).navigation = { navigate: vi.fn() };
@@ -142,5 +142,30 @@ describe("CsvImportPage", () => {
       await running;
     });
     await waitFor(() => expect(controls().map((c) => c.disabled)).toEqual([false, false, false, false, false]));
+  });
+
+  it("imports Flex repayments as a transfer pair into the credit card account, and links them", async () => {
+    const { input, activities, links } = renderPage("CREDIT_CARD");
+    const repayment = `tx_r1,06/03/2026,10:00:00,Monzo-to-Monzo,Flex,,Transfers,-50.00,GBP,-50.00,GBP,,,,Flex,,50.00,`;
+    fireEvent.change(input, { target: { files: [new File([csv(repayment)], "current.csv")] } });
+    await screen.findByText("current.csv");
+    await waitFor(() => expect(screen.getAllByRole("option", { name: "Flex" }).length).toBeGreaterThan(0));
+    fireEvent.change(screen.getByLabelText("Target account for current.csv"), { target: { value: "wf-1" } });
+    // The only credit card account is the default for the Flex side.
+    expect((screen.getByLabelText(/Flex account/) as HTMLSelectElement).value).toBe("wf-2");
+    fireEvent.click(screen.getByRole("button", { name: "Import 1 transaction from 1 file" }));
+
+    await screen.findByText(/Flex transfers: 1 linked/);
+    expect(activities.get("wf-1")!.map((r) => r.activityType)).toEqual(["TRANSFER_OUT"]);
+    expect(activities.get("wf-2")!.map((r) => r.activityType)).toEqual(["TRANSFER_IN"]);
+    expect(links).toHaveLength(1);
+  });
+
+  it("skips repayments when no Flex account is chosen", async () => {
+    const { input } = renderPage(); // no credit card account, so nothing is chosen for you
+    const repayment = `tx_r2,06/03/2026,10:00:00,Monzo-to-Monzo,Flex,,Transfers,-50.00,GBP,-50.00,GBP,,,,Flex,,50.00,`;
+    fireEvent.change(input, { target: { files: [new File([csv(repayment)], "current.csv")] } });
+    await screen.findByText(/Parsed 1 transaction · 0 to import/);
+    expect((screen.getByLabelText(/Flex account/) as HTMLSelectElement).value).toBe("");
   });
 });

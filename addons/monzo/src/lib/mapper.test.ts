@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { mapTransactionToActivity, payeeName, isFlexRepayment, tallyByCategory } from './mapper';
+import {
+  flexRepaymentCredit,
+  isFlexRefund,
+  isFlexRepayment,
+  mapTransactionToActivity,
+  payeeName,
+  tallyByCategory,
+} from './mapper';
 import type { MonzoTransaction } from '../types';
 
 function catTx(amount: number, category: string): MonzoTransaction {
@@ -316,5 +323,89 @@ describe('refunds', () => {
     for (const over of [{ category: 'income' }, { is_load: true }, { category: 'transfers' }, { category: 'general' }]) {
       expect(mapTransactionToActivity(credit(over), 'acc')).toMatchObject({ activityType: 'DEPOSIT', subtype: undefined });
     }
+  });
+});
+
+describe('Flex <-> current account transfers', () => {
+  const repayment: MonzoTransaction = {
+    id: 'tx_repay',
+    created: '2026-05-06T10:00:00.000Z',
+    settled: '2026-05-06T10:00:00.000Z',
+    amount: -5000,
+    currency: 'GBP',
+    description: 'Flex',
+    notes: '',
+    category: 'transfers',
+    is_load: false,
+    metadata: {},
+  };
+  const refundIn: MonzoTransaction = {
+    ...repayment,
+    id: 'tx_refund_in',
+    amount: 1999,
+    description: 'Refunded (Flex)',
+    category: 'shopping',
+  };
+  const refundOut: MonzoTransaction = { ...refundIn, id: 'tx_refund_out', amount: -1999 };
+
+  it('recognises "Refunded (Flex)" in the description, notes or merchant name', () => {
+    expect(isFlexRefund(refundIn)).toBe(true);
+    expect(isFlexRefund({ ...refundIn, description: 'ASOS', notes: 'refunded (flex)' })).toBe(true);
+    expect(isFlexRefund({ ...refundIn, description: '', merchant: { name: 'Refunded (Flex)' } })).toBe(true);
+    expect(isFlexRefund({ ...refundIn, description: 'Refunded by ASOS' })).toBe(false);
+    expect(isFlexRefund({ ...refundIn, description: 'Flex' })).toBe(false);
+  });
+
+  it('maps the repayment on the current account to an internal TRANSFER_OUT', () => {
+    const a = mapTransactionToActivity(repayment, 'wf-current');
+    expect(a).toMatchObject({
+      id: 'tx_repay',
+      accountId: 'wf-current',
+      activityType: 'TRANSFER_OUT',
+      amount: 50,
+      symbol: '$CASH-GBP',
+      isExternal: false,
+    });
+    expect(a.subtype).toBeUndefined();
+  });
+
+  it('maps the repayment onto the Flex account as a matching TRANSFER_IN with its own id', () => {
+    const out = mapTransactionToActivity(repayment, 'wf-current');
+    const inn = flexRepaymentCredit(repayment, 'wf-flex');
+    expect(inn).toMatchObject({
+      id: 'tx_repay:flex-in',
+      accountId: 'wf-flex',
+      activityType: 'TRANSFER_IN',
+      amount: out.amount,
+      date: out.date,
+      currency: out.currency,
+      symbol: '$CASH-GBP',
+      isExternal: false,
+    });
+    expect(inn.comment).toBe(out.comment);
+  });
+
+  it('maps both legs of a Flex refund as transfers, not as a withdrawal and a refund credit', () => {
+    expect(mapTransactionToActivity(refundIn, 'wf-current')).toMatchObject({
+      activityType: 'TRANSFER_IN',
+      amount: 19.99,
+      isExternal: false,
+    });
+    expect(mapTransactionToActivity(refundIn, 'wf-current').subtype).toBeUndefined();
+    expect(mapTransactionToActivity(refundOut, 'wf-flex')).toMatchObject({
+      activityType: 'TRANSFER_OUT',
+      amount: 19.99,
+      isExternal: false,
+    });
+  });
+
+  it('still maps an ordinary refund as a CREDIT and a purchase as a WITHDRAWAL', () => {
+    const refund = { ...refundIn, description: 'ASOS', id: 'tx_plain_refund' };
+    expect(mapTransactionToActivity(refund, 'wf')).toMatchObject({ activityType: 'CREDIT', subtype: 'REFUND' });
+    expect(mapTransactionToActivity({ ...refund, amount: -500 }, 'wf').activityType).toBe('WITHDRAWAL');
+  });
+
+  it('leaves transfers out of the spending tally', () => {
+    expect(tallyByCategory([repayment, refundOut])).toEqual({});
   });
 });

@@ -1,23 +1,38 @@
-import type { AddonContext } from "@wealthfolio/addon-sdk";
+import type { ActivityImport, AddonContext } from "@wealthfolio/addon-sdk";
 import type { MonzoTransaction } from "../types";
 import { runExclusive } from "./busy";
-import { isFlexRepayment, isPotTransfer, legacyActivity, mapTransactionToActivity } from "./mapper";
+import {
+  isFlexRefund,
+  isFlexRepayment,
+  isFlexRepaymentDebit,
+  isPotTransfer,
+  legacyActivity,
+  mapTransactionToActivity,
+} from "./mapper";
 import { importNew } from "./sync";
+import { flexCreditsOf, linkNote, linkTransfers } from "./transfers";
 
 /**
- * Drops what should not count as spending: Flex repayments and pot transfers always, and
- * (with `skipTransfers`) the `transfers` and `savings` categories.
+ * Drops what should not count as spending: pot transfers always, and (with `skipTransfers`)
+ * the `transfers` and `savings` categories. Flex repayments and refunds are not spending
+ * either, but they are not dropped by `skipTransfers`: they move money between the current
+ * account and Flex, and are kept as transfers. A repayment needs a Flex account to credit
+ * (`flexTracked`) and is dropped without one; a credit that looks like a repayment is always
+ * dropped, since the import writes the Flex side itself.
  */
 export function filterCsvTransactions(
   transactions: MonzoTransaction[],
   skipTransfers: boolean,
+  flexTracked: boolean,
+  /** The file is the Flex account's own export: repayments are not on it, so none are kept. */
+  isFlexFile = false,
 ): MonzoTransaction[] {
-  return transactions.filter(
-    (tx) =>
-      !isFlexRepayment(tx) &&
-      !isPotTransfer(tx) &&
-      (!skipTransfers || (tx.category !== "transfers" && tx.category !== "savings")),
-  );
+  return transactions.filter((tx) => {
+    if (isPotTransfer(tx)) return false;
+    if (isFlexRefund(tx)) return true;
+    if (isFlexRepayment(tx)) return flexTracked && !isFlexFile && isFlexRepaymentDebit(tx);
+    return !skipTransfers || (tx.category !== "transfers" && tx.category !== "savings");
+  });
 }
 
 export interface CsvImportFile {
@@ -37,6 +52,13 @@ export interface CsvImportOutcome {
   error?: string;
 }
 
+export interface CsvImportOptions {
+  /** The Wealthfolio account that repayments are credited to (the Flex account). */
+  flexAccountId?: string;
+  /** Receives one-line remarks about the whole import (e.g. how many transfers were linked). */
+  onNote?: (note: string) => void;
+}
+
 /**
  * Imports the files one after another, never in parallel: `importNew` reads and rewrites one
  * shared ledger in add-on storage, so concurrent calls would lose entries. A file that fails
@@ -49,8 +71,9 @@ export async function importCsvFiles(
   files: CsvImportFile[],
   categoryLabels: Record<string, string> = {},
   onProgress: (name: string, index: number, total: number) => void = () => {},
+  options: CsvImportOptions = {},
 ): Promise<CsvImportOutcome[]> {
-  return runExclusive(() => importFiles(ctx, files, categoryLabels, onProgress));
+  return runExclusive(() => importFiles(ctx, files, categoryLabels, onProgress, options));
 }
 
 async function importFiles(
@@ -58,13 +81,18 @@ async function importFiles(
   files: CsvImportFile[],
   categoryLabels: Record<string, string>,
   onProgress: (name: string, index: number, total: number) => void,
+  { flexAccountId, onNote = () => {} }: CsvImportOptions,
 ): Promise<CsvImportOutcome[]> {
   const todo = files.filter((f) => f.accountId && f.transactions.length > 0);
   const outcomes: CsvImportOutcome[] = [];
+  const imported: ActivityImport[] = [];
+  const credits = new Map<string, ActivityImport>();
   for (const [i, file] of todo.entries()) {
     onProgress(file.name, i, todo.length);
     try {
-      const activities = file.transactions.map((tx) =>
+      // A repayment in the Flex account's own file is not a debit from a current account.
+      const transactions = filterCsvTransactions(file.transactions, false, !!flexAccountId, file.accountId === flexAccountId);
+      const activities = transactions.map((tx) =>
         mapTransactionToActivity(tx, file.accountId, categoryLabels),
       );
       // Reconcile against what the account already holds (by count, so genuine repeats
@@ -74,6 +102,12 @@ async function importFiles(
         file.transactions.map((tx) => [tx.id, legacyActivity(tx, file.accountId, categoryLabels)]),
       );
       const outcome = await importNew(ctx, file.accountId, activities, legacy);
+      imported.push(...activities);
+      if (flexAccountId) {
+        for (const credit of flexCreditsOf(transactions, flexAccountId, categoryLabels)) {
+          credits.set(credit.id!, credit);
+        }
+      }
       outcomes.push({
         name: file.name,
         imported: outcome.imported,
@@ -90,5 +124,16 @@ async function importFiles(
       });
     }
   }
+  if (credits.size > 0 && flexAccountId) {
+    // The Flex side of each repayment. Safe to repeat: the ledger knows the ids.
+    try {
+      await importNew(ctx, flexAccountId, [...credits.values()]);
+      imported.push(...credits.values());
+    } catch (err) {
+      onNote(`Could not credit the Flex account with the repayments: ${(err as Error).message}`);
+    }
+  }
+  const note = linkNote(await linkTransfers(ctx, imported));
+  if (note) onNote(note);
   return outcomes;
 }

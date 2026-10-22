@@ -33,6 +33,7 @@ import {
   legacyActivity,
   isDeclined,
   isFlexRepayment,
+  isFlexRepaymentDebit,
   isPending,
   isPotTransfer,
   mapTransactionToActivity,
@@ -43,6 +44,7 @@ import { MonzoClient, isHistoryRefusal } from "./monzo-client";
 import { accountTypeIssueText, accountTypeIssues } from "./accounts";
 import { ensureMigrated } from "./migrate";
 import { monzoSpendingRules } from "./spending-rules";
+import { flexCreditsOf, linkNote, linkTransfers } from "./transfers";
 
 export type SyncProgressHandler = (p: SyncProgress<SyncPhaseId>) => void;
 
@@ -86,17 +88,18 @@ export function syncSince(
 /**
  * Whether a fetched transaction should become an activity. Declined and zero-value ones
  * (card checks) moved no money. Pending ones are skipped (they can still change) except
- * on Flex, whose purchases never "settle" because they are billed monthly. Pot transfers,
- * Flex repayments (the matching spend is already on the Flex account) and savings-category
- * moves (investment transfers) are never imported.
+ * on Flex, whose purchases never "settle" because they are billed monthly. Pot transfers
+ * and savings-category moves (investment transfers) are never imported. A Flex repayment
+ * is imported (as a transfer to the Flex account) only from a current account and only when
+ * the Flex account is tracked (`flexTracked`): otherwise there is nothing to credit.
  */
-export function isEligible(tx: MonzoTransaction, isFlex: boolean): boolean {
+export function isEligible(tx: MonzoTransaction, isFlex: boolean, flexTracked = false): boolean {
   return (
     !isDeclined(tx) &&
     tx.amount !== 0 &&
     (isFlex || !isPending(tx)) &&
     !isPotTransfer(tx) &&
-    !isFlexRepayment(tx) &&
+    (!isFlexRepayment(tx) || (flexTracked && !isFlex && isFlexRepaymentDebit(tx))) &&
     tx.category !== "savings"
   );
 }
@@ -176,6 +179,8 @@ export async function importNew(
           amount: activity.amount,
           currency: activity.currency,
           comment: activity.comment ?? null,
+          // A row converted to a transfer is between the user's own accounts.
+          ...(activity.isExternal === false ? { metadata: { flow: { is_external: false } } } : {}),
         })),
       })
       .catch(() => null);
@@ -405,6 +410,23 @@ async function syncAll(ctx: AddonContext, onProgress: SyncProgressHandler): Prom
     fetched.push({ monzoAccountId, wealthfolioAccountId, transactions });
   }
 
+  // Where repayments are credited: Monzo's Flex feed has no row for them, so the add-on writes
+  // the Flex side from the current account's debit.
+  const flexWfId = entries.find(([monzoId]) => flexAccountIds.has(monzoId))?.[1];
+  // (With several Flex accounts mapped, they all go to the first.)
+  const flexCredits = flexWfId
+    ? flexCreditsOf(
+        fetched
+          .filter((f) => !flexAccountIds.has(f.monzoAccountId))
+          .flatMap((f) => f.transactions)
+          .filter((tx) => isEligible(tx, false, true)),
+        flexWfId,
+        categoryLabels,
+        ownNames
+      )
+    : [];
+  const imports: ActivityImport[] = [];
+
   for (const { monzoAccountId, wealthfolioAccountId, transactions } of fetched) {
     try {
       const cleaned = await stripRefTags(ctx, wealthfolioAccountId);
@@ -414,11 +436,18 @@ async function syncAll(ctx: AddonContext, onProgress: SyncProgressHandler): Prom
     }
 
     const isFlex = flexAccountIds.has(monzoAccountId);
-    const eligible = transactions.filter((tx) => isEligible(tx, isFlex));
+    const eligible = transactions.filter((tx) => isEligible(tx, isFlex, !!flexWfId));
     log.push(
       `Account ${monzoAccountId.slice(0, 10)}…: ${transactions.length} fetched${oldestNote(transactions)}, ` +
         `${eligible.length} eligible.`
     );
+    const unmatched = flexWfId || isFlex ? 0 : transactions.filter(isFlexRepaymentDebit).length;
+    if (unmatched) {
+      log.push(
+        `${unmatched} Flex repayment${unmatched === 1 ? "" : "s"} not imported: no Flex account is ` +
+          "mapped, so there is nothing to credit."
+      );
+    }
     if (!isFlex) {
       const hb = pendingHoldBack(transactions, startedAt);
       if (hb && (holdBack === null || hb < holdBack)) holdBack = hb;
@@ -426,21 +455,27 @@ async function syncAll(ctx: AddonContext, onProgress: SyncProgressHandler): Prom
     for (const [k, v] of Object.entries(tallyByCategory(eligible, categoryLabels))) {
       breakdown[k] = (breakdown[k] ?? 0) + v;
     }
-    if (eligible.length === 0) continue;
-
-    onProgress({ phase: "import", message: `Importing ${eligible.length} transactions…` });
     const desired = eligible.map((tx) =>
       mapTransactionToActivity(tx, wealthfolioAccountId, categoryLabels, ownNames)
     );
+    if (wealthfolioAccountId === flexWfId) desired.push(...flexCredits);
+    if (desired.length === 0) continue;
+
+    onProgress({ phase: "import", message: `Importing ${desired.length} transactions…` });
     const legacy = new Map(
       eligible.map((tx) => [tx.id, legacyActivity(tx, wealthfolioAccountId, categoryLabels)])
     );
     const outcome = await importNew(ctx, wealthfolioAccountId, desired, legacy);
+    imports.push(...desired);
     updated += outcome.updated;
     imported += outcome.imported;
     duplicates += outcome.duplicates;
     skipped += outcome.skipped;
   }
+
+  // Pair up the repayment and refund legs as internal transfers. Best effort, like the rules.
+  const linkLine = linkNote(await linkTransfers(ctx, imports));
+  if (linkLine) log.push(linkLine);
 
   // Watermark: when this sync started, or earlier if a transaction was still pending.
   const watermark =

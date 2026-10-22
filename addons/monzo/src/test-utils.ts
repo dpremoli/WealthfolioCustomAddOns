@@ -20,6 +20,7 @@ export interface FakeAccount {
   id: string;
   name: string;
   currency?: string;
+  accountType?: string;
 }
 
 /** An in-memory stand-in for the parts of `AddonContext` the Monzo add-on touches. */
@@ -34,6 +35,9 @@ export function makeCtx(
   const activities = new Map<string, Record<string, unknown>[]>();
   const wfAccounts: FakeAccount[] = opts.wfAccounts ?? [];
   const created: Record<string, unknown>[] = [];
+  /** Activity id pairs passed to `linkTransfer`. */
+  const links: [string, string][] = [];
+  let activitySeq = 0;
   const state = { handler: opts.handler };
 
   const kv = (m: Map<string, string>) => ({
@@ -66,23 +70,34 @@ export function makeCtx(
       },
       activities: {
         getAll: async (accountId?: string) => [...(activities.get(accountId ?? "") ?? [])],
-        saveMany: async (req: { updates?: { id: string; comment?: string | null; amount?: unknown }[] }) => {
+        saveMany: async (req: {
+          updates?: { id: string; comment?: string | null; amount?: unknown; activityType?: string }[];
+        }) => {
           for (const u of req.updates ?? []) {
             for (const list of activities.values()) {
               const row = list.find((r) => r.id === u.id);
               if (!row) continue;
               row.comment = u.comment ?? null;
+              if (u.activityType) row.activityType = u.activityType;
               if (u.amount !== undefined) row.amount = u.amount == null ? null : String(u.amount);
             }
           }
           return { created: [], updated: req.updates ?? [], deleted: [], createdMappings: [], errors: [] };
+        },
+        getTransferPair: async (id: string) => {
+          const hit = links.find((l) => l.includes(id));
+          return hit ? { transferOut: { id: hit[0] }, transferIn: { id: hit[1] } } : null;
+        },
+        linkTransfer: async (a: string, b: string) => {
+          links.push([a, b]);
+          return [{ id: a }, { id: b }];
         },
         import: async (batch: ActivityImport[]) => {
           importCalls.push(batch);
           for (const a of batch) {
             const list = activities.get(a.accountId) ?? [];
             list.push({
-              id: `act-${list.length + 1}`,
+              id: `act-${++activitySeq}`,
               activityType: a.activityType,
               date: new Date(a.date as string),
               amount: a.amount == null ? null : String(a.amount),
@@ -104,7 +119,7 @@ export function makeCtx(
     },
   } as unknown as AddonContext;
 
-  return { ctx, storage, secrets, requests, importCalls, activities, wfAccounts, created, state };
+  return { ctx, storage, secrets, requests, importCalls, activities, wfAccounts, created, links, state };
 }
 
 export function json(status: number, body: unknown): FakeResponse {

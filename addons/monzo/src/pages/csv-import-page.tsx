@@ -14,6 +14,7 @@ import { ADDON_ID, KEY_CATEGORY_LABELS } from "../constants";
 import { isBusy, subscribeBusy } from "../lib/busy";
 import { filterCsvTransactions, importCsvFiles, type CsvImportOutcome } from "../lib/csv-import";
 import { parseMonzoCsv } from "../lib/csv-parser";
+import { isFlexRepaymentDebit } from "../lib/mapper";
 import { ensureMigrated } from "../lib/migrate";
 import type { MonzoTransaction } from "../types";
 
@@ -69,6 +70,9 @@ export default function CsvImportPage({ ctx }: AddonPageProps) {
   const [importing, setImporting] = useState<string | null>(null);
   const [results, setResults] = useState<FileResult[] | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
+  const [notes, setNotes] = useState<string[]>([]);
+  // Which account receives the Flex side of repayments: null = the only credit card account.
+  const [flexChoice, setFlexChoice] = useState<string | null>(null);
   // A sync (or an import from elsewhere) in flight also blocks importing.
   const busy = useSyncExternalStore(subscribeBusy, isBusy);
   const locked = busy || importing !== null;
@@ -86,9 +90,13 @@ export default function CsvImportPage({ ctx }: AddonPageProps) {
     },
   });
 
+  const creditCards = wfAccounts.filter((a) => a.accountType === "CREDIT_CARD");
+  const flexAccountId = flexChoice ?? (creditCards.length === 1 ? creditCards[0].id : "");
+  const hasRepayments = files.some((f) => f.transactions.some(isFlexRepaymentDebit));
+
   const rows = files.map((f) => ({
     ...f,
-    filtered: filterCsvTransactions(f.transactions, skipTransfers),
+    filtered: filterCsvTransactions(f.transactions, skipTransfers, !!flexAccountId, f.accountId === flexAccountId),
     // Two different files can share a name: tell them apart by size and date.
     label: files.some((o) => o.id !== f.id && o.name === f.name)
       ? `${f.name} (${f.size} bytes, ${new Date(f.modified).toLocaleDateString()})`
@@ -123,13 +131,17 @@ export default function CsvImportPage({ ctx }: AddonPageProps) {
     setImporting("");
     setResults(null);
     setImportError(null);
+    setNotes([]);
     try {
+      const newNotes: string[] = [];
       const outcomes = await importCsvFiles(
         ctx,
         ready.map((f) => ({ name: f.label, accountId: f.accountId, transactions: f.filtered })),
         categoryLabels,
         (name, i, total) => setImporting(`${name} (${i + 1} of ${total})`),
+        { flexAccountId: flexAccountId || undefined, onNote: (n) => newNotes.push(n) },
       );
+      setNotes(newNotes);
       // One outcome per ready file, in order; the others say why they were left out.
       let next = 0;
       setResults(
@@ -254,6 +266,35 @@ export default function CsvImportPage({ ctx }: AddonPageProps) {
               </div>
             ))}
 
+            {hasRepayments && (
+              <div className="space-y-1 border rounded p-3">
+                <label className="text-sm font-medium block" htmlFor="flex-account">
+                  Flex account (receives the repayments)
+                </label>
+                <select
+                  id="flex-account"
+                  className="w-full border rounded px-3 py-2 text-sm bg-background"
+                  value={flexAccountId}
+                  disabled={locked}
+                  onChange={(e) => {
+                    setResults(null);
+                    setFlexChoice(e.target.value);
+                  }}
+                >
+                  <option value="">None: skip Flex repayments</option>
+                  {wfAccounts.map((a) => (
+                    <option key={a.id} value={a.id}>
+                      {a.name}
+                    </option>
+                  ))}
+                </select>
+                <p className="text-xs text-muted-foreground">
+                  Each repayment is imported as a transfer out of the current account and a matching
+                  transfer into this account, so both balances come right.
+                </p>
+              </div>
+            )}
+
             <label className="flex items-center gap-2 text-sm cursor-pointer">
               <input
                 type="checkbox"
@@ -261,7 +302,7 @@ export default function CsvImportPage({ ctx }: AddonPageProps) {
                 disabled={locked}
                 onChange={(e) => setSkipTransfers(e.target.checked)}
               />
-              Skip transfers &amp; savings (Flex repayments, bank transfers, Trading 212, etc.)
+              Skip transfers &amp; savings (bank transfers, Trading 212, etc.). Flex repayments and refunds are kept.
             </label>
 
             <Button onClick={doImport} disabled={locked || ready.length === 0}>
@@ -272,6 +313,11 @@ export default function CsvImportPage({ ctx }: AddonPageProps) {
 
             {importing && <p className="text-sm text-muted-foreground">Importing {importing}</p>}
             {importError && <p className="text-sm text-destructive">{importError}</p>}
+            {notes.map((n) => (
+              <p key={n} className="text-sm text-muted-foreground">
+                {n}
+              </p>
+            ))}
 
             {results && importing === null && (
               <div className="space-y-1">

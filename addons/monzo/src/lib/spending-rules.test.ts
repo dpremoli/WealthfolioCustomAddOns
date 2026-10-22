@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { mapTransactionToActivity } from "./mapper";
-import { monzoSpendingRules } from "./spending-rules";
+import { LEGACY_RULE_KEYS, monzoSpendingRules } from "./spending-rules";
 import { tx } from "../test-utils";
 
 const rule = (labels: Record<string, string>, key: string) => {
@@ -85,5 +85,12 @@ describe("monzoSpendingRules", () => {
       expect(row.comment).toBe("Trading 212 | Savings");
       expect(rules.filter((r) => new RegExp(r.pattern).test(row.comment!))).toEqual([]);
     }
+  });
+
+  it("lists every rule key it has ever saved, so an older rule can still be found and removed", () => {
+    for (const r of monzoSpendingRules({})) expect(LEGACY_RULE_KEYS).toContain(r.ruleKey);
+    // Keys from earlier versions: 2.2.0 saved monzo-<category> and monzo-income, 2.5.0 added -refund.
+    expect(LEGACY_RULE_KEYS).toEqual(expect.arrayContaining(["monzo-eating_out", "monzo-income", "monzo-rent-refund", "monzo-general"]));
+    expect(new Set(LEGACY_RULE_KEYS).size).toBe(LEGACY_RULE_KEYS.length);
   });
 });

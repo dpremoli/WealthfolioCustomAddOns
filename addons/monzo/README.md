@@ -217,9 +217,12 @@ opening amount.
 
 Rules the add-on saved under a key the current ones no longer use would keep applying next to
 the current outflow-only rules, so deposits and transfers could still get spending categories.
-From 2.8.0 every sync removes the add-on's own rules that it did not just save (Wealthfolio names
-them `addon:monzo-addon:<key>`; rules created elsewhere, for instance by hand or in the database,
-are never touched), and the log says so: `Spending: … N older rules removed`. The upgrade asks you
+From 2.8.0 every sync removes the add-on's own rules that it did not just save, and the log says
+so: `Spending: … N older rules removed`. Wealthfolio deletes a rule by the key it was saved under
+and cannot give that key back, so the add-on remembers the keys it saves (in its own storage) and
+knows the keys earlier versions used; it removes those that no longer apply and that really exist
+in Wealthfolio. Rules created elsewhere, for instance by hand or in the database, are never
+touched. The upgrade asks you
 to approve two more Spending permissions, `getRules` and `deleteRule`. Rules are only saved when
 Wealthfolio is opened over HTTPS or on localhost. A "Monzo: …" rule you created yourself that
 outranks the add-on's rules (a higher priority, or no activity type) will keep filing deposits and

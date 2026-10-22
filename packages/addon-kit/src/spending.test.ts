@@ -1,5 +1,6 @@
+import { createHash } from "node:crypto";
 import type { ActivityType, AddonContext, SpendCategory } from "@wealthfolio/addon-sdk";
-import { escapeRegex, pickSpendCategory, spendingRulesNote, syncSpendingRules } from "./spending";
+import { deriveRuleId, escapeRegex, pickSpendCategory, spendingRulesNote, syncSpendingRules } from "./spending";
 
 const cat = (kind: SpendCategory["kind"], key: string, name: string, path = name): SpendCategory => ({
   kind,
@@ -67,78 +68,135 @@ describe("syncSpendingRules", () => {
   });
 });
 
+/** The real host's id for a rule: `addon:<addon id>:` + the first 24 hex chars of SHA-256(ruleKey). */
+const hostId = (key: string, addonId = "test-addon") =>
+  `addon:${addonId}:${createHash("sha256").update(key).digest("hex").slice(0, 24)}`;
+
+describe("deriveRuleId", () => {
+  it("matches the host's derivation (SHA-256, first 24 hex chars)", async () => {
+    expect(await deriveRuleId("test-addon", "monzo-groceries")).toBe(hostId("monzo-groceries"));
+    expect(await deriveRuleId("test-addon", "monzo-groceries")).toMatch(/^addon:test-addon:[0-9a-f]{24}$/);
+  });
+});
+
 describe("syncSpendingRules pruneStale", () => {
-  // The host names a rule `addon:<addon id>:<ruleKey>` and deletes it by that key.
-  const ID = (key: string) => `addon:test-addon:${key}`;
+  const KEYS = "test_rule_keys";
+  const PRUNE = { pruneStale: { addonId: "test-addon", storageKey: KEYS, legacyKeys: ["legacy-x", "legacy-y"] } };
+  const spec = { ruleKey: "g", name: "Monzo: Groceries", pattern: "x", kind: "expense" as const, categories: ["groceries"] };
   const rule = (id: string, name: string) => ({ id, name, pattern: "x", matchType: "regex", kind: "expense", categoryId: "c", priority: 0 });
 
-  function host(initial: ReturnType<typeof rule>[]) {
-    const rules = [...initial];
+  /**
+   * A host that behaves like Wealthfolio's: a rule's id is derived from its key (SHA-256, 24 hex
+   * chars), `getRules` returns ids only, and `deleteRule(ruleKey)` hashes its argument again, so
+   * passing an id (or anything but the original key) deletes nothing.
+   */
+  function host(opts: { keys?: string[]; foreign?: string[]; stored?: string[] } = {}) {
+    const rules = [
+      ...(opts.keys ?? []).map((k) => rule(hostId(k), `Monzo: ${k}`)),
+      ...(opts.foreign ?? []).map((id) => rule(id, "Monzo: Foreign")),
+    ];
+    const storage = new Map<string, string>();
+    if (opts.stored) storage.set(KEYS, JSON.stringify(opts.stored));
     const deleteRule = vi.fn(async (key: string) => {
-      const i = rules.findIndex((r) => r.id === ID(key));
+      const i = rules.findIndex((r) => r.id === hostId(key));
       if (i >= 0) rules.splice(i, 1);
     });
     const spending = {
       getCategories: async () => CATEGORIES,
       saveRule: vi.fn(async (r: { ruleKey: string; name: string }) => {
-        let hit = rules.find((x) => x.id === ID(r.ruleKey));
-        if (!hit) rules.push((hit = rule(ID(r.ruleKey), r.name)));
+        let hit = rules.find((x) => x.id === hostId(r.ruleKey));
+        if (!hit) rules.push((hit = rule(hostId(r.ruleKey), r.name)));
         return hit;
       }),
       getRules: vi.fn(async () => [...rules]),
       deleteRule,
       rerunRules: vi.fn(async () => 0),
     };
-    return { ctx: { api: { spending } } as unknown as AddonContext, rules, deleteRule, spending };
+    const ctx = {
+      api: {
+        spending,
+        storage: {
+          get: async (k: string) => storage.get(k) ?? null,
+          set: async (k: string, v: string) => void storage.set(k, v),
+          delete: async (k: string) => void storage.delete(k),
+        },
+      },
+    } as unknown as AddonContext;
+    const stored = () => JSON.parse(storage.get(KEYS) ?? "null") as string[] | null;
+    return { ctx, rules, deleteRule, spending, storage, stored };
   }
-  const spec = { ruleKey: "g", name: "Monzo: Groceries", pattern: "x", kind: "expense" as const, categories: ["groceries"] };
-  const PRUNE = { pruneStale: { addonId: "test-addon" } };
 
-  it("removes the add-on's own rules that this run did not save, by key, and never the ones it just saved", async () => {
-    const h = host([rule(ID("old-1"), "Monzo: Groceries"), rule(ID("old-2"), "Monzo: Finances")]);
-    const out = await syncSpendingRules(h.ctx, [spec], PRUNE);
-    expect(h.deleteRule.mock.calls.map((c) => c[0]).sort()).toEqual(["old-1", "old-2"]);
-    expect(h.rules.map((r) => r.id)).toEqual([ID("g")]);
-    expect(out).toMatchObject({ saved: 1, removed: 2 });
-    expect(spendingRulesNote(out)).toMatch(/2 older rules removed/);
+  it("remembers the keys it saves, in add-on storage", async () => {
+    const h = host();
+    await syncSpendingRules(h.ctx, [spec], PRUNE);
+    expect(h.stored()).toEqual(["g"]);
   });
 
-  it("leaves a rule that is not this add-on's alone", async () => {
-    const h = host([rule("monzo_fb_groceries", "Monzo: Groceries"), rule("addon:other-addon:x", "Other")]);
+  it("removes a rule an earlier run saved but this one did not, deleting by its key", async () => {
+    const h = host({ keys: ["old-1", "g"], stored: ["old-1", "g"] });
     const out = await syncSpendingRules(h.ctx, [spec], PRUNE);
+    expect(h.deleteRule.mock.calls.map((c) => c[0])).toEqual(["old-1"]);
+    expect(h.rules.map((r) => r.id)).toEqual([hostId("g")]);
+    expect(out).toMatchObject({ saved: 1, removed: 1 });
+    expect(spendingRulesNote(out)).toMatch(/1 older rule removed/);
+    expect(h.stored()).toEqual(["g"]);
+  });
+
+  it("removes rules saved under keys earlier versions used, on an install with no stored keys", async () => {
+    const h = host({ keys: ["legacy-x", "legacy-y"] });
+    const out = await syncSpendingRules(h.ctx, [spec], PRUNE);
+    expect(h.deleteRule.mock.calls.map((c) => c[0]).sort()).toEqual(["legacy-x", "legacy-y"]);
+    expect(h.rules.map((r) => r.id)).toEqual([hostId("g")]);
+    expect(out.removed).toBe(2);
+  });
+
+  it("never removes a rule it just saved, nor one created elsewhere, and does not call delete for keys the host does not hold", async () => {
+    const h = host({ keys: ["g"], foreign: ["monzo_fb_groceries", "addon:other-addon:abcdef"], stored: ["g", "gone"] });
+    const out = await syncSpendingRules(h.ctx, [{ ...spec }], { pruneStale: { ...PRUNE.pruneStale, legacyKeys: ["g", "legacy-x"] } });
     expect(h.deleteRule).not.toHaveBeenCalled();
     expect(out.removed).toBe(0);
-    expect(h.rules.map((r) => r.id)).toEqual(["monzo_fb_groceries", "addon:other-addon:x", ID("g")]);
+    expect(h.rules.map((r) => r.id)).toEqual([hostId("g"), "monzo_fb_groceries", "addon:other-addon:abcdef"]);
   });
 
   it("is idempotent: a second run saves in place, removes nothing and adds no duplicates", async () => {
-    const h = host([rule(ID("old-1"), "Monzo: Groceries")]);
+    const h = host({ keys: ["old-1"], stored: ["old-1"] });
     await syncSpendingRules(h.ctx, [spec], PRUNE);
+    h.deleteRule.mockClear();
     const again = await syncSpendingRules(h.ctx, [spec], PRUNE);
     expect(again.removed).toBe(0);
+    expect(h.deleteRule).not.toHaveBeenCalled();
     expect(h.rules).toHaveLength(1);
+    expect(h.stored()).toEqual(["g"]);
   });
 
-  it("only prunes when asked", async () => {
-    const h = host([rule(ID("old-1"), "Monzo: Groceries")]);
+  it("only prunes, and only stores keys, when asked", async () => {
+    const h = host({ keys: ["old-1"], stored: ["old-1"] });
     const out = await syncSpendingRules(h.ctx, [spec]);
     expect(h.deleteRule).not.toHaveBeenCalled();
     expect(out.removed).toBeUndefined();
+    expect(h.stored()).toEqual(["old-1"]);
   });
 
-  it("a refused lookup or delete never fails the sync, and is reported", async () => {
-    const h = host([rule(ID("old-1"), "Monzo: Groceries")]);
+  it("a refused lookup never fails the sync, is reported, and loses no remembered key", async () => {
+    const h = host({ keys: ["old-1"], stored: ["old-1"] });
     h.spending.getRules.mockRejectedValue(new Error("permission denied"));
-    const refused = await syncSpendingRules(h.ctx, [spec], PRUNE);
-    expect(refused.error).toBeUndefined();
-    expect(refused.saved).toBe(1);
-    expect(refused.pruneError).toBe("permission denied");
-    expect(spendingRulesNote(refused)).toMatch(/older rules.*permission denied/s);
+    const out = await syncSpendingRules(h.ctx, [spec], PRUNE);
+    expect(out.error).toBeUndefined();
+    expect(out.saved).toBe(1);
+    expect(out.pruneError).toBe("permission denied");
+    expect(spendingRulesNote(out)).toMatch(/older rules.*permission denied/s);
+    expect(h.stored()?.sort()).toEqual(["g", "old-1"]);
+  });
 
-    const h2 = host([rule(ID("old-1"), "Monzo: Groceries")]);
-    h2.deleteRule.mockRejectedValue(new Error("nope"));
-    const out = await syncSpendingRules(h2.ctx, [spec], PRUNE);
+  it("a refused delete is reported and the key is kept to try again next time", async () => {
+    const h = host({ keys: ["old-1"], stored: ["old-1"] });
+    h.deleteRule.mockRejectedValueOnce(new Error("nope"));
+    const out = await syncSpendingRules(h.ctx, [spec], PRUNE);
     expect(out.saved).toBe(1);
     expect(out.pruneError).toBe("nope");
+    expect(h.stored()?.sort()).toEqual(["g", "old-1"]);
+    const retry = await syncSpendingRules(h.ctx, [spec], PRUNE);
+    expect(retry.removed).toBe(1);
+    expect(h.stored()).toEqual(["g"]);
   });
 });

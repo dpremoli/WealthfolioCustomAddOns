@@ -1,4 +1,5 @@
 import type { ActivityType, AddonContext, SpendCategory, SpendCategoryKind } from "@wealthfolio/addon-sdk";
+import { jsonStore } from "./storage";
 
 /**
  * One categorisation rule an add-on wants in Wealthfolio's Spending module: activities
@@ -72,13 +73,18 @@ export async function syncSpendingRules(
   specs: SpendingRuleSpec[],
   opts: {
     /**
-     * Also remove the add-on's own rules that this run did not save: rules from earlier versions,
-     * saved under keys the current ones no longer use, would otherwise keep applying. The host
-     * names a rule `addon:<addon id>:<ruleKey>`, so only rules with the given `addonId` prefix are
-     * touched (never one created elsewhere) and the key to delete is read off the id. Needs the
+     * Also remove the add-on's own rules that this run did not save: a rule from an earlier version,
+     * saved under a key the current ones no longer use, would otherwise keep applying.
+     *
+     * The host derives a rule's id from its key (see {@link deriveRuleId}) and deletes by hashing
+     * the key it is given, so a rule can only be deleted by its original key, which cannot be read
+     * back from the id. The keys saved are therefore kept in add-on storage (`storageKey`), and
+     * `legacyKeys` lists the keys earlier versions used (for installs that predate that list). The
+     * rules to remove are those keys, minus the ones saved this run, that really exist in
+     * `getRules()`; rules with any other id (created elsewhere) are never touched. Needs the
      * `getRules` and `deleteRule` permissions.
      */
-    pruneStale?: { addonId: string };
+    pruneStale?: { addonId: string; storageKey: string; legacyKeys?: string[] };
   } = {},
 ): Promise<SpendingRulesOutcome> {
   const out: SpendingRulesOutcome = { saved: 0, unmatched: [], categorised: 0 };
@@ -86,14 +92,14 @@ export async function syncSpendingRules(
   if (!spending) return { ...out, error: "Wealthfolio's Spending API is not available." };
   try {
     const categories = await spending.getCategories();
-    const savedIds = new Set<string>();
+    const savedKeys = new Set<string>();
     for (const spec of specs) {
       const category = pickSpendCategory(categories, spec.kind, spec.categories);
       if (!category) {
         out.unmatched.push(spec.name);
         continue;
       }
-      const rule = await spending.saveRule({
+      await spending.saveRule({
         ruleKey: spec.ruleKey,
         name: spec.name,
         pattern: spec.pattern,
@@ -103,10 +109,10 @@ export async function syncSpendingRules(
         activityType: spec.activityType,
         priority: spec.priority ?? 0,
       });
-      savedIds.add(rule.id);
+      savedKeys.add(spec.ruleKey);
       out.saved++;
     }
-    if (opts.pruneStale) await pruneStaleRules(spending, `addon:${opts.pruneStale.addonId}:`, savedIds, out);
+    if (opts.pruneStale) await pruneStaleRules(ctx, spending, opts.pruneStale, savedKeys, out);
     out.categorised = await spending.rerunRules(true);
   } catch (err) {
     out.error = describeSpendingError(err instanceof Error ? err.message : String(err));
@@ -114,26 +120,54 @@ export async function syncSpendingRules(
   return out;
 }
 
+/** The id Wealthfolio gives an add-on's rule: `addon:<addon id>:` + the first 24 hex chars of SHA-256(ruleKey). */
+export async function deriveRuleId(addonId: string, ruleKey: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(ruleKey));
+  const hex = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  return `addon:${addonId}:${hex.slice(0, 24)}`;
+}
+
 /**
- * Deletes the rules whose id starts with `prefix` (this add-on's: `addon:<addon id>:`) and is not
- * in `keep`, by the key that follows the prefix.
+ * Deletes the rules this add-on saved under a key it no longer uses: the remembered keys plus
+ * `legacyKeys`, minus `savedKeys`, whose derived id is really in `getRules()`. Remembers the keys
+ * saved this run (plus any whose delete failed, to try again, or all the old ones if the lookup
+ * failed, so none is lost).
  */
 async function pruneStaleRules(
+  ctx: AddonContext,
   spending: NonNullable<AddonContext["api"]["spending"]>,
-  prefix: string,
-  keep: ReadonlySet<string>,
+  cfg: { addonId: string; storageKey: string; legacyKeys?: string[] },
+  savedKeys: ReadonlySet<string>,
   out: SpendingRulesOutcome,
 ): Promise<void> {
   out.removed = 0;
+  const store = jsonStore(ctx.api.storage);
+  let stored: string[] = [];
   try {
-    const stale = (await spending.getRules()).filter((r) => r.id.startsWith(prefix) && !keep.has(r.id));
-    for (const r of stale) {
-      await spending.deleteRule(r.id.slice(prefix.length));
-      out.removed++;
+    stored = await store.get<string[]>(cfg.storageKey, []);
+  } catch {
+    /* start from the saved keys alone */
+  }
+  let remember = new Set([...stored, ...savedKeys]);
+  try {
+    const candidates = new Set([...stored, ...(cfg.legacyKeys ?? [])]);
+    savedKeys.forEach((k) => candidates.delete(k));
+    const existing = new Set((await spending.getRules()).map((r) => r.id));
+    remember = new Set(savedKeys);
+    for (const key of candidates) {
+      if (!existing.has(await deriveRuleId(cfg.addonId, key))) continue; // not there: nothing to remove
+      try {
+        await spending.deleteRule(key);
+        out.removed++;
+      } catch (err) {
+        remember.add(key);
+        out.pruneError ??= err instanceof Error ? err.message : String(err);
+      }
     }
   } catch (err) {
     out.pruneError = err instanceof Error ? err.message : String(err);
   }
+  await store.set(cfg.storageKey, [...remember]).catch(() => {});
 }
 
 /**

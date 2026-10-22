@@ -73,6 +73,15 @@ describe("parseRevolutCsv", () => {
     expect(other.id).not.toBe(a.id);
   });
 
+  it("keeps ids unique when two rows are identical (no Balance column to tell them apart)", () => {
+    const row = "Card Payment,Current,2021-09-18 1:25:56,2021-09-18 1:25:56,Coffee,-3,0,GBP,COMPLETED,";
+    const [a, b, c] = parseRevolutCsv(csv(row, row, row));
+    expect(b.id).toBe(`${a.id}-2`);
+    expect(c.id).toBe(`${a.id}-3`);
+    // Re-parsing the same file reproduces the same ids.
+    expect(parseRevolutCsv(csv(row, row, row)).map((t) => t.id)).toEqual([a.id, b.id, c.id]);
+  });
+
   it("parses a mixed-currency statement, tagging each row's currency", () => {
     const txs = parseRevolutCsv(
       csv(

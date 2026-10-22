@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import {
   KEY_AUTHENTICATED_AT,
@@ -8,6 +9,7 @@ import {
   KEY_LAST_SYNC,
   KEY_MAPPING,
   KEY_RECHECKED_90_DAYS,
+  KEY_RULE_KEYS,
   SECRET_ACCESS_TOKEN,
 } from "../constants";
 import { json, makeCtx, tx } from "../test-utils";
@@ -591,22 +593,32 @@ describe("runSync guards", () => {
 });
 
 describe("runSync spending rules", () => {
-  /** A Spending API holding the older rules of an earlier version (no activity type, priority 25). */
-  function withSpending(t: ReturnType<typeof setup>, oldRules: string[]) {
-    const rules = oldRules.map((name, i) => ({ id: `old-${i}`, name, priority: 25 }));
+  /** Wealthfolio's rule id: `addon:<addon id>:` + the first 24 hex chars of SHA-256(ruleKey). */
+  const hostId = (key: string) => `addon:monzo-addon:${createHash("sha256").update(key).digest("hex").slice(0, 24)}`;
+
+  /**
+   * A Spending API that behaves like the host: ids are derived from keys, `getRules` returns ids
+   * only, and `deleteRule(ruleKey)` hashes its argument again (so an id deletes nothing).
+   */
+  function withSpending(t: ReturnType<typeof setup>, opts: { keys?: string[]; foreign?: string[]; stored?: string[] } = {}) {
+    const rules = [
+      ...(opts.keys ?? []).map((k) => ({ id: hostId(k), name: `Monzo: ${k}`, priority: 25 })),
+      ...(opts.foreign ?? []).map((id) => ({ id, name: "Monzo: Groceries", priority: 25 })),
+    ];
+    if (opts.stored) t.storage.set(KEY_RULE_KEYS, JSON.stringify(opts.stored));
     const spending = {
       getCategories: async () => [
         { kind: "expense", taxonomyId: "t", categoryId: "c-groc", key: "groceries", name: "Groceries", path: "Groceries" },
         { kind: "income", taxonomyId: "i", categoryId: "c-inc", key: "income_other", name: "Other Income", path: "Other Income" },
       ],
-      saveRule: vi.fn(async (r: { ruleKey: string; name: string; activityType?: string }) => {
-        let hit = rules.find((x) => x.id === `id-${r.ruleKey}`);
-        if (!hit) rules.push((hit = { id: `id-${r.ruleKey}`, name: r.name, priority: 0 }));
+      saveRule: vi.fn(async (r: { ruleKey: string; name: string }) => {
+        let hit = rules.find((x) => x.id === hostId(r.ruleKey));
+        if (!hit) rules.push((hit = { id: hostId(r.ruleKey), name: r.name, priority: 0 }));
         return hit;
       }),
       getRules: async () => [...rules],
       deleteRule: vi.fn(async (key: string) => {
-        const i = rules.findIndex((x) => x.id === key);
+        const i = rules.findIndex((x) => x.id === hostId(key));
         if (i >= 0) rules.splice(i, 1);
       }),
       rerunRules: async () => 0,
@@ -614,33 +626,53 @@ describe("runSync spending rules", () => {
     (t.ctx.api as unknown as { spending: unknown }).spending = spending;
     return { rules, spending };
   }
+  const groceries = () => [tx({ amount: -350, category: "groceries", description: "Tesco" })];
+  const current = ["monzo-groceries", "monzo-groceries-refund", "monzo-income"].map(hostId).sort();
+  const storedKeys = (t: ReturnType<typeof setup>) => JSON.parse(t.storage.get(KEY_RULE_KEYS) ?? "[]") as string[];
 
-  it("removes the older unrestricted Monzo rules, so only the outflow-only set remains", async () => {
-    const t = setup([tx({ amount: -350, category: "groceries", description: "Tesco" })]);
-    const s = withSpending(t, ["Monzo: Groceries", "Monzo: Education", "Monzo: Finances"]);
+  it("remembers the rule keys it saves", async () => {
+    const t = setup(groceries());
+    withSpending(t);
+    await runSync(t.ctx);
+    expect(storedKeys(t).sort()).toEqual(["monzo-groceries", "monzo-groceries-refund", "monzo-income"]);
+  });
+
+  it("removes a rule it saved earlier under a key it no longer uses, by that key", async () => {
+    const t = setup(groceries());
+    const s = withSpending(t, { keys: ["monzo-dropped"], stored: ["monzo-dropped"] });
     const result = await runSync(t.ctx);
-    expect(s.spending.deleteRule.mock.calls.map((c) => c[0]).sort()).toEqual(["old-0", "old-1", "old-2"]);
-    expect(s.rules.some((r) => r.id.startsWith("old-"))).toBe(false);
+    expect(s.spending.deleteRule.mock.calls.map((c) => c[0])).toEqual(["monzo-dropped"]);
+    expect(s.rules.map((r) => r.id).sort()).toEqual(current);
+    expect(result.log!.join("\n")).toMatch(/1 older rule removed/);
+  });
+
+  it("removes rules under keys earlier versions used when nothing was remembered yet", async () => {
+    // The fake Wealthfolio has no Taxes or Rent categories, so those rules are not saved this time.
+    const t = setup(groceries());
+    const s = withSpending(t, { keys: ["monzo-taxes", "monzo-rent", "monzo-rent-refund"] });
+    const result = await runSync(t.ctx);
+    expect(s.spending.deleteRule.mock.calls.map((c) => c[0]).sort()).toEqual(["monzo-rent", "monzo-rent-refund", "monzo-taxes"]);
+    expect(s.rules.map((r) => r.id).sort()).toEqual(current);
     expect(result.log!.join("\n")).toMatch(/3 older rules removed/);
   });
 
-  it("does not remove them again, or add duplicates, on the next sync", async () => {
-    const t = setup([tx({ amount: -350, category: "groceries", description: "Tesco" })]);
-    const s = withSpending(t, ["Monzo: Groceries"]);
+  it("leaves rules that were created elsewhere alone", async () => {
+    const t = setup(groceries());
+    const s = withSpending(t, { foreign: ["monzo_fb_groceries"] });
+    await runSync(t.ctx);
+    expect(s.spending.deleteRule).not.toHaveBeenCalled();
+    expect(s.rules.some((r) => r.id === "monzo_fb_groceries")).toBe(true);
+  });
+
+  it("does not remove anything again, or add duplicates, on the next sync", async () => {
+    const t = setup(groceries());
+    const s = withSpending(t, { keys: ["monzo-dropped"], stored: ["monzo-dropped"] });
     await runSync(t.ctx);
     const count = s.rules.length;
     s.spending.deleteRule.mockClear();
     await runSync(t.ctx);
     expect(s.spending.deleteRule).not.toHaveBeenCalled();
     expect(s.rules).toHaveLength(count);
-  });
-
-  it("says so in the log when an older rule cannot be removed", async () => {
-    const t = setup([tx({ amount: -350, category: "groceries", description: "Tesco" })]);
-    const s = withSpending(t, ["Monzo: Groceries"]);
-    s.spending.deleteRule.mockImplementation(async () => {});
-    const result = await runSync(t.ctx);
-    expect(result.log!.join("\n")).toMatch(/could not remove 1 older rule \(Monzo: Groceries\)/);
   });
 });
 

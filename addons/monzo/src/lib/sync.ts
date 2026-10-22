@@ -15,6 +15,7 @@ import {
   type SyncStep,
 } from "@wf-addons/kit";
 import {
+  ADDON_ID,
   KEY_AUTHENTICATED_AT,
   KEY_CATEGORY_LABELS,
   KEY_IMPORTED_IDS,
@@ -23,6 +24,7 @@ import {
   KEY_LAST_SYNC,
   KEY_MAPPING,
   KEY_RECHECKED_90_DAYS,
+  KEY_RULE_KEYS,
 } from "../constants";
 import type {
   AccountMapping,
@@ -47,7 +49,7 @@ import { runExclusive } from "./busy";
 import { MonzoClient, isHistoryRefusal } from "./monzo-client";
 import { accountTypeIssueText, accountTypeIssues } from "./accounts";
 import { ensureMigrated } from "./migrate";
-import { monzoSpendingRules } from "./spending-rules";
+import { LEGACY_RULE_KEYS, monzoSpendingRules } from "./spending-rules";
 import { flexCreditsOf, linkNote, linkTransfers, matchWithCashIsa } from "./transfers";
 
 export type SyncProgressHandler = (p: SyncProgress<SyncPhaseId>) => void;
@@ -519,7 +521,9 @@ async function syncAll(ctx: AddonContext, onProgress: SyncProgressHandler): Prom
   // label in each comment). Best effort: never fails the sync.
   onProgress({ phase: "import", message: "Updating spending categories…" });
   const note = spendingRulesNote(
-    await syncSpendingRules(ctx, monzoSpendingRules(categoryLabels), { pruneStale: true })
+    await syncSpendingRules(ctx, monzoSpendingRules(categoryLabels), {
+      pruneStale: { addonId: ADDON_ID, storageKey: KEY_RULE_KEYS, legacyKeys: LEGACY_RULE_KEYS },
+    })
   );
   if (note) log.push(note);
   if (watermark !== startedAt.toISOString()) {

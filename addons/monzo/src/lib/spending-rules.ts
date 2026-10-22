@@ -33,6 +33,25 @@ export const SPENDING_CATEGORY_CANDIDATES: Record<string, string[]> = {
   general: ["other_expense", "other expenses"],
 };
 
+/**
+ * Every Monzo category a rule was ever saved for. Versions 2.2.0 to 2.4.x saved `monzo-<category>`
+ * for the first twenty and `monzo-income`; 2.3.0 added `monzo-general`; 2.5.0 added
+ * `monzo-<category>-refund`. Kept as its own list (not derived from the candidates above) so a
+ * category dropped or renamed later still has its older rule found and removed.
+ */
+const RULE_CATEGORIES_EVER = [
+  "eating_out", "entertainment", "groceries", "personal_care", "shopping", "transport", "travel",
+  "holidays", "utilities", "bills", "cash", "charity", "education", "expenses", "family", "gifts",
+  "health", "rent", "taxes", "loan_repayments", "general",
+];
+
+/** Every rule key the add-on has ever saved, for removing rules the current version no longer saves. */
+export const LEGACY_RULE_KEYS: string[] = [
+  ...RULE_CATEGORIES_EVER.map((c) => `monzo-${c}`),
+  ...RULE_CATEGORIES_EVER.filter((c) => c !== "general").map((c) => `monzo-${c}-refund`),
+  "monzo-income",
+];
+
 const INCOME_CANDIDATES = ["income_other", "other income", "income"];
 
 /**

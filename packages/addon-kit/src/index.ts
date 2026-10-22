@@ -33,6 +33,7 @@ export {
   syncSpendingRules,
   spendingRulesNote,
   pickSpendCategory,
+  deriveRuleId,
   escapeRegex,
   type SpendingRuleSpec,
   type SpendingRulesOutcome,

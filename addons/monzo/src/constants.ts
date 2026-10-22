@@ -55,6 +55,12 @@ export const KEY_LAST_RESULT = "monzo_last_result";
 export const KEY_AUTO_SYNC = "monzo_auto_sync";
 /** JSON `{ at: ISO, message }`: why the last background sync failed; cleared when one succeeds. */
 export const KEY_AUTO_SYNC_ERROR = "monzo_auto_sync_error";
+/**
+ * JSON string[]: the rule keys the add-on has saved in Wealthfolio's Spending rules. The host
+ * deletes a rule by its original key (which it cannot give back), so this is what lets a rule the
+ * current version no longer saves be removed.
+ */
+export const KEY_RULE_KEYS = "monzo_rule_keys";
 /** JSON: category id -> custom label. */
 export const KEY_CATEGORY_LABELS = "monzo_category_labels";
 

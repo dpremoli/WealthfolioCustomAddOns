@@ -195,6 +195,85 @@ export function locateLedgerRows<E extends ExistingActivityLike>(
 }
 
 /**
+ * Takes out of `toImport` the rows that an account row made by hand already stands for.
+ *
+ * A move the user entered themselves (a transfer pair made in Wealthfolio, say) is not in the
+ * import ledger and its comment differs, so reconciling by id or content would import the same
+ * move again. A row in `toImport` is dropped when an existing row the ledger does not account
+ * for has an `equivalents[type]` type (a `DEPOSIT` is the same move as a `TRANSFER_IN`), the same
+ * currency and amount, and a date within `windowMs` (a day by default); each such row is used
+ * once, nearest date first. `eligible` limits which incoming rows may do this. The ledger from
+ * {@link reconcileWithLedger} already records the dropped ids, so they count as imported from
+ * then on, and the hand-made row itself is never rewritten.
+ */
+export function adoptUntrackedRows<E extends ExistingActivityLike>(
+  toImport: ActivityImport[],
+  existing: E[],
+  ledger: ImportLedger,
+  accountId: string,
+  opts: {
+    equivalents: Record<string, string[]>;
+    eligible?: (a: ActivityImport) => boolean;
+    windowMs?: number;
+  },
+): { toImport: ActivityImport[]; adopted: ActivityImport[] } {
+  const windowMs = opts.windowMs ?? 24 * 60 * 60 * 1000;
+  const incoming = new Set(toImport.map((a) => a.id));
+  const tracked = new Map<string, number>();
+  for (const [id, v] of Object.entries(ledger)) {
+    if (incoming.has(id) || !v.startsWith(`${accountId}:`)) continue;
+    tracked.set(v, (tracked.get(v) ?? 0) + 1);
+  }
+  // A row an add-on converted in place (a WITHDRAWAL made a TRANSFER_OUT, say, keeping its amount,
+  // date and comment) no longer matches the hash the ledger holds for it, but it is not a
+  // hand-made row: it still matches when put back to the type it was imported as.
+  const original: Record<string, string> = {};
+  for (const [type, equivalent] of Object.entries(opts.equivalents)) {
+    for (const e of equivalent) original[e] = type;
+  }
+  const claim = (v: string) => {
+    const n = tracked.get(v) ?? 0;
+    if (n === 0) return false;
+    tracked.set(v, n - 1);
+    return true;
+  };
+  const free = existing.filter((e) => {
+    if (claim(ledgerValue(accountId, e))) return false;
+    const was = original[e.activityType];
+    return !(was && claim(ledgerValue(accountId, { ...e, activityType: was })));
+  });
+
+  const time = (d: Date | string | undefined | null) => new Date(d ?? 0).getTime();
+  const keep: ActivityImport[] = [];
+  const adopted: ActivityImport[] = [];
+  for (const a of toImport) {
+    const types = opts.equivalents[String(a.activityType)] ?? [];
+    let best = -1;
+    if (a.id && types.length > 0 && (opts.eligible?.(a) ?? true)) {
+      let bestGap = Infinity;
+      free.forEach((e, i) => {
+        const gap = Math.abs(time(e.date) - time(a.date));
+        if (
+          types.includes(e.activityType) &&
+          (e.currency ?? "").toUpperCase() === (a.currency ?? "").toUpperCase() &&
+          Math.abs(Number(e.amount) - Number(a.amount)) < 0.005 &&
+          gap <= windowMs &&
+          gap < bestGap
+        ) {
+          best = i;
+          bestGap = gap;
+        }
+      });
+    }
+    if (best >= 0) {
+      free.splice(best, 1);
+      adopted.push(a);
+    } else keep.push(a);
+  }
+  return { toImport: keep, adopted };
+}
+
+/**
  * {@link selectNewActivities} for rows that carry a stable source id (`ActivityImport.id`).
  *
  * - A row whose id is in the ledger for this account (or in a legacy `[ref:…]` comment tag)

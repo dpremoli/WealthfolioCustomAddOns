@@ -39,7 +39,28 @@ Monzo, paste its details into the add-on, and connect.
   its Wealthfolio row (new notes, a better payee name, a settled amount), the row is
   rewritten in place rather than imported again.
 - Skips what should not count as spending: declined and zero-value transactions, pending
-  transactions (Flex purchases are the exception, they never "settle"), pot transfers and savings-category moves such as investment transfers.
+  transactions (Flex purchases are the exception, they never "settle"), and pot transfers.
+- **Imports savings moves.** Money moved to or from a savings or investment account outside
+  Monzo (the `savings` category, other than your own pots), such as to and from a Trading 212
+  Cash ISA, is imported as an ordinary withdrawal or deposit, so the current account's balance
+  is right even when the other account is not in Wealthfolio. No spending rule files them
+  (they are your own money changing place), and they are left out of the dashboard's spending
+  breakdown.
+- **Links moves with your Trading 212 Cash ISA.** When the Trading 212 add-on's Cash ISA
+  account is in Wealthfolio too (the account it creates, or one whose name mentions Trading 212 and ISA),
+  each sync looks for the other half of every savings move whose payee reads "Trading 212": same
+  amount and currency, opposite direction, dated within 3 days, neither row already linked. For
+  a confident match (the closest date; an exact tie is skipped and logged) both rows are turned
+  into a `TRANSFER_OUT` / `TRANSFER_IN` in place and linked through Wealthfolio's transfer-link
+  API. If linking fails the rows are put back as they were. A move with no counterpart stays a
+  plain withdrawal or deposit **on purpose**: an unlinked transfer into an ISA would not count
+  towards its allowance. A transfer you already made by hand (and linked) is recognised as the
+  same move, not imported again, even when its date is up to 3 days from the Monzo one. The
+  Trading 212 add-on does the same from its side when you import the Cash ISA CSV, so it does
+  not matter which add-on sees the pair second. Known limit: "Trading 212" is also the payee
+  when you top up a Trading 212 Invest or Stocks ISA account, which this matcher cannot see, so
+  if you fund both and two same-amount moves fall within 3 days, one can be linked to the wrong
+  row (unlink it in Wealthfolio's Link Transfer dialog).
 - **Keeps the current account and Flex balances right.** The monthly Flex repayment is
   imported as a `TRANSFER_OUT` on the current account and a matching `TRANSFER_IN` on the
   Flex account (same amount and date), so the Flex balance is paid down and the current
@@ -180,8 +201,9 @@ account, so different files usually go to different accounts; files are imported
 another, and a file that fails does not stop the rest. Columns are matched by header name
 (Transaction ID, Date, Time, Name, Category, Amount, Currency, Local amount, Local currency,
 Notes and #tags, Description, ...), so small changes to Monzo's export layout do not break it. Overlapping API and CSV imports
-are reconciled the same way as re-syncs. "Skip transfers & savings" is on by default; it does
-not drop Flex repayments and refunds, which are imported as transfers. When a file contains
+are reconciled the same way as re-syncs. "Skip bank transfers" is on by default; it does
+not drop Flex repayments and refunds, which are imported as transfers, or savings moves, which
+are imported as withdrawals and deposits. When a file contains
 repayments the page asks for the **Flex account** that receives them (the only credit card
 account is picked for you; choose "None" to skip the repayments).
 
@@ -190,6 +212,28 @@ the transactions imported. If you need it to match Monzo, add an opening-balance
 dated just before your first imported transaction. Remove or adjust that deposit if you later
 import the full history (by reconnecting, or from CSV), or the balance will be off by the
 opening amount.
+
+### Upgrading to 2.7.0 (savings moves and the Cash ISA)
+
+Before 2.7.0 savings-category moves, such as money to and from a Trading 212 Cash ISA, were
+never imported, so the current account's balance in Wealthfolio drifted away from the Monzo
+app's (too high by the net amount sent to the ISA). From 2.7.0 they are imported as withdrawals
+and deposits. Past moves are not fetched by themselves (an ordinary sync only reaches back 90
+days), so either
+
+- **disconnect, reconnect and let the add-on sync straight away** (Monzo shares the whole
+  history for 5 minutes after you connect), or
+- **import your current-account CSV exports** from the Import CSV page (savings moves are kept
+  even with "Skip bank transfers" on).
+
+Anything already imported is recognised and skipped. When the Trading 212 Cash ISA is in
+Wealthfolio, the add-on then converts and links each matching pair with the existing Cash ISA
+rows (no Cash ISA re-import is needed); the log says how many it linked. Rows without a
+counterpart, such as Cash ISA deposits from a bank that is not in Wealthfolio, stay deposits and
+withdrawals, and anything left over can be linked by hand in Wealthfolio's **Link Transfer**
+dialog. If you have already corrected the balance by hand (an adjustment, or hand-made
+transfers other than ones you linked), remove the adjustment first, or the moves will count
+twice.
 
 ### Upgrading to 2.5.0 (Flex repayments)
 

@@ -21,9 +21,10 @@ describe("filterCsvTransactions", () => {
     tx({ category: "shopping", description: "Refunded (Flex)", amount: 1999 }),
   ];
 
-  it("always drops pot transfers; transfers and savings only when asked", () => {
+  it("always drops pot transfers and keeps savings moves; transfers only when asked", () => {
     expect(filterCsvTransactions(rows, true, true).map((t) => t.description)).toEqual([
       "Coffee",
+      "Investments",
       "Monzo Flex",
       "Refunded (Flex)",
     ]);
@@ -39,6 +40,7 @@ describe("filterCsvTransactions", () => {
   it("drops Flex repayments (but keeps the refund legs) when there is no Flex account to credit", () => {
     expect(filterCsvTransactions(rows, true, false).map((t) => t.description)).toEqual([
       "Coffee",
+      "Investments",
       "Refunded (Flex)",
     ]);
   });
@@ -219,6 +221,56 @@ describe("importCsvFiles Flex transfers", () => {
       { flexAccountId: "wf-2" },
     );
     expect(t.activities.get("wf-2")!.map((r) => r.activityType)).toEqual(["WITHDRAWAL"]);
+    expect(t.links).toEqual([]);
+  });
+});
+
+describe("importCsvFiles savings moves", () => {
+  const isa = { id: "wf-isa", name: "Trading 212 Cash ISA", accountType: "CASH", providerAccountId: "t212-cash-isa" };
+  const setupWithIsa = () =>
+    makeCtx({
+      wfAccounts: [
+        { id: "wf-1", name: "Current" },
+        { id: "wf-2", name: "Flex" },
+        isa,
+      ],
+    });
+  const move = () =>
+    tx({ category: "savings", description: "Trading 212", amount: -30000, created: "2026-04-01T09:00:00.000Z" });
+
+  it("imports a savings move as a withdrawal, once, and links it with its Cash ISA row", async () => {
+    const t = setupWithIsa();
+    t.activities.set("wf-isa", [
+      {
+        id: "isa-1",
+        accountId: "wf-isa",
+        activityType: "DEPOSIT",
+        date: new Date("2026-04-02T09:00:00.000Z"),
+        amount: "300",
+        currency: "GBP",
+        comment: "Deposit",
+        assetSymbol: "$CASH-GBP",
+      },
+    ]);
+    const notes: string[] = [];
+    const file = [{ name: "current.csv", accountId: "wf-1", transactions: [move()] }];
+    const first = await importCsvFiles(t.ctx, file, {}, () => {}, { onNote: (n) => notes.push(n) });
+    expect(first[0]).toMatchObject({ imported: 1, duplicates: 0 });
+    expect(t.activities.get("wf-1")![0].activityType).toBe("TRANSFER_OUT");
+    expect(t.activities.get("wf-isa")![0].activityType).toBe("TRANSFER_IN");
+    expect(t.links).toHaveLength(1);
+    expect(notes.join(" ")).toMatch(/Trading 212: 1 linked/);
+
+    const again = await importCsvFiles(t.ctx, file, {}, () => {}, {});
+    expect(again[0]).toMatchObject({ imported: 0, duplicates: 1 });
+    expect(t.activities.get("wf-1")).toHaveLength(1);
+    expect(t.links).toHaveLength(1);
+  });
+
+  it("leaves the move a plain withdrawal when the ISA has no counterpart", async () => {
+    const t = setupWithIsa();
+    await importCsvFiles(t.ctx, [{ name: "current.csv", accountId: "wf-1", transactions: [move()] }]);
+    expect(t.activities.get("wf-1")![0].activityType).toBe("WITHDRAWAL");
     expect(t.links).toEqual([]);
   });
 });

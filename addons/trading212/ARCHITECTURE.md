@@ -439,3 +439,19 @@ versions must match or packaging refuses. The bundle imports only host-provided 
   by those taxes.
 - **History depth**: bounded by what Trading 212's history endpoints return; there is
   no separate backfill of pre-API-era data via these endpoints.
+
+
+## Cash ISA ↔ Monzo transfer matching
+
+`importCashIsa` (`src/lib/cash-isa.ts`) keeps Cash ISA deposits and withdrawals as `DEPOSIT` /
+`WITHDRAWAL`, because Wealthfolio's ISA allowance counts every `DEPOSIT` but an unlinked
+`TRANSFER_IN` only when it is flagged external. After the ledger reconcile and import it calls
+`matchWithOtherAccounts`, which hands the ISA's move rows and the other cash accounts' rows whose
+comment matches `TRADING_212_PAYEE` to the kit's `convertAndLinkMoves` (`move-match.ts`). That
+matches opposite-direction rows of equal amount and currency within 3 days (closest date, exact
+ties skipped), then converts both legs with `activities.saveMany` and links them with
+`activities.linkTransfer`, reverting the conversion if either step fails. Already-linked rows
+are never candidates, and rows are not touched without a match. The Monzo add-on runs the same
+matcher from its side (`matchWithCashIsa`). A converted row no longer matches its ledger hash,
+so a later CSV import neither rewrites it nor imports it again. `adoptUntrackedRows` (kit
+`reconcile.ts`) stops a transfer made by hand being imported a second time.

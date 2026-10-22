@@ -21,6 +21,7 @@ export interface FakeAccount {
   name: string;
   currency?: string;
   accountType?: string;
+  providerAccountId?: string;
 }
 
 /** An in-memory stand-in for the parts of `AddonContext` the Monzo add-on touches. */
@@ -98,6 +99,8 @@ export function makeCtx(
             const list = activities.get(a.accountId) ?? [];
             list.push({
               id: `act-${++activitySeq}`,
+              accountId: a.accountId,
+              subtype: a.subtype ?? null,
               activityType: a.activityType,
               date: new Date(a.date as string),
               amount: a.amount == null ? null : String(a.amount),

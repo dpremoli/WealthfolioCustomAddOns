@@ -1,7 +1,10 @@
 import type { ActivityImport, AddonContext } from "@wealthfolio/addon-sdk";
 import {
+  adoptUntrackedRows,
   jsonStore,
+  MOVE_MATCH_WINDOW_MS,
   ledgerEntry,
+  moveLinkNote,
   reconcileWithLedger,
   sourceRefOf,
   spendingRulesNote,
@@ -36,6 +39,7 @@ import {
   isFlexRepaymentDebit,
   isPending,
   isPotTransfer,
+  isSavingsMove,
   mapTransactionToActivity,
   tallyByCategory,
 } from "./mapper";
@@ -44,7 +48,7 @@ import { MonzoClient, isHistoryRefusal } from "./monzo-client";
 import { accountTypeIssueText, accountTypeIssues } from "./accounts";
 import { ensureMigrated } from "./migrate";
 import { monzoSpendingRules } from "./spending-rules";
-import { flexCreditsOf, linkNote, linkTransfers } from "./transfers";
+import { flexCreditsOf, linkNote, linkTransfers, matchWithCashIsa } from "./transfers";
 
 export type SyncProgressHandler = (p: SyncProgress<SyncPhaseId>) => void;
 
@@ -88,9 +92,9 @@ export function syncSince(
 /**
  * Whether a fetched transaction should become an activity. Declined and zero-value ones
  * (card checks) moved no money. Pending ones are skipped (they can still change) except
- * on Flex, whose purchases never "settle" because they are billed monthly. Pot transfers
- * and savings-category moves (investment transfers) are never imported. A Flex repayment
- * is imported (as a transfer to the Flex account) only from a current account and only when
+ * on Flex, whose purchases never "settle" because they are billed monthly. Pot transfers are
+ * never imported; savings moves to and from other accounts (Trading 212, say) are, as ordinary
+ * withdrawals and deposits, since they change the balance. A Flex repayment is imported (as a transfer to the Flex account) only from a current account and only when
  * the Flex account is tracked (`flexTracked`): otherwise there is nothing to credit.
  */
 export function isEligible(tx: MonzoTransaction, isFlex: boolean, flexTracked = false): boolean {
@@ -99,8 +103,7 @@ export function isEligible(tx: MonzoTransaction, isFlex: boolean, flexTracked = 
     tx.amount !== 0 &&
     (isFlex || !isPending(tx)) &&
     !isPotTransfer(tx) &&
-    (!isFlexRepayment(tx) || (flexTracked && !isFlex && isFlexRepaymentDebit(tx))) &&
-    tx.category !== "savings"
+    (!isFlexRepayment(tx) || (flexTracked && !isFlex && isFlexRepaymentDebit(tx)))
   );
 }
 
@@ -143,18 +146,30 @@ export async function importNew(
   accountId: string,
   desired: ActivityImport[],
   /** Each row as older versions imported it, by activity id (see `legacyActivity`). */
-  legacyForms: ReadonlyMap<string, ActivityImport> = new Map()
+  legacyForms: ReadonlyMap<string, ActivityImport> = new Map(),
+  /**
+   * Ids of savings moves: one that the user already entered by hand as a transfer is taken for
+   * the same move (and left as it is) instead of being imported again.
+   */
+  savingsIds: ReadonlySet<string> = new Set()
 ): Promise<ImportOutcome> {
   if (desired.length === 0) return { imported: 0, updated: 0, duplicates: 0, skipped: 0 };
   const store = jsonStore(ctx.api.storage);
   const existing = normaliseLegacyCash(await ctx.api.activities.getAll(accountId));
-  const { toImport, present, stale, ledger } = reconcileWithLedger(
+  const reconciled = reconcileWithLedger(
     desired,
     existing,
     await store.get<ImportLedger>(KEY_IMPORTED_IDS, {}),
     accountId,
     { legacy: (a) => (a.id ? legacyForms.get(a.id) : undefined) }
   );
+  const { present, stale, ledger } = reconciled;
+  const { toImport, adopted } = adoptUntrackedRows(reconciled.toImport, existing, ledger, accountId, {
+    equivalents: { DEPOSIT: ["TRANSFER_IN"], WITHDRAWAL: ["TRANSFER_OUT"] },
+    eligible: (a) => !!a.id && savingsIds.has(a.id),
+    // The two legs of a move can be dated days apart; a transfer made by hand carries one date.
+    windowMs: MOVE_MATCH_WINDOW_MS,
+  });
   let imported = 0;
   let skipped = 0;
   if (toImport.length > 0) {
@@ -184,7 +199,7 @@ export async function importNew(
         })),
       })
       .catch(() => null);
-    if (!res) return { imported, updated: 0, duplicates: present.length, skipped };
+    if (!res) return { imported, updated: 0, duplicates: present.length + adopted.length, skipped };
     const failed = new Set((res.errors ?? []).map((e) => e.id));
     for (const { row, activity } of stale) {
       if (failed.has(row.id) || !activity.id) continue;
@@ -193,7 +208,7 @@ export async function importNew(
     }
     await store.set(KEY_IMPORTED_IDS, ledger);
   }
-  return { imported, updated, duplicates: present.length - updated, skipped };
+  return { imported, updated, duplicates: present.length + adopted.length - updated, skipped };
 }
 
 /**
@@ -426,6 +441,7 @@ async function syncAll(ctx: AddonContext, onProgress: SyncProgressHandler): Prom
       )
     : [];
   const imports: ActivityImport[] = [];
+  const savingsIds = new Set<string>();
 
   for (const { monzoAccountId, wealthfolioAccountId, transactions } of fetched) {
     try {
@@ -465,7 +481,9 @@ async function syncAll(ctx: AddonContext, onProgress: SyncProgressHandler): Prom
     const legacy = new Map(
       eligible.map((tx) => [tx.id, legacyActivity(tx, wealthfolioAccountId, categoryLabels)])
     );
-    const outcome = await importNew(ctx, wealthfolioAccountId, desired, legacy);
+    const savings = new Set(eligible.filter(isSavingsMove).map((tx) => tx.id));
+    savings.forEach((id) => savingsIds.add(id));
+    const outcome = await importNew(ctx, wealthfolioAccountId, desired, legacy, savings);
     imports.push(...desired);
     updated += outcome.updated;
     imported += outcome.imported;
@@ -476,6 +494,14 @@ async function syncAll(ctx: AddonContext, onProgress: SyncProgressHandler): Prom
   // Pair up the repayment and refund legs as internal transfers. Best effort, like the rules.
   const linkLine = linkNote(await linkTransfers(ctx, imports));
   if (linkLine) log.push(linkLine);
+
+  // Savings moves to or from the Trading 212 Cash ISA, when that is in Wealthfolio too: convert
+  // each confident pair to a linked transfer. Best effort; rows with no match stay as they are.
+  if (savingsIds.size > 0) {
+    const current = fetched.filter((f) => !flexAccountIds.has(f.monzoAccountId)).map((f) => f.wealthfolioAccountId);
+    const isaLine = moveLinkNote("Trading 212", await matchWithCashIsa(ctx, current));
+    if (isaLine) log.push(isaLine);
+  }
 
   // Watermark: when this sync started, or earlier if a transaction was still pending.
   const watermark =

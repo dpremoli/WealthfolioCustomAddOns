@@ -85,6 +85,16 @@ export function isFlexRefund(tx: MonzoTransaction): boolean {
   );
 }
 
+/**
+ * Money moved to or from a savings or investment account outside Monzo (Trading 212, say): the
+ * `savings` category, other than moves between the account and its own pots. It is the user's own
+ * money changing place, so it is not spending (and no spending rule files it), but it does change
+ * the balance, so it is imported as an ordinary withdrawal or deposit.
+ */
+export function isSavingsMove(tx: MonzoTransaction): boolean {
+  return tx.category === "savings" && !isPotTransfer(tx);
+}
+
 /** A transaction that moves money between the current account and Flex. */
 export function isFlexTransfer(tx: MonzoTransaction): boolean {
   return isFlexRefund(tx) || isFlexRepaymentDebit(tx);
@@ -94,7 +104,7 @@ export function isFlexTransfer(tx: MonzoTransaction): boolean {
  * Tallies spending transactions (debits) by their resolved category label, for the
  * dashboard breakdown. Credits (income/refunds) are ignored. Reuses the same
  * `resolveCategory` + user overrides as the comment, so labels match. Pure + testable;
- * the sync passes its eligible (non-pending, non-pot) transactions in; Flex transfers are skipped.
+ * the sync passes its eligible (non-pending, non-pot) transactions in; Flex transfers and savings moves are skipped.
  */
 export function tallyByCategory(
   txs: MonzoTransaction[],
@@ -102,7 +112,7 @@ export function tallyByCategory(
 ): Record<string, number> {
   const out: Record<string, number> = {};
   for (const tx of txs) {
-    if (tx.amount >= 0 || isFlexTransfer(tx)) continue; // spending only
+    if (tx.amount >= 0 || isFlexTransfer(tx) || tx.category === "savings") continue; // spending only
     const label = resolveCategory(tx.category || "general", categoryLabels);
     out[label] = (out[label] ?? 0) + 1;
   }

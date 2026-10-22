@@ -405,6 +405,10 @@ describe('Flex <-> current account transfers', () => {
     expect(mapTransactionToActivity({ ...refund, amount: -500 }, 'wf').activityType).toBe('WITHDRAWAL');
   });
 
+  it('leaves savings moves out of the spending tally', () => {
+    expect(tallyByCategory([{ ...refundOut, category: 'savings', description: 'Trading 212' }])).toEqual({});
+  });
+
   it('leaves transfers out of the spending tally', () => {
     expect(tallyByCategory([repayment, refundOut])).toEqual({});
   });

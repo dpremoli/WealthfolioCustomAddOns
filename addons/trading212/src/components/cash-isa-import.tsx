@@ -238,6 +238,7 @@ export function CashIsaImport({ ctx, newAccountName = DEFAULT_CASH_ISA_NAME }: C
       {result && !isImporting && (
         <AlertFeedback variant="success" title="Imported">
           {result.imported} imported, {result.duplicates} already there.
+          {result.moveNote ? ` ${result.moveNote}` : ""}
         </AlertFeedback>
       )}
     </div>

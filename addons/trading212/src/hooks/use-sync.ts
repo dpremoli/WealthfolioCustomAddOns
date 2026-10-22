@@ -45,6 +45,7 @@ import { cardSpendingRules } from "../lib/spending-category";
 import { SymbolResolver, importAssetFields, type ResolveDiag } from "../lib/symbol-resolver";
 import { ActivityImporter, describeRejected, type ImportUnit, type RejectedRow } from "../lib/importer";
 import { CARD_FUNDING_COMMENT, fundingForExisting, isFundingId, withCardFunding } from "../lib/card-funding";
+import { foldMonthlyInterest } from "../lib/interest";
 import {
   PortfolioUpdates,
   compareWithTrading212,
@@ -836,9 +837,20 @@ async function syncOne(
           }
         }
 
+        // Optionally fold the daily interest of finished months into monthly totals.
+        const singles = foldMonthlyInterest(
+          windowUnits.filter((u) => u.length === 1).map((u) => u[0]),
+          {
+            enabled: settings.monthlyInterest === true,
+            accountId,
+            before: new Date(backfillStart),
+            windowKey: windowStart.toISOString().slice(0, 10),
+            existing: await importer.existingIn(accountId),
+          },
+        );
         // Import this window and checkpoint before moving on, so an interruption
         // resumes from here rather than re-fetching everything already imported.
-        await importActivities(windowUnits);
+        await importActivities([...windowUnits.filter((u) => u.length > 1), ...singles.map((a) => [a])]);
         windowEnd = windowStart;
         await setBackfillCheckpoint(ctx, conn.id, windowStart.toISOString());
       }

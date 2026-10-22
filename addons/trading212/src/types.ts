@@ -32,6 +32,9 @@ export interface T212Settings {
   // accurate for a debit card; CREDIT_CARD treats it as a credit-card liability so Wealthfolio can
   // link cash→card payments as transfers (avoids double-counting). Absent ⇒ "CASH".
   cardAccountType?: "CASH" | "CREDIT_CARD";
+  // Fold Trading 212's daily interest on cash into one row per month during a full backfill
+  // (months before the backfill only). Absent ⇒ off: every payment is imported.
+  monthlyInterest?: boolean;
 }
 
 // One Trading 212 API key linked to one Wealthfolio account.

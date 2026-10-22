@@ -980,6 +980,30 @@ describe("useSync — tracking-mode drift", () => {
   });
 });
 
+describe("useSync — monthly interest totals", () => {
+  it("folds a finished month's daily interest into one row during the backfill", async () => {
+    const row = (day: string, amount: string, id: string) =>
+      `Interest on cash,${day}T06:00:00.000Z,,,,,,,,${amount},GBP,0,GBP,0,GBP,,${id},0,GBP`;
+    const csv = [CSV_HDR, row("2025-01-01", "0.10", "I1"), row("2025-01-02", "0.20", "I2"), row("2025-01-03", "0.30", "I3")].join("\n");
+    let downloads = 0;
+    net(async (url: string) => {
+      const u = String(url);
+      if (u.includes("amazonaws.com")) return textResponse(++downloads === 1 ? csv : CSV_HDR);
+      if (u.includes("/exports")) return jsonResponse([FINISHED_REPORT]);
+      return routeFetch(u);
+    });
+    const { ctx, importFn, storage } = makeCtx({ syncStates: { c1: { lastSync: null, importedRefs: [] } } });
+    storage.set("t212_settings", JSON.stringify({ env: "demo", monthlyInterest: true }));
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { result } = renderHook(() => useSync(ctx as any));
+    await act(async () => {
+      await result.current.syncAll();
+    });
+    const imported = importFn.mock.calls.flatMap((c) => c[0]).filter((a) => a.activityType === "INTEREST");
+    expect(imported.map((a) => [a.amount, a.comment])).toEqual([[0.6, "Interest on cash, monthly total (3 payments)"]]);
+  });
+});
+
 describe("useSync — linking deposits and withdrawals with the bank", () => {
   it("links a deposit with the bank withdrawal that paid Trading 212, leaving other rows alone", async () => {
     net((url) => routeFetch(url));

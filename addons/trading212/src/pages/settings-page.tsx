@@ -382,6 +382,7 @@ export default function SettingsPage({ ctx, location }: AddonPageProps) {
   const [autoSync, setAutoSync] = useState(true);
   const [extractCard, setExtractCard] = useState(false);
   const [cardAccountType, setCardAccountType] = useState<"CASH" | "CREDIT_CARD">("CASH");
+  const [monthlyInterest, setMonthlyInterest] = useState(false);
   const [settingsSaved, setSettingsSaved] = useState<string | null>(null);
 
   const initialType: AddAccountType = startOnCashIsa ? "cash-isa" : "invest";
@@ -420,6 +421,7 @@ export default function SettingsPage({ ctx, location }: AddonPageProps) {
       setAutoSync(settings.autoSync !== false);
       setExtractCard(settings.extractCard === true);
       setCardAccountType(settings.cardAccountType === "CREDIT_CARD" ? "CREDIT_CARD" : "CASH");
+      setMonthlyInterest(settings.monthlyInterest === true);
     }
   }, [settings]);
 
@@ -439,7 +441,7 @@ export default function SettingsPage({ ctx, location }: AddonPageProps) {
   }
 
   async function saveSettings() {
-    const s: T212Settings = { env, autoSync, extractCard, cardAccountType };
+    const s: T212Settings = { env, autoSync, extractCard, cardAccountType, monthlyInterest };
     await setSettings(ctx, s);
     queryClient.invalidateQueries({ queryKey: ["t212_settings"] });
     queryClient.invalidateQueries({ queryKey: ["t212_status"] });
@@ -452,7 +454,7 @@ export default function SettingsPage({ ctx, location }: AddonPageProps) {
     setError(null);
     setStatus(null);
     try {
-      const s: T212Settings = { env, autoSync, extractCard, cardAccountType };
+      const s: T212Settings = { env, autoSync, extractCard, cardAccountType, monthlyInterest };
       if (!keyId.trim() || !apiSecret.trim())
         throw new Error("Enter both the API key ID and the API secret.");
       if (!name.trim()) throw new Error("Enter an account name.");
@@ -626,6 +628,14 @@ export default function SettingsPage({ ctx, location }: AddonPageProps) {
               </p>
             </div>
           )}
+
+          <SwitchRow
+            icon="Percent"
+            title="Monthly interest totals"
+            description="Trading 212 pays interest on cash daily, which is thousands of rows over a few years. When on, a Transactions-mode backfill imports one interest row per month (for months before the backfill) instead. Applies to the next full backfill; switching it never counts interest twice."
+            checked={monthlyInterest}
+            onChange={setMonthlyInterest}
+          />
 
           <div className="flex flex-wrap items-center gap-3 pt-1">
             <Button onClick={saveSettings}>

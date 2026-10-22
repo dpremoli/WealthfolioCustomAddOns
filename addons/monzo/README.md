@@ -201,11 +201,11 @@ dated just before your first imported transaction. Remove or adjust that deposit
 import the full history (by reconnecting, or from CSV), or the balance will be off by the
 opening amount.
 
-### Upgrading to 2.6.0 (savings moves and the Cash ISA)
+### Upgrading to 2.7.0 (savings moves and the Cash ISA)
 
-Before 2.6.0 savings-category moves, such as money to and from a Trading 212 Cash ISA, were
+Before 2.7.0 savings-category moves, such as money to and from a Trading 212 Cash ISA, were
 never imported, so the current account's balance in Wealthfolio drifted away from the Monzo
-app's (too high by the net amount sent to the ISA). From 2.6.0 they are imported as withdrawals
+app's (too high by the net amount sent to the ISA). From 2.7.0 they are imported as withdrawals
 and deposits. Past moves are not fetched by themselves (an ordinary sync only reaches back 90
 days), so either
 

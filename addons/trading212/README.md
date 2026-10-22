@@ -251,7 +251,7 @@ never a separate fee.
 ## Upgrading to 2.5.0 (Cash ISA moves)
 
 Nothing to re-import. Old Cash ISA deposits and withdrawals stay as they are; when the Monzo
-add-on (2.6.0) imports the matching savings moves, or the next time you import a Cash ISA CSV,
+add-on (2.7.0) imports the matching savings moves, or the next time you import a Cash ISA CSV,
 each pair is converted to a linked transfer. To bring in Monzo's side of past moves, follow the
 upgrade note in the Monzo add-on's README (reconnect and sync straight away, or import the
 current-account CSV). Updating adds two activity permissions (`getTransferPair`,

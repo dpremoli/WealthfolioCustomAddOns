@@ -96,7 +96,7 @@ export default function CsvImportPage({ ctx }: AddonPageProps) {
 
   const rows = files.map((f) => ({
     ...f,
-    filtered: filterCsvTransactions(f.transactions, skipTransfers, !!flexAccountId),
+    filtered: filterCsvTransactions(f.transactions, skipTransfers, !!flexAccountId, f.accountId === flexAccountId),
     // Two different files can share a name: tell them apart by size and date.
     label: files.some((o) => o.id !== f.id && o.name === f.name)
       ? `${f.name} (${f.size} bytes, ${new Date(f.modified).toLocaleDateString()})`

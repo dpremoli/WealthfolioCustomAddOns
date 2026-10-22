@@ -208,4 +208,17 @@ describe("importCsvFiles Flex transfers", () => {
     expect(t.activities.get("wf-2")![0].activityType).toBe("TRANSFER_OUT");
     expect(t.links).toHaveLength(1);
   });
+
+  it("does not write a Flex credit for a repayment row found in the Flex account's own file", async () => {
+    const t = setup();
+    await importCsvFiles(
+      t.ctx,
+      [{ name: "flex.csv", accountId: "wf-2", transactions: [tx(), repayment()] }],
+      {},
+      () => {},
+      { flexAccountId: "wf-2" },
+    );
+    expect(t.activities.get("wf-2")!.map((r) => r.activityType)).toEqual(["WITHDRAWAL"]);
+    expect(t.links).toEqual([]);
+  });
 });

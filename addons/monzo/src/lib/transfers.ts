@@ -1,7 +1,8 @@
 import type { ActivityImport, AddonContext } from "@wealthfolio/addon-sdk";
 import { jsonStore, locateLedgerRows, type ImportLedger } from "@wf-addons/kit";
 import { KEY_IMPORTED_IDS } from "../constants";
-import { FLEX_CREDIT_SUFFIX } from "./mapper";
+import type { MonzoTransaction } from "../types";
+import { FLEX_CREDIT_SUFFIX, flexRepaymentCredit, isFlexRepaymentDebit } from "./mapper";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -33,7 +34,7 @@ export function pairTransferLegs(activities: ActivityImport[]): TransferPair[] {
   for (const inn of legs) {
     if (inn.activityType !== "TRANSFER_IN" || !inn.id!.endsWith(FLEX_CREDIT_SUFFIX)) continue;
     const out = byId.get(inn.id!.slice(0, -FLEX_CREDIT_SUFFIX.length));
-    if (out?.activityType !== "TRANSFER_OUT") continue;
+    if (out?.activityType !== "TRANSFER_OUT" || out.accountId === inn.accountId) continue;
     pairs.push({ out, in: inn });
     used.add(out).add(inn);
   }
@@ -58,9 +59,9 @@ export function pairTransferLegs(activities: ActivityImport[]): TransferPair[] {
 export interface LinkOutcome {
   /** Pairs linked as an internal transfer by this call. */
   linked: number;
-  /** Transfer legs whose other half was not part of the import, so they stay unlinked. */
+  /** Transfer legs left unlinked: the other half was not part of the import, or a row was edited. */
   unlinked: number;
-  /** Why linking some pair failed (its rows were not found, or the host refused). */
+  /** Why linking some pair failed (the host refused). */
   failed: string[];
 }
 
@@ -101,7 +102,9 @@ export async function linkTransfers(
       const outRow = rows.get(o.accountId)?.get(o.id!);
       const inRow = rows.get(i.accountId)?.get(i.id!);
       if (!outRow || !inRow) {
-        out.failed.push(`${o.id}: could not find the imported rows`);
+        // Edited or removed since the import (or never imported): nothing to link, and the
+        // pair may well be linked already.
+        out.unlinked += 2;
         continue;
       }
       try {
@@ -124,9 +127,24 @@ export function linkNote(o: LinkOutcome): string | null {
   const parts = [`${o.linked} linked`];
   if (o.unlinked) {
     parts.push(
-      `${o.unlinked} left unlinked (the other leg was not in this import; link them in Wealthfolio's Activities)`,
+      `${o.unlinked} left unlinked (the other leg was not in this import, or a row was edited since; link them in Wealthfolio's Activities)`,
     );
   }
   if (o.failed.length) parts.push(`could not link: ${o.failed.join("; ")}`);
   return `Flex transfers: ${parts.join(", ")}.`;
+}
+
+/**
+ * The Flex-account credits for the repayments among `transactions` (debits on a current
+ * account; the caller has already dropped the ineligible ones).
+ */
+export function flexCreditsOf(
+  transactions: MonzoTransaction[],
+  flexAccountId: string,
+  categoryLabels: Record<string, string> = {},
+  ownNames: ReadonlySet<string> = new Set(),
+): ActivityImport[] {
+  return transactions
+    .filter(isFlexRepaymentDebit)
+    .map((tx) => flexRepaymentCredit(tx, flexAccountId, categoryLabels, ownNames));
 }

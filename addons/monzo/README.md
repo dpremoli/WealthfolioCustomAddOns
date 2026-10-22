@@ -51,7 +51,8 @@ Monzo, paste its details into the add-on, and connect.
   is written by the add-on from the current account's debit (its id is the Monzo transaction
   id plus `:flex-in`); the import ledger keeps re-syncs and CSV imports from duplicating it.
   The repayment needs the Flex account to be mapped (or chosen on the CSV page); without one
-  it is skipped, and the log says so. A refund leg whose other half is not in the same
+  it is skipped, and the log says so. (With several Flex accounts mapped, repayments are
+  credited to the first.) A refund leg whose other half is not in the same
   sync or import is imported unlinked: link it from Wealthfolio's Activities page.
 - Lets you rename Monzo categories (Settings -> Category labels).
 - Imports **Monzo CSV exports** (several files at once, each to its own account) for history older than the API shares (see below).

@@ -60,7 +60,7 @@ export function isFlexRepayment(tx: MonzoTransaction): boolean {
   // The monthly Flex repayment debited from the current account: the money that pays down
   // the Flex balance. It is a transfer between two of the user's own accounts, not spending.
   const name = (merchantOf(tx)?.name || tx.description || "").toLowerCase();
-  return tx.category === "transfers" && name.includes("flex");
+  return tx.category === "transfers" && name.includes("flex") && !isFlexRefund(tx);
 }
 
 /**

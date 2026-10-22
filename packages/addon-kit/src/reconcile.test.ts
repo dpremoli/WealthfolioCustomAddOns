@@ -229,4 +229,14 @@ describe("locateLedgerRows", () => {
     // An id recorded for another account is not found here.
     expect(locateLedgerRows(rows, ledger, "other", ["tx_1"]).size).toBe(0);
   });
+
+  it("does not hand a row that belongs to an earlier id to a later, identical one", () => {
+    const a = withId("tx_1", cash(3, "Coffee"));
+    const b = withId("tx_2", cash(3, "Coffee"));
+    const { ledger } = reconcileWithLedger([a, b], [], {}, "acc");
+    const rows = [{ ...stored(a), id: "act-1" }, { ...stored(a), id: "act-2" }];
+    // Asking only for tx_2 must not return the row tx_1 already stands for.
+    expect(locateLedgerRows(rows, ledger, "acc", ["tx_2"]).get("tx_2")?.id).toBe("act-2");
+    expect(locateLedgerRows(rows, ledger, "acc", ["tx_1"]).get("tx_1")?.id).toBe("act-1");
+  });
 });

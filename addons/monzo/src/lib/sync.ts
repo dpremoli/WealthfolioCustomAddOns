@@ -30,7 +30,6 @@ import type {
 } from "../types";
 import { MonzoAuthError, getConnectionStatus } from "./auth";
 import {
-  flexRepaymentCredit,
   legacyActivity,
   isDeclined,
   isFlexRepayment,
@@ -45,7 +44,7 @@ import { MonzoClient, isHistoryRefusal } from "./monzo-client";
 import { accountTypeIssueText, accountTypeIssues } from "./accounts";
 import { ensureMigrated } from "./migrate";
 import { monzoSpendingRules } from "./spending-rules";
-import { linkNote, linkTransfers } from "./transfers";
+import { flexCreditsOf, linkNote, linkTransfers } from "./transfers";
 
 export type SyncProgressHandler = (p: SyncProgress<SyncPhaseId>) => void;
 
@@ -180,6 +179,8 @@ export async function importNew(
           amount: activity.amount,
           currency: activity.currency,
           comment: activity.comment ?? null,
+          // A row converted to a transfer is between the user's own accounts.
+          ...(activity.isExternal === false ? { metadata: { flow: { is_external: false } } } : {}),
         })),
       })
       .catch(() => null);
@@ -412,12 +413,17 @@ async function syncAll(ctx: AddonContext, onProgress: SyncProgressHandler): Prom
   // Where repayments are credited: Monzo's Flex feed has no row for them, so the add-on writes
   // the Flex side from the current account's debit.
   const flexWfId = entries.find(([monzoId]) => flexAccountIds.has(monzoId))?.[1];
+  // (With several Flex accounts mapped, they all go to the first.)
   const flexCredits = flexWfId
-    ? fetched
-        .filter((f) => !flexAccountIds.has(f.monzoAccountId))
-        .flatMap((f) => f.transactions)
-        .filter((tx) => isEligible(tx, false, true) && isFlexRepaymentDebit(tx))
-        .map((tx) => flexRepaymentCredit(tx, flexWfId, categoryLabels, ownNames))
+    ? flexCreditsOf(
+        fetched
+          .filter((f) => !flexAccountIds.has(f.monzoAccountId))
+          .flatMap((f) => f.transactions)
+          .filter((tx) => isEligible(tx, false, true)),
+        flexWfId,
+        categoryLabels,
+        ownNames
+      )
     : [];
   const imports: ActivityImport[] = [];
 

@@ -2,7 +2,6 @@ import type { ActivityImport, AddonContext } from "@wealthfolio/addon-sdk";
 import type { MonzoTransaction } from "../types";
 import { runExclusive } from "./busy";
 import {
-  flexRepaymentCredit,
   isFlexRefund,
   isFlexRepayment,
   isFlexRepaymentDebit,
@@ -11,7 +10,7 @@ import {
   mapTransactionToActivity,
 } from "./mapper";
 import { importNew } from "./sync";
-import { linkNote, linkTransfers } from "./transfers";
+import { flexCreditsOf, linkNote, linkTransfers } from "./transfers";
 
 /**
  * Drops what should not count as spending: pot transfers always, and (with `skipTransfers`)
@@ -25,11 +24,13 @@ export function filterCsvTransactions(
   transactions: MonzoTransaction[],
   skipTransfers: boolean,
   flexTracked: boolean,
+  /** The file is the Flex account's own export: repayments are not on it, so none are kept. */
+  isFlexFile = false,
 ): MonzoTransaction[] {
   return transactions.filter((tx) => {
     if (isPotTransfer(tx)) return false;
     if (isFlexRefund(tx)) return true;
-    if (isFlexRepayment(tx)) return flexTracked && isFlexRepaymentDebit(tx);
+    if (isFlexRepayment(tx)) return flexTracked && !isFlexFile && isFlexRepaymentDebit(tx);
     return !skipTransfers || (tx.category !== "transfers" && tx.category !== "savings");
   });
 }
@@ -89,7 +90,9 @@ async function importFiles(
   for (const [i, file] of todo.entries()) {
     onProgress(file.name, i, todo.length);
     try {
-      const activities = file.transactions.map((tx) =>
+      // A repayment in the Flex account's own file is not a debit from a current account.
+      const transactions = filterCsvTransactions(file.transactions, false, !!flexAccountId, file.accountId === flexAccountId);
+      const activities = transactions.map((tx) =>
         mapTransactionToActivity(tx, file.accountId, categoryLabels),
       );
       // Reconcile against what the account already holds (by count, so genuine repeats
@@ -101,8 +104,7 @@ async function importFiles(
       const outcome = await importNew(ctx, file.accountId, activities, legacy);
       imported.push(...activities);
       if (flexAccountId) {
-        for (const tx of file.transactions.filter(isFlexRepaymentDebit)) {
-          const credit = flexRepaymentCredit(tx, flexAccountId, categoryLabels);
+        for (const credit of flexCreditsOf(transactions, flexAccountId, categoryLabels)) {
           credits.set(credit.id!, credit);
         }
       }

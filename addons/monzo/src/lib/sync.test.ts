@@ -599,6 +599,10 @@ describe("isEligible / normaliseLegacyCash", () => {
     // A credit from Flex is never taken as a repayment: the add-on writes that side itself.
     expect(isEligible(tx({ category: "transfers", description: "Flex", amount: 5000 }), false, true)).toBe(false);
     expect(isEligible(tx({ category: "transfers", description: "Flex", amount: -5000 }), true, true)).toBe(false);
+    // "Refunded (Flex)" can carry Monzo's transfers category too; it is a refund, not a repayment.
+    const refund = { category: "transfers", description: "Refunded (Flex)" };
+    expect(isEligible(tx({ ...refund, amount: 1999 }), false)).toBe(true);
+    expect(isEligible(tx({ ...refund, amount: -1999, settled: "" }), true)).toBe(true);
     expect(isEligible(tx({ category: "shopping", settled: "" }), true)).toBe(true);
     expect(isEligible(tx({ category: "shopping", settled: "" }), false)).toBe(false);
   });
@@ -899,6 +903,28 @@ describe("runSync Flex transfers", () => {
     expect(types(t, "wf-cur")).toEqual([["TRANSFER_IN", "19.99"]]);
     expect(types(t, "wf-flex")).toEqual([["TRANSFER_OUT", "19.99"]]);
     expect(t.links).toEqual([[t.activities.get("wf-flex")![0].id, t.activities.get("wf-cur")![0].id]]);
+  });
+
+  it("imports refund legs Monzo files under its transfers category", async () => {
+    const base = { description: "Refunded (Flex)", category: "transfers" };
+    const t = setupBoth([tx({ ...base, amount: 1999 })], [tx({ ...base, amount: -1999, settled: "" })]);
+    await runSync(t.ctx);
+    expect(types(t, "wf-cur")).toEqual([["TRANSFER_IN", "19.99"]]);
+    expect(types(t, "wf-flex")).toEqual([["TRANSFER_OUT", "19.99"]]);
+    expect(t.links).toHaveLength(1);
+  });
+
+  it("marks rows converted to transfers as internal", async () => {
+    const base = { description: "Refunded (Flex)", category: "shopping" };
+    const curLeg = tx({ ...base, amount: 1999 });
+    const t = setupBoth([curLeg], []);
+    await importNew(t.ctx, "wf-cur", [{ ...mapTransactionToActivity(curLeg, "wf-cur"), activityType: "CREDIT" as never }]);
+    const saveMany = vi.spyOn(t.ctx.api.activities, "saveMany");
+    await runSync(t.ctx);
+    expect(saveMany.mock.calls[0][0].updates?.[0]).toMatchObject({
+      activityType: "TRANSFER_IN",
+      metadata: { flow: { is_external: false } },
+    });
   });
 
   it("converts refund rows an earlier version imported as a withdrawal and a refund credit", async () => {

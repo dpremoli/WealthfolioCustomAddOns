@@ -168,8 +168,8 @@ export function ledgerAccountId(entry: string): string {
 /**
  * The account rows that `ids` became, found through the ledger (id → content hash of the row
  * as imported). An id the ledger holds for another account, or whose row has since been
- * edited or deleted, is left out. Rows with identical content go to different ids, so two
- * identical imports are never resolved to the same row.
+ * edited or deleted, is left out. Rows with identical content go to different ids (in ledger
+ * order), so two identical imports are never resolved to the same row.
  */
 export function locateLedgerRows<E extends ExistingActivityLike>(
   existing: E[],
@@ -182,11 +182,14 @@ export function locateLedgerRows<E extends ExistingActivityLike>(
     const v = ledgerValue(accountId, e);
     pool.set(v, [...(pool.get(v) ?? []), e]);
   }
+  // Every id the ledger holds for this account claims its row, not only the ones asked for:
+  // otherwise an id could be handed the row of an earlier, identical one.
+  const wanted = new Set(ids);
   const found = new Map<string, E>();
-  for (const id of ids) {
-    const v = ledger[id];
-    const row = v?.startsWith(`${accountId}:`) ? pool.get(v)?.shift() : undefined;
-    if (row) found.set(id, row);
+  for (const [id, v] of Object.entries(ledger)) {
+    if (!v.startsWith(`${accountId}:`)) continue;
+    const row = pool.get(v)?.shift();
+    if (row && wanted.has(id)) found.set(id, row);
   }
   return found;
 }

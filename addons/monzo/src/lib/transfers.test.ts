@@ -64,6 +64,13 @@ describe("pairTransferLegs", () => {
     ).toEqual([]);
   });
 
+  it("does not pair a repayment with a credit written to the same account", () => {
+    const r = repayment();
+    const out = mapTransactionToActivity(r, "wf-flex");
+    const inn = flexRepaymentCredit(r, "wf-flex");
+    expect(pairTransferLegs([out, inn])).toEqual([]);
+  });
+
   it("never pairs two legs on the same account, and ignores non-transfers", () => {
     const a = refundLegs(1999);
     expect(
@@ -124,6 +131,15 @@ describe("linkTransfers", () => {
     expect(result.linked).toBe(0);
     expect(result.unlinked).toBe(1);
     expect(result.failed).toEqual([expect.stringContaining("host says no")]);
+  });
+
+  it("leaves a pair alone, without calling it a failure, when a row was edited since the import", async () => {
+    const t = setup();
+    const { out, inn } = await importPair(t);
+    t.activities.get("wf-cur")![0].comment = "Edited by the user";
+    const result = await linkTransfers(t.ctx, [out, inn]);
+    expect(result).toEqual({ linked: 0, unlinked: 2, failed: [] });
+    expect(t.links).toEqual([]);
   });
 
   it("is a no-op when there is nothing to pair", async () => {

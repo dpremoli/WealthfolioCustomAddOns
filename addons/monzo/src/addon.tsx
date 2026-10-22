@@ -1,6 +1,7 @@
 import type { AddonEnableFunction } from "@wealthfolio/addon-sdk";
 import { registerPages } from "@wf-addons/kit";
 import { ADDON_ID } from "./constants";
+import { startAutoSync } from "./lib/auto-sync";
 import { ensureMigrated } from "./lib/migrate";
 import CsvImportPage from "./pages/csv-import-page";
 import DashboardPage from "./pages/dashboard-page";
@@ -16,6 +17,10 @@ const enable: AddonEnableFunction = (ctx) => {
   // v1.x kept everything (tokens, account mapping, proxy URL…) in the keyring; move it over.
   // Failures are logged inside; pages and syncs await the same promise before reading state.
   void ensureMigrated(ctx);
+
+  // Sync in the background while Wealthfolio is open (see lib/auto-sync.ts).
+  const autoSync = startAutoSync(ctx);
+  ctx.onDisable(() => autoSync.stop());
 };
 
 export default enable;

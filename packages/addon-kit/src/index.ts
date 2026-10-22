@@ -36,3 +36,4 @@ export {
   type SpendingRuleSpec,
   type SpendingRulesOutcome,
 } from "./spending";
+export { startBackgroundChecks, type BackgroundChecksOptions } from "./scheduler";

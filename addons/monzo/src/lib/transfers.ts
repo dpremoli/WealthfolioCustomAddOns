@@ -1,5 +1,6 @@
 import type { ActivityImport, AddonContext } from "@wealthfolio/addon-sdk";
 import {
+  MOVE_MATCH_WINDOW_MS,
   T212_CASH_ISA_PROVIDER_ID,
   TRADING_212_PAYEE,
   convertAndLinkMoves,
@@ -68,8 +69,10 @@ export function pairTransferLegs(activities: ActivityImport[]): TransferPair[] {
 export interface LinkOutcome {
   /** Pairs linked as an internal transfer by this call. */
   linked: number;
-  /** Transfer legs left unlinked: the other half was not part of the import, or a row was edited. */
+  /** Transfer rows left unlinked: the other half was not part of the import, or a row was edited. */
   unlinked: number;
+  /** Transfer rows that were already linked (by an earlier run or by hand), so left alone. Omitted when 0. */
+  alreadyLinked?: number;
   /** Why linking some pair failed (the host refused). */
   failed: string[];
 }
@@ -78,62 +81,108 @@ export interface LinkOutcome {
  * Links the transfer legs `activities` (already imported) as internal transfers, so Wealthfolio
  * treats each pair as money moving between two of the user's accounts. The host rows are found
  * through the import ledger, and a pair that is already linked is left alone, so this is safe
- * to repeat. Never throws: linking is a nicety on top of an import that has already succeeded.
+ * to repeat. Legs that are not linked by this call are classified for the log: a row that is
+ * already linked (found by the ledger, or, if the row was edited since, by the same type, amount
+ * and a date within three days) is "already linked", anything else "unlinked". Never throws:
+ * linking is a nicety on top of an import that has already succeeded.
  */
 export async function linkTransfers(
   ctx: AddonContext,
   activities: ActivityImport[],
 ): Promise<LinkOutcome> {
+  const legs = activities.filter(isTransfer);
   const pairs = pairTransferLegs(activities);
-  const out: LinkOutcome = {
-    linked: 0,
-    unlinked: activities.filter(isTransfer).length - pairs.length * 2,
-    failed: [],
-  };
-  if (pairs.length === 0) return out;
+  const out: LinkOutcome = { linked: 0, unlinked: 0, failed: [] };
+  if (legs.length === 0) return out;
 
+  let alreadyLinked = 0;
   try {
     const ledger = await jsonStore(ctx.api.storage).get<ImportLedger>(KEY_IMPORTED_IDS, {});
-    const idsByAccount = new Map<string, string[]>();
-    for (const { out: o, in: i } of pairs) {
-      for (const leg of [o, i]) {
-        idsByAccount.set(leg.accountId, [...(idsByAccount.get(leg.accountId) ?? []), leg.id!]);
-      }
-    }
-    const rows = new Map<string, Map<string, { id: string }>>();
-    for (const [accountId, ids] of idsByAccount) {
-      rows.set(
+    const existing = new Map<string, MoveRow[]>();
+    const located = new Map<string, Map<string, { id: string }>>();
+    for (const accountId of new Set(legs.map((l) => l.accountId))) {
+      const rows = await ctx.api.activities.getAll(accountId);
+      existing.set(accountId, rows as unknown as MoveRow[]);
+      located.set(
         accountId,
-        locateLedgerRows(await ctx.api.activities.getAll(accountId), ledger, accountId, ids),
+        locateLedgerRows(
+          rows,
+          ledger,
+          accountId,
+          legs.filter((l) => l.accountId === accountId).map((l) => l.id!),
+        ),
       );
     }
-    for (const { out: o, in: i } of pairs) {
-      const outRow = rows.get(o.accountId)?.get(o.id!);
-      const inRow = rows.get(i.accountId)?.get(i.id!);
-      if (!outRow || !inRow) {
-        // Edited or removed since the import (or never imported): nothing to link, and the
-        // pair may well be linked already.
-        out.unlinked += 2;
-        continue;
+    // The host row a leg stands for: by the ledger, else (the row was edited since) the closest
+    // row of the same type, amount and currency that no other leg has taken.
+    const taken = new Set<string>();
+    const rowFor = new Map<ActivityImport, string>();
+    for (const leg of legs) {
+      const row = located.get(leg.accountId)?.get(leg.id!);
+      if (row) {
+        rowFor.set(leg, row.id);
+        taken.add(row.id);
       }
+    }
+    const time = (d: Date | string | null | undefined) => new Date(d ?? 0).getTime();
+    for (const leg of legs) {
+      if (rowFor.has(leg)) continue;
+      const near = (existing.get(leg.accountId) ?? [])
+        .filter(
+          (r) =>
+            !taken.has(r.id) &&
+            r.activityType === leg.activityType &&
+            (r.currency ?? "").toUpperCase() === (leg.currency ?? "").toUpperCase() &&
+            Math.abs(Number(r.amount) - Number(leg.amount)) < 0.005 &&
+            Math.abs(time(r.date) - time(leg.date)) <= MOVE_MATCH_WINDOW_MS,
+        )
+        .sort((x, y) => Math.abs(time(x.date) - time(leg.date)) - Math.abs(time(y.date) - time(leg.date)))[0];
+      if (near) {
+        rowFor.set(leg, near.id);
+        taken.add(near.id);
+      }
+    }
+
+    const isLinked = async (id: string) => {
       try {
-        if (await ctx.api.activities.getTransferPair(outRow.id)) continue; // already linked
-        await ctx.api.activities.linkTransfer(outRow.id, inRow.id);
+        return (await ctx.api.activities.getTransferPair(id)) != null;
+      } catch {
+        return false;
+      }
+    };
+    const done = new Set<ActivityImport>(); // legs that need no classification
+    for (const { out: o, in: i } of pairs) {
+      const outId = located.get(o.accountId)?.get(o.id!)?.id;
+      const inId = located.get(i.accountId)?.get(i.id!)?.id;
+      if (!outId || !inId) continue; // classified below
+      if ((await isLinked(outId)) || (await isLinked(inId))) continue; // classified below
+      try {
+        await ctx.api.activities.linkTransfer(outId, inId);
         out.linked++;
+        done.add(o).add(i);
       } catch (err) {
         out.failed.push(`${o.id}: ${(err as Error).message}`);
+        done.add(o).add(i);
       }
+    }
+    for (const leg of legs) {
+      if (done.has(leg)) continue;
+      const id = rowFor.get(leg);
+      if (id && (await isLinked(id))) alreadyLinked++;
+      else out.unlinked++;
     }
   } catch (err) {
     out.failed.push((err as Error).message);
   }
+  if (alreadyLinked > 0) out.alreadyLinked = alreadyLinked;
   return out;
 }
 
 /** One log line for a {@link LinkOutcome}, or null when there was nothing to say. */
 export function linkNote(o: LinkOutcome): string | null {
-  if (o.linked === 0 && o.unlinked === 0 && o.failed.length === 0) return null;
+  if (o.linked === 0 && o.unlinked === 0 && !o.alreadyLinked && o.failed.length === 0) return null;
   const parts = [`${o.linked} linked`];
+  if (o.alreadyLinked) parts.push(`${o.alreadyLinked} already linked`);
   if (o.unlinked) {
     parts.push(
       `${o.unlinked} left unlinked (the other leg was not in this import, or a row was edited since; link them in Wealthfolio's Activities)`,

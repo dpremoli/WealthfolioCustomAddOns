@@ -273,31 +273,30 @@ describe("clearAccountData", () => {
     expect(storage.has("t212_sync_c1")).toBe(false);
   });
 
-  it("deletes each snapshot date then resets sync state in HOLDINGS mode", async () => {
+  it("stops at a delete the host refuses, before resetting sync state", async () => {
     const { ctx, storage } = makeCtx({
       storage: [["t212_sync_c1", JSON.stringify({ lastSync: "2026-01-01", importedRefs: [] })]],
     });
-    const deletedDates: string[] = [];
-    let activitiesTouched = false;
     ctx.api.activities = {
-      getAll: async () => {
-        activitiesTouched = true;
-        return [];
-      },
-      saveMany: async () => {
-        activitiesTouched = true;
-        return {};
-      },
+      getAll: async () => [{ id: "a1" }],
+      saveMany: async () => ({ errors: [{ id: "a1", action: "delete", message: "locked" }] }),
     };
-    ctx.api.snapshots = {
-      getAll: async () => [{ snapshotDate: "2026-01-01" }, { snapshotDate: "2026-02-01" }],
-      delete: async (_acc: string, date: string) => void deletedDates.push(date),
-    };
+    await expect(clearAccountData(ctx, "c1", "acc-1", "TRANSACTIONS")).rejects.toThrow("locked");
+    expect(storage.has("t212_sync_c1")).toBe(true);
+  });
 
-    await clearAccountData(ctx, "c1", "acc-1", "HOLDINGS");
+  it("leaves the Holdings snapshots alone (the host ignores them, and refuses to delete them) and resets sync state", async () => {
+    const { ctx, storage } = makeCtx({
+      storage: [["t212_sync_c1", JSON.stringify({ lastSync: "2026-01-01", importedRefs: [] })]],
+    });
+    const touched = vi.fn();
+    ctx.api.activities = { getAll: touched, saveMany: touched };
+    ctx.api.snapshots = { getAll: touched, delete: touched };
 
-    expect(deletedDates).toEqual(["2026-01-01", "2026-02-01"]);
-    expect(activitiesTouched).toBe(false);
+    const note = await clearAccountData(ctx, "c1", "acc-1", "HOLDINGS");
+
+    expect(touched).not.toHaveBeenCalled();
+    expect(note).toMatch(/Kept the Holdings snapshots/);
     expect(storage.has("t212_sync_c1")).toBe(false);
   });
 });

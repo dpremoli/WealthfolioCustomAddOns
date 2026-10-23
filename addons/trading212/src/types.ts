@@ -32,6 +32,9 @@ export interface T212Settings {
   // accurate for a debit card; CREDIT_CARD treats it as a credit-card liability so Wealthfolio can
   // link cash→card payments as transfers (avoids double-counting). Absent ⇒ "CASH".
   cardAccountType?: "CASH" | "CREDIT_CARD";
+  // Fold Trading 212's daily interest on cash into one row per month during a full backfill
+  // (months before the backfill only). Absent ⇒ off: every payment is imported.
+  monthlyInterest?: boolean;
 }
 
 // One Trading 212 API key linked to one Wealthfolio account.
@@ -74,6 +77,15 @@ export interface ConnectionSyncState {
   // synced independently of the JSON activity watermark). Absent ⇒ card history not yet
   // backfilled; set to the sync time after the first card backfill completes.
   cardLastSync?: string | null;
+  // Last comparison of the account with Trading 212's positions and cash (Transactions mode),
+  // made after a full backfill and again on each sync until it matches. Absent ⇒ never checked.
+  verification?: {
+    ok: boolean;
+    mismatches: string[];
+    positions: number;
+    checkedAt: string;
+    settled: boolean;
+  } | null;
 }
 
 // GET /api/v0/equity/account/summary
@@ -228,6 +240,8 @@ export interface SyncResult {
   card?: { imported: number; duplicates: number };
   // ISO timestamp the sync finished at (set whether it succeeded or errored).
   finishedAt?: string;
+  // Comparison with Trading 212's positions and cash, when this sync made one.
+  verification?: { ok: boolean; mismatches: string[]; positions: number; checkedAt: string; settled: boolean };
 }
 
 export interface MultiSyncResult {

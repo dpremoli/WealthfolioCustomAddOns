@@ -363,9 +363,7 @@ function RelativeWithTooltip({ iso }: { iso: string }) {
   return (
     <TooltipProvider>
       <Tooltip>
-        <TooltipTrigger asChild>
-          <span className="cursor-default">{relativeTime(iso)}</span>
-        </TooltipTrigger>
+        <TooltipTrigger render={<span className="cursor-default" />}>{relativeTime(iso)}</TooltipTrigger>
         <TooltipContent side="bottom">{new Date(iso).toLocaleString()}</TooltipContent>
       </Tooltip>
     </TooltipProvider>
@@ -382,6 +380,7 @@ export default function SettingsPage({ ctx, location }: AddonPageProps) {
   const [autoSync, setAutoSync] = useState(true);
   const [extractCard, setExtractCard] = useState(false);
   const [cardAccountType, setCardAccountType] = useState<"CASH" | "CREDIT_CARD">("CASH");
+  const [monthlyInterest, setMonthlyInterest] = useState(false);
   const [settingsSaved, setSettingsSaved] = useState<string | null>(null);
 
   const initialType: AddAccountType = startOnCashIsa ? "cash-isa" : "invest";
@@ -420,6 +419,7 @@ export default function SettingsPage({ ctx, location }: AddonPageProps) {
       setAutoSync(settings.autoSync !== false);
       setExtractCard(settings.extractCard === true);
       setCardAccountType(settings.cardAccountType === "CREDIT_CARD" ? "CREDIT_CARD" : "CASH");
+      setMonthlyInterest(settings.monthlyInterest === true);
     }
   }, [settings]);
 
@@ -439,7 +439,7 @@ export default function SettingsPage({ ctx, location }: AddonPageProps) {
   }
 
   async function saveSettings() {
-    const s: T212Settings = { env, autoSync, extractCard, cardAccountType };
+    const s: T212Settings = { env, autoSync, extractCard, cardAccountType, monthlyInterest };
     await setSettings(ctx, s);
     queryClient.invalidateQueries({ queryKey: ["t212_settings"] });
     queryClient.invalidateQueries({ queryKey: ["t212_status"] });
@@ -452,7 +452,7 @@ export default function SettingsPage({ ctx, location }: AddonPageProps) {
     setError(null);
     setStatus(null);
     try {
-      const s: T212Settings = { env, autoSync, extractCard, cardAccountType };
+      const s: T212Settings = { env, autoSync, extractCard, cardAccountType, monthlyInterest };
       if (!keyId.trim() || !apiSecret.trim())
         throw new Error("Enter both the API key ID and the API secret.");
       if (!name.trim()) throw new Error("Enter an account name.");
@@ -577,9 +577,8 @@ export default function SettingsPage({ ctx, location }: AddonPageProps) {
           <div className="space-y-1.5">
             <Label>Environment</Label>
             <ToggleGroup
-              type="single"
-              value={env}
-              onValueChange={(v) => v && setEnv(v as T212Env)}
+              value={[env]}
+              onValueChange={(v) => v[0] && setEnv(v[0] as T212Env)}
               variant="outline"
               className="w-fit"
             >
@@ -608,9 +607,8 @@ export default function SettingsPage({ ctx, location }: AddonPageProps) {
             <div className="ml-10 space-y-1.5">
               <Label>Card account type</Label>
               <ToggleGroup
-                type="single"
-                value={cardAccountType}
-                onValueChange={(v) => v && setCardAccountType(v as "CASH" | "CREDIT_CARD")}
+                  value={[cardAccountType]}
+                onValueChange={(v) => v[0] && setCardAccountType(v[0] as "CASH" | "CREDIT_CARD")}
                 variant="outline"
                 className="w-fit"
               >
@@ -626,6 +624,14 @@ export default function SettingsPage({ ctx, location }: AddonPageProps) {
               </p>
             </div>
           )}
+
+          <SwitchRow
+            icon="Percent"
+            title="Monthly interest totals"
+            description="Trading 212 pays interest on cash daily, which is thousands of rows over a few years. When on, a Transactions-mode backfill imports one interest row per month (for months before the backfill) instead. Applies to the next full backfill; switching it never counts interest twice."
+            checked={monthlyInterest}
+            onChange={setMonthlyInterest}
+          />
 
           <div className="flex flex-wrap items-center gap-3 pt-1">
             <Button onClick={saveSettings}>
@@ -698,9 +704,8 @@ export default function SettingsPage({ ctx, location }: AddonPageProps) {
           <div className="space-y-1.5">
             <Label>Account type</Label>
             <ToggleGroup
-              type="single"
-              value={accountType}
-              onValueChange={(v) => v && pickType(v as AddAccountType)}
+              value={[accountType]}
+              onValueChange={(v) => v[0] && pickType(v[0] as AddAccountType)}
               variant="outline"
               className="w-fit"
             >
@@ -736,9 +741,8 @@ export default function SettingsPage({ ctx, location }: AddonPageProps) {
             <div className="space-y-1.5">
               <Label>Sync mode</Label>
               <ToggleGroup
-                type="single"
-                value={trackingMode}
-                onValueChange={(v) => v && setTrackingMode(v as T212TrackingMode)}
+                  value={[trackingMode]}
+                onValueChange={(v) => v[0] && setTrackingMode(v[0] as T212TrackingMode)}
                 variant="outline"
                 className="w-fit"
               >

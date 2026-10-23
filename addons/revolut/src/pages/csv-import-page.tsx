@@ -9,10 +9,10 @@ import {
   CardHeader,
   CardTitle,
 } from "@wealthfolio/ui";
-import { addonRoute, jsonStore, selectNewActivities, type AddonPageProps } from "@wf-addons/kit";
-import { ACCOUNTS_KEY, ADDON_ID } from "../constants";
+import { addonRoute, jsonStore, type AddonPageProps } from "@wf-addons/kit";
+import { ACCOUNTS_KEY, ADDON_ID, KEY_SAVINGS_ACCOUNT } from "../constants";
 import { parseRevolutCsv } from "../lib/csv-parser";
-import { mapTransactionToActivity, openingBalanceActivity } from "../lib/mapper";
+import { importStatement, type StatementImportOutcome } from "../lib/import";
 import type { RevolutTransaction } from "../types";
 
 export default function CsvImportPage({ ctx }: AddonPageProps) {
@@ -24,7 +24,9 @@ export default function CsvImportPage({ ctx }: AddonPageProps) {
   const [mapping, setMapping] = useState<Record<string, string>>({});
   const [isImporting, setIsImporting] = useState(false);
   const [creating, setCreating] = useState<string | null>(null);
-  const [result, setResult] = useState<{ imported: number; duplicates: number } | null>(null);
+  // Wealthfolio account the user keeps their Revolut savings in ("" = none).
+  const [savingsAccountId, setSavingsAccountId] = useState("");
+  const [result, setResult] = useState<StatementImportOutcome | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const { data: wfAccounts = [], refetch: refetchAccounts } = useQuery({
@@ -50,6 +52,20 @@ export default function CsvImportPage({ ctx }: AddonPageProps) {
       if (Object.keys(valid).length > 0) setMapping(valid);
     })();
   }, [wfAccounts, mapping]);
+
+  // Restore the remembered savings account, if it still exists.
+  useEffect(() => {
+    if (wfAccounts.length === 0) return;
+    (async () => {
+      const saved = await store.get<string>(KEY_SAVINGS_ACCOUNT, "");
+      if (saved && wfAccounts.some((a) => a.id === saved)) setSavingsAccountId(saved);
+    })();
+  }, [wfAccounts]);
+
+  async function persistSavingsAccount(id: string) {
+    setSavingsAccountId(id);
+    await store.set(KEY_SAVINGS_ACCOUNT, id);
+  }
 
   async function persistMapping(next: Record<string, string>) {
     setMapping(next);
@@ -91,32 +107,10 @@ export default function CsvImportPage({ ctx }: AddonPageProps) {
     setError(null);
     try {
       await store.set(ACCOUNTS_KEY, mapping);
-      let imported = 0;
-      let duplicates = 0;
-      // Import each currency's rows into its own account so every account reconciles to
-      // Revolut's per-currency balance.
-      for (const [currency] of currencies) {
-        const accountId = mapping[currency];
-        if (!accountId) continue;
-        const subset = transactions.filter((tx) => tx.currency === currency);
-        const movements = subset.flatMap((tx) => mapTransactionToActivity(tx, accountId));
-        // Seed the money held before the statement's first row so the balance matches Revolut.
-        const opening = openingBalanceActivity(subset, accountId);
-        const desired = opening ? [opening, ...movements] : movements;
-
-        // Wealthfolio drops rows whose content matches an existing activity or another row
-        // in the batch, so genuine repeats (two identical transfers on one day) would vanish.
-        // The kit reconciles against what's already in the account and force-imports the rest,
-        // so re-imports add nothing while real duplicates survive.
-        const existing = await ctx.api.activities.getAll(accountId);
-        const toImport = selectNewActivities(desired, existing);
-        duplicates += desired.length - toImport.length;
-        if (toImport.length > 0) {
-          const r = await ctx.api.activities.import(toImport);
-          imported += r.summary.imported;
-        }
-      }
-      setResult({ imported, duplicates });
+      // Each currency's rows go to its own account so every account reconciles to Revolut's
+      // per-currency balance; re-imports add nothing (the import ledger knows every row id).
+      // Exchanges, Trading 212 and savings moves are then linked as transfers.
+      setResult(await importStatement(ctx, transactions, mapping, { savingsAccountId }));
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -228,6 +222,29 @@ export default function CsvImportPage({ ctx }: AddonPageProps) {
               {mappedCount} of {currencies.length} currencies mapped
             </p>
 
+            <div className="space-y-1">
+              <label className="text-sm font-medium" htmlFor="revolut-savings-account">
+                Savings account
+              </label>
+              <select
+                id="revolut-savings-account"
+                className="w-full border rounded px-3 py-2 text-sm bg-background"
+                value={savingsAccountId}
+                onChange={(e) => persistSavingsAccount(e.target.value)}
+              >
+                <option value="">None</option>
+                {wfAccounts.map((a) => (
+                  <option key={a.id} value={a.id}>
+                    {a.name}
+                  </option>
+                ))}
+              </select>
+              <p className="text-xs text-muted-foreground">
+                Optional. The account you keep your Revolut savings in: "Depositing savings" and
+                "Withdrawing savings" rows are linked to its matching moves as transfers.
+              </p>
+            </div>
+
             <Button onClick={doImport} disabled={mappedCount === 0 || isImporting}>
               {isImporting ? "Importing…" : `Import ${transactions.length} transactions`}
             </Button>
@@ -235,9 +252,17 @@ export default function CsvImportPage({ ctx }: AddonPageProps) {
             {error && <p className="text-sm text-destructive">{error}</p>}
 
             {result && !isImporting && (
-              <div className="flex gap-2">
-                <Badge variant="outline">{result.imported} imported</Badge>
-                <Badge variant="outline">{result.duplicates} duplicates skipped</Badge>
+              <div className="space-y-2">
+                <div className="flex gap-2">
+                  <Badge variant="outline">{result.imported} imported</Badge>
+                  <Badge variant="outline">{result.duplicates} duplicates skipped</Badge>
+                  {result.updated > 0 && <Badge variant="outline">{result.updated} updated</Badge>}
+                </div>
+                {result.notes.map((note) => (
+                  <p key={note} className="text-sm text-muted-foreground">
+                    {note}
+                  </p>
+                ))}
               </div>
             )}
           </CardContent>

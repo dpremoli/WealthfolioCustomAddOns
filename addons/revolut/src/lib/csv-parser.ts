@@ -21,7 +21,8 @@ function toIso(raw: string): string {
  *
  * Only COMPLETED rows with a non-zero amount are kept (PENDING/REVERTED/DECLINED are
  * dropped). Amounts stay in major units. Each row gets a deterministic `id` derived
- * from its completed date, amount, description and running balance.
+ * from its completed date, amount, description and running balance; a row identical to an
+ * earlier one in the same file gets `-2`, `-3`, … appended so every id is unique.
  */
 export function parseRevolutCsv(text: string): RevolutTransaction[] {
   const [header, ...rows] = parseCsv(text);
@@ -38,6 +39,11 @@ export function parseRevolutCsv(text: string): RevolutTransaction[] {
   const iCurrency = at("Currency", 7);
   const iState = at("State", 8);
   const iBalance = at("Balance", 9);
+
+  // How often each id has been handed out. The import ledger is keyed on the id, so two rows
+  // that hash alike (same time, amount and description, and no Balance column to tell them
+  // apart) must not share one, or the second would count as already imported.
+  const seen = new Map<string, number>();
 
   return rows.flatMap((raw): RevolutTransaction[] => {
     const c = raw.map((f) => f.trim());
@@ -62,7 +68,10 @@ export function parseRevolutCsv(text: string): RevolutTransaction[] {
     const date = toIso(completed);
     if (Number.isNaN(Date.parse(date))) return [];
 
-    const id = `revolut-${currency}-${fnv1a(`${completed}|${amount}|${description}|${balance}`)}`;
+    const base = `revolut-${currency}-${fnv1a(`${completed}|${amount}|${description}|${balance}`)}`;
+    const n = (seen.get(base) ?? 0) + 1;
+    seen.set(base, n);
+    const id = n === 1 ? base : `${base}-${n}`;
 
     return [
       {

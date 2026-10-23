@@ -130,26 +130,34 @@ export default function DashboardPage({ ctx }: AddonPageProps) {
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Tracking mode changed</AlertDialogTitle>
-            <AlertDialogDescription asChild>
-              <div className="space-y-2">
+            <AlertDialogDescription render={<div className="space-y-2" />}>
                 <p>
                   The tracking mode of {pendingDrifts.length > 1 ? "these accounts was" : "this account was"}{" "}
-                  changed in Wealthfolio. Re-syncing will <strong>delete</strong> the data synced under
-                  the previous mode and rebuild it in the new one:
+                  changed in Wealthfolio. Re-syncing rebuilds {pendingDrifts.length > 1 ? "them" : "it"} in
+                  the new mode:
                 </p>
                 <ul className="list-disc pl-5">
                   {pendingDrifts.map((d) => (
                     <li key={d.id}>
-                      <strong>{d.name}</strong>: {modeLabel(d.from)} → {modeLabel(d.to)}
+                      <strong>{d.name}</strong>: {modeLabel(d.from)} → {modeLabel(d.to)}.{" "}
+                      {d.from === "TRANSACTIONS" ? (
+                        <>
+                          The imported activities are <strong>deleted</strong>.
+                        </>
+                      ) : (
+                        <>
+                          The full history is imported; the Holdings snapshots are kept (unused in
+                          Transactions mode).
+                        </>
+                      )}
                     </li>
                   ))}
                 </ul>
-              </div>
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel onClick={cancelDrifts}>Skip these</AlertDialogCancel>
-            <AlertDialogAction onClick={confirmDrifts}>Clear and re-sync</AlertDialogAction>
+            <AlertDialogAction onClick={confirmDrifts}>Re-sync</AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>

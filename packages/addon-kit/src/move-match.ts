@@ -1,12 +1,41 @@
-import type { ActivityUpdate, AddonContext } from "@wealthfolio/addon-sdk";
+import type { Account, ActivityUpdate, AddonContext } from "@wealthfolio/addon-sdk";
+import { escapeRegex } from "./spending";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 /** How far apart the two halves of a move between two accounts may be dated. */
 export const MOVE_MATCH_WINDOW_MS = 3 * DAY_MS;
 
-/** Payee text that points at Trading 212 ("Trading 212", "TRADING212", "T212"). */
-export const TRADING_212_PAYEE = /trading\s*212|\bt212\b/i;
+/**
+ * Payee text that points at Trading 212: "Trading 212", "TRADING212", "T212", and the
+ * spelled-out "Trading TwoOneTwo" some banks show for its UK entity.
+ */
+export const TRADING_212_PAYEE = /trading\s*212|\bt212\b|trading\s*two\s*one\s*two/i;
+
+/** Wealthfolio account `provider` of the accounts the Trading 212 add-on creates. */
+export const T212_PROVIDER = "trading212-addon";
+
+/**
+ * Whether `text` (a row's payee/comment) points at Trading 212: its name (see
+ * {@link TRADING_212_PAYEE}) or one of `refs`, the user's Trading 212 account numbers that a
+ * bank transfer quotes as its reference (see {@link trading212Refs}).
+ */
+export function isTrading212Payee(text: string | null | undefined, refs: string[] = []): boolean {
+  const t = text ?? "";
+  if (TRADING_212_PAYEE.test(t)) return true;
+  return refs.some((r) => r.length >= 5 && new RegExp(`(^|\\D)${escapeRegex(r)}(\\D|$)`).test(t));
+}
+
+/**
+ * The Trading 212 account numbers among `accounts`: the `providerAccountId` of each account the
+ * Trading 212 add-on created for an Invest or Stocks ISA connection (numeric, unlike its card and
+ * Cash ISA accounts).
+ */
+export function trading212Refs(accounts: Pick<Account, "provider" | "providerAccountId">[]): string[] {
+  return accounts
+    .filter((a) => a.provider === T212_PROVIDER && /^\d+$/.test(a.providerAccountId ?? ""))
+    .map((a) => a.providerAccountId as string);
+}
 
 /** `providerAccountId` of the Wealthfolio account the Trading 212 add-on keeps the Cash ISA in. */
 export const T212_CASH_ISA_PROVIDER_ID = "t212-cash-isa";
@@ -205,6 +234,47 @@ export async function convertAndLinkMoves(
     out.failed.push((err as Error).message);
   }
   return out;
+}
+
+const MOVE_TYPES = ["WITHDRAWAL", "DEPOSIT", "TRANSFER_OUT", "TRANSFER_IN"];
+
+/**
+ * {@link convertAndLinkMoves} between two sets of accounts: the money moves in the accounts
+ * `mine` names against those in every other account `theirs` accepts. `mineRow` / `theirRow`
+ * narrow each side to the rows that can belong to such a move (a payee that reads "Trading 212",
+ * say), so two unrelated moves of the same amount are not mistaken for each other. Does nothing
+ * when either side has no rows; never throws.
+ */
+export async function linkMovesBetween(
+  ctx: AddonContext,
+  opts: {
+    mine: string[];
+    theirs: (account: Account) => boolean;
+    mineRow?: (row: MoveRow) => boolean;
+    theirRow?: (row: MoveRow) => boolean;
+    windowMs?: number;
+    /** The accounts, when the caller already has them. */
+    accounts?: Account[];
+  },
+): Promise<MoveLinkOutcome> {
+  const none: MoveLinkOutcome = { linked: 0, ambiguous: [], failed: [] };
+  try {
+    const mineIds = new Set(opts.mine);
+    const accounts = opts.accounts ?? (await ctx.api.accounts.getAll());
+    const others = accounts.filter((a) => !mineIds.has(a.id) && opts.theirs(a));
+    if (mineIds.size === 0 || others.length === 0) return none;
+    const rowsOf = async (ids: string[]) =>
+      (await Promise.all(ids.map((id) => ctx.api.activities.getAll(id))))
+        .flat()
+        .filter((r) => MOVE_TYPES.includes(r.activityType)) as unknown as MoveRow[];
+    const theirs = (await rowsOf(others.map((a) => a.id))).filter((r) => opts.theirRow?.(r) ?? true);
+    if (theirs.length === 0) return none;
+    const mine = (await rowsOf([...mineIds])).filter((r) => opts.mineRow?.(r) ?? true);
+    if (mine.length === 0) return none;
+    return await convertAndLinkMoves(ctx, mine, theirs, opts.windowMs);
+  } catch (err) {
+    return { ...none, failed: [(err as Error).message] };
+  }
 }
 
 /** One log line for a {@link MoveLinkOutcome}, or null when there was nothing to say. */

@@ -1,13 +1,13 @@
 {
   "id": "revolut-addon",
   "name": "Revolut CSV Import",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Import Revolut account statements (CSV) into Wealthfolio cash accounts, one per currency, for the spending module.",
   "author": "dpremoli",
   "license": "GPL-3.0-only",
   "main": "dist/addon.js",
-  "sdkVersion": "3.9.0",
-  "minWealthfolioVersion": "3.9.0",
+  "sdkVersion": "3.11.0",
+  "minWealthfolioVersion": "3.11.0",
   "enabled": true,
   "keywords": ["revolut", "bank", "csv", "import", "spending"],
   "contributes": {
@@ -29,8 +29,8 @@
   },
   "hostDependencies": {
     "@tanstack/react-query": "^5.90.0",
-    "@wealthfolio/addon-sdk": "^3.9.0",
-    "@wealthfolio/ui": "^3.9.0",
+    "@wealthfolio/addon-sdk": "^3.11.0",
+    "@wealthfolio/ui": "^3.11.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
   },
@@ -42,8 +42,8 @@
     },
     {
       "category": "activities",
-      "functions": ["import", "getAll"],
-      "purpose": "Import Revolut transactions and reconcile against existing ones so re-imports add nothing"
+      "functions": ["import", "getAll", "saveMany", "getTransferPair", "linkTransfer"],
+      "purpose": "Import Revolut transactions and reconcile against existing ones so re-imports add nothing, then link currency exchanges, moves to and from Trading 212 and savings moves as transfers between your own accounts (converting a matched withdrawal or deposit to a transfer)"
     },
     {
       "category": "secrets",

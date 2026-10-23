@@ -63,6 +63,7 @@ function makeCtx(opts: {
   existingAccounts?: { id: string; providerAccountId?: string; trackingMode?: string }[];
   existingActivities?: { id: string }[];
   existingSnapshots?: { snapshotDate: string }[];
+  holdings?: unknown[] | (() => unknown[]);
 }) {
   const connections = opts.connections ?? [
     { id: "c1", name: "Trading 212 (Invest)", accountId: "acc-1" },
@@ -138,6 +139,9 @@ function makeCtx(opts: {
           save: snapshotsSave,
           delete: snapshotsDelete,
         },
+        portfolio: {
+          getHoldings: async () => (typeof opts.holdings === "function" ? opts.holdings() : (opts.holdings ?? [])),
+        },
       },
     },
     storage,
@@ -196,9 +200,21 @@ describe("useSync — JSON incremental path", () => {
     expect(result.current.steps[result.current.steps.length - 1].status).toBe("done");
   });
 
+  it("pins a trade to the listing the resolver chose, as an equity (same asset as HOLDINGS)", async () => {
+    const { ctx, importFn } = makeCtx({
+      searchTicker: async () => [{ symbol: "AAPL", score: 1, exchangeMic: "XNAS", quoteType: "EQUITY" }],
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { result } = renderHook(() => useSync(ctx as any));
+    await act(async () => {
+      await result.current.syncAll();
+    });
+    expect(importFn.mock.calls[0][0][0]).toMatchObject({ symbol: "AAPL", exchangeMic: "XNAS", instrumentType: "EQUITY" });
+  });
+
   it("adaptively halves batches the backend rejects, importing everything", async () => {
-    // 120 distinct orders. The starting chunk size (20) exceeds the simulated
-    // backend limit of 10, so each chunk must be halved before it's accepted.
+    // 120 distinct orders, sent as one chunk; the simulated backend limit of 10 makes the
+    // importer halve it until every call is accepted.
     const orders = Array.from({ length: 120 }, (_, i) => ({
       order: {
         id: i + 1,
@@ -231,11 +247,12 @@ describe("useSync — JSON incremental path", () => {
 
     expect(result.current.error).toBeNull();
     expect(result.current.results?.totals.imported).toBe(120);
-    // 6 chunks of 20 → each halved to 10+10 → 12 accepted import batches.
-    expect(importFn).toHaveBeenCalledTimes(12);
+    // 120 → 60 → 30 → 15 → 8 + 7: sixteen accepted calls of at most 10 rows.
+    expect(importFn).toHaveBeenCalledTimes(16);
+    expect(Math.max(...importFn.mock.calls.map((c) => c[0].length))).toBeLessThanOrEqual(10);
   });
 
-  it("surfaces the payload when a single activity is genuinely rejected", async () => {
+  it("reports each trade the host refuses (no abort) and flags the holdings as wrong", async () => {
     const orders = Array.from({ length: 5 }, (_, i) => ({
       order: {
         id: i + 1,
@@ -265,8 +282,10 @@ describe("useSync — JSON incremental path", () => {
     });
 
     const r = result.current.results!.perAccount[0];
-    expect(r.error).toContain("checkImport rejected a single activity");
-    expect(r.error).toContain("payload=");
+    expect(r.error).toMatch(/^5 trade or corporate-action rows were not imported, so holdings will not match Trading 212/);
+    const notImported = r.log.filter((l) => l.startsWith("Not imported: BUY 2026-04-01 AAPL"));
+    expect(notImported).toHaveLength(5);
+    expect(notImported[0]).toMatch(/\(t212-order-1\): checkImport refused it: Unprocessable Entity/);
   });
 
   it("skips activities the account already holds without importing", async () => {
@@ -769,6 +788,14 @@ describe("useSync — HOLDINGS mode", () => {
     expect(card).toBeTruthy();
     expect(card!.accountId).toBe("acc-new");
     expect(card!.comment).toBe("SAINSBURYS · Shopping");
+    // The purchase is funded from the investing account in the same import call, so Wealthfolio
+    // links the transfer pair and both balances match Trading 212.
+    const call = importFn.mock.calls.find((c) => c[0].some((a) => a.id === "t212-txn-CARD1"))![0];
+    expect(call.map((a) => [a.id, a.accountId, a.activityType, a.amount])).toEqual([
+      ["t212-txn-CARD1", "acc-new", "WITHDRAWAL", 12.34],
+      ["t212-txn-CARD1-fund-out", "acc-1", "TRANSFER_OUT", 12.34],
+      ["t212-txn-CARD1-fund-in", "acc-new", "TRANSFER_IN", 12.34],
+    ]);
     expect(JSON.parse(storage.get("t212_sync_c1")!).cardLastSync).toBeTruthy();
     // HOLDINGS breakdown surfaces Holdings + Card so the Summary tab isn't greyed out.
     const r = result.current.results!.perAccount[0];
@@ -952,6 +979,306 @@ describe("useSync — tracking-mode drift", () => {
     expect(snapshotsSave).toHaveBeenCalledTimes(1);
     // Connection's recorded mode updated to the new mode.
     expect(JSON.parse(storage.get("t212_connections")!)[0].trackingMode).toBe("HOLDINGS");
+  });
+});
+
+describe("useSync — a split Trading 212 never listed", () => {
+  const amzn = (qty: number) => ({ holdingType: "security", instrument: { symbol: "AMZN" }, quantity: qty, localCurrency: "USD" });
+  const csv = [
+    CSV_HDR,
+    "Market buy,2021-09-01T10:00:00Z,US0231351067,AMZN_US_EQ,Amazon,0.108245,3400,USD,1.37,268.50,GBP,,,,,,B1,,",
+  ].join("\n");
+  const route = (u: string) => {
+    if (u.includes("amazonaws.com")) return textResponse(downloads++ === 0 ? csv : CSV_HDR);
+    if (u.includes("/exports")) return jsonResponse([FINISHED_REPORT]);
+    if (u.includes("account/summary")) return jsonResponse({ id: 1, currency: "GBP", cash: { availableToTrade: 0 } });
+    // Trading 212 holds 20× what the one buy adds up to: Amazon split 20:1 on 2022-06-06.
+    if (u.includes("/positions"))
+      return jsonResponse([{ instrument: { ticker: "AMZN_US_EQ", isin: "US0231351067", name: "Amazon", currency: "USD" }, quantity: 2.1649 }]);
+    return routeFetch(u);
+  };
+  let downloads = 0;
+
+  it("adds the 20:1 split from the position difference, then finds the account matches", async () => {
+    downloads = 0;
+    net(async (url: string) => route(String(url)));
+    let imports: { mock: { calls: unknown[][] } } | undefined;
+    const { ctx, importFn } = makeCtx({
+      syncStates: { c1: { lastSync: null, importedRefs: [] } },
+      searchTicker: async () => [{ symbol: "AMZN", exchangeMic: "XNAS", currency: "USD", score: 1, quoteType: "EQUITY" }],
+      holdings: () => {
+        const split = (imports!.mock.calls.flatMap((c) => c[0]) as { activityType: string }[]).some((a) => a.activityType === "SPLIT");
+        return [amzn(split ? 2.1649 : 0.108245)];
+      },
+    });
+    imports = importFn;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { result } = renderHook(() => useSync(ctx as any));
+    await act(async () => {
+      await result.current.syncAll();
+    });
+
+    const split = importFn.mock.calls.flatMap((c) => c[0] as ActivityImport[]).find((a) => a.activityType === "SPLIT");
+    expect(split).toMatchObject({ id: "t212-split-US0231351067-20220606", amount: 20, date: "2022-06-06T00:00:00.000Z", symbol: "AMZN", currency: "USD" });
+    const r = result.current.results!.perAccount[0];
+    expect(r.error).toBeUndefined();
+    expect(r.verification?.ok).toBe(true);
+    const log = r.log.join("\n");
+    expect(log).toContain("adding the 20:1 split of 2022-06-06 that Trading 212's history does not list");
+    expect(log).toContain("Added 1 missing split; checking again.");
+    expect(log).toContain("Matches Trading 212");
+  });
+
+  it("leaves a position it cannot explain wrong, says why, and fails the sync", async () => {
+    downloads = 0;
+    net(async (url: string) => {
+      const u = String(url);
+      if (u.includes("/positions"))
+        return jsonResponse([{ instrument: { ticker: "AMZN_US_EQ", isin: "US0231351067", name: "Amazon", currency: "USD" }, quantity: 0.5 }]);
+      return route(u);
+    });
+    const { ctx, importFn } = makeCtx({
+      syncStates: { c1: { lastSync: null, importedRefs: [] } },
+      searchTicker: async () => [{ symbol: "AMZN", exchangeMic: "XNAS", currency: "USD", score: 1, quoteType: "EQUITY" }],
+      holdings: () => [amzn(0.108245)],
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { result } = renderHook(() => useSync(ctx as any));
+    await act(async () => {
+      await result.current.syncAll();
+    });
+    expect(importFn.mock.calls.flatMap((c) => c[0] as ActivityImport[]).some((a) => a.activityType === "SPLIT")).toBe(false);
+    const r = result.current.results!.perAccount[0];
+    // No events API in this host, so it cannot tell the recalculation finished: the difference is
+    // reported as possibly temporary rather than failing the sync.
+    expect(r.verification).toMatchObject({ ok: false, settled: false });
+    expect(r.verification!.mismatches[0]).toContain("Trading 212 holds 0.5, Wealthfolio 0.108245");
+    expect(r.log.join("\n")).toContain("do not reproduce it");
+  });
+});
+
+describe("useSync — corporate actions and currency conversions in a backfill", () => {
+  // Columns as in CSV_HDR: Action,Time,ISIN,Ticker,Name,No. of shares,Price / share,Currency (Price / share),
+  // Exchange rate,Total,Currency (Total),Withholding tax,Currency (Withholding tax),Charge amount,
+  // Currency (Charge amount),Notes,ID,Currency conversion fee,Currency (Currency conversion fee)
+  const csv = [
+    CSV_HDR,
+    "Stock split close,2026-07-02T07:28:15Z,US22788C1053,CRWD_US_EQ,CrowdStrike,0.17237746,471.87,USD,1.16382887,69.89,EUR,,,,,,SPL1,,",
+    "Stock split open,2026-07-02T07:28:15Z,US22788C1053,CRWD_US_EQ,CrowdStrike,0.68950984,117.97,USD,1.16382887,69.89,EUR,,,,,,SPL2,,",
+    "Currency conversion,2025-09-04T13:06:05Z,,,,,,,,-13.00,GBP,,,,,10000.00 EUR -> 8665.30 GBP,FX1,-13.00,GBP",
+    "Stock distribution,2025-02-11T09:00:00Z,US42227T3032,HOST_US_EQ,Host Digital,0.01440327,0,USD,,0,EUR,,,,,,DST1,,",
+  ].join("\n");
+
+  it("imports a split as SPLIT, a conversion as one linked-able unit plus its fee, and a distribution at no cost", async () => {
+    let downloads = 0;
+    net(async (url: string) => {
+      const u = String(url);
+      if (u.includes("amazonaws.com")) return textResponse(++downloads === 1 ? csv : CSV_HDR);
+      if (u.includes("/exports")) return jsonResponse([FINISHED_REPORT]);
+      return routeFetch(u);
+    });
+    const { ctx, importFn } = makeCtx({
+      syncStates: { c1: { lastSync: null, importedRefs: [] } },
+      searchTicker: async () => [{ symbol: "CRWD", exchangeMic: "XNAS", currency: "USD", score: 1, quoteType: "EQUITY" }],
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { result } = renderHook(() => useSync(ctx as any));
+    await act(async () => {
+      await result.current.syncAll();
+    });
+
+    const calls = importFn.mock.calls.map((c) => c[0] as { id: string; activityType: string; amount?: number; currency?: string }[]);
+    const all = calls.flat();
+    expect(all.find((a) => a.activityType === "SPLIT")).toMatchObject({ amount: 4, currency: "USD" });
+    // The two currency legs travel in the same import call, so Wealthfolio can link them.
+    const call = calls.find((c) => c.some((a) => a.id === "t212-fx-FX1-out"))!;
+    expect(call.map((a) => [a.id, a.activityType, a.amount, a.currency])).toEqual(
+      expect.arrayContaining([
+        ["t212-fx-FX1-out", "TRANSFER_OUT", 10000, "EUR"],
+        ["t212-fx-FX1-in", "TRANSFER_IN", 8665.3, "GBP"],
+      ]),
+    );
+    expect(all.find((a) => a.id === "t212-fx-FX1-fee")).toMatchObject({ activityType: "FEE", amount: 13, currency: "GBP" });
+    expect(all.find((a) => a.id.startsWith("t212-dist-"))).toMatchObject({ activityType: "TRANSFER_IN" });
+    expect(result.current.results!.perAccount[0].log.join("\n")).not.toMatch(/Skipped \(not imported\)/);
+  });
+});
+
+describe("useSync — monthly interest totals", () => {
+  it("folds a finished month's daily interest into one row during the backfill", async () => {
+    const row = (day: string, amount: string, id: string) =>
+      `Interest on cash,${day}T06:00:00.000Z,,,,,,,,${amount},GBP,0,GBP,0,GBP,,${id},0,GBP`;
+    const csv = [CSV_HDR, row("2025-01-01", "0.10", "I1"), row("2025-01-02", "0.20", "I2"), row("2025-01-03", "0.30", "I3")].join("\n");
+    let downloads = 0;
+    net(async (url: string) => {
+      const u = String(url);
+      if (u.includes("amazonaws.com")) return textResponse(++downloads === 1 ? csv : CSV_HDR);
+      if (u.includes("/exports")) return jsonResponse([FINISHED_REPORT]);
+      return routeFetch(u);
+    });
+    const { ctx, importFn, storage } = makeCtx({ syncStates: { c1: { lastSync: null, importedRefs: [] } } });
+    storage.set("t212_settings", JSON.stringify({ env: "demo", monthlyInterest: true }));
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { result } = renderHook(() => useSync(ctx as any));
+    await act(async () => {
+      await result.current.syncAll();
+    });
+    const imported = importFn.mock.calls.flatMap((c) => c[0]).filter((a) => a.activityType === "INTEREST");
+    expect(imported.map((a) => [a.amount, a.comment])).toEqual([[0.6, "Interest on cash, monthly total (3 payments)"]]);
+  });
+});
+
+describe("useSync — linking deposits and withdrawals with the bank", () => {
+  it("links a deposit with the bank withdrawal that paid Trading 212, leaving other rows alone", async () => {
+    net((url) => routeFetch(url));
+    const rows: Record<string, Record<string, unknown>[]> = {
+      "acc-1": [
+        { id: "dep", accountId: "acc-1", activityType: "DEPOSIT", date: new Date("2026-03-02T10:00:00Z"), amount: "500", currency: "EUR" },
+        { id: "fund", accountId: "acc-1", activityType: "TRANSFER_OUT", date: new Date("2026-03-02T10:00:00Z"), amount: "500", currency: "EUR", comment: "Card funding" },
+      ],
+      bank: [
+        { id: "w1", accountId: "bank", activityType: "WITHDRAWAL", date: new Date("2026-03-01T09:00:00Z"), amount: "500", currency: "EUR", comment: "Trading TwoOneTwo 4098937" },
+        { id: "w2", accountId: "bank", activityType: "WITHDRAWAL", date: new Date("2026-03-02T09:00:00Z"), amount: "500", currency: "EUR", comment: "Rent" },
+      ],
+    };
+    const { ctx } = makeCtx({
+      existingAccounts: [
+        { id: "acc-1", providerAccountId: "4098937" },
+        { id: "bank", providerAccountId: "m1" },
+      ],
+    });
+    const api = ctx.api as unknown as Record<string, Record<string, unknown>>;
+    (api.accounts.getAll as unknown) = async () => [
+      { id: "acc-1", provider: "trading212-addon", providerAccountId: "4098937", accountType: "SECURITIES" },
+      { id: "bank", provider: "monzo-addon", providerAccountId: "m1", accountType: "CASH" },
+    ];
+    const links: [string, string][] = [];
+    Object.assign(api.activities, {
+      getAll: async (id: string) => rows[id] ?? [],
+      getTransferPair: async () => null,
+      saveMany: async () => ({ errors: [] }),
+      linkTransfer: async (o: string, i: string) => void links.push([o, i]),
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { result } = renderHook(() => useSync(ctx as any));
+    await act(async () => {
+      await result.current.syncAll();
+    });
+
+    expect(links).toEqual([["w1", "dep"]]);
+    expect(result.current.results!.perAccount[0].log).toContain("Moves to and from your bank accounts: 1 linked.");
+  });
+});
+
+describe("useSync — checking a backfill against Trading 212", () => {
+  const backfill = (summaryCash: number) =>
+    net(async (url: string) => {
+      const u = String(url);
+      if (u.includes("amazonaws.com")) return textResponse(CSV_HDR);
+      if (u.includes("/exports")) return jsonResponse([FINISHED_REPORT]);
+      if (u.includes("account/summary")) return jsonResponse({ id: 1, currency: "GBP", cash: { availableToTrade: summaryCash } });
+      if (u.includes("/positions")) {
+        return jsonResponse([{ instrument: { ticker: "AAPL_US_EQ", isin: "US0378331005", currency: "USD" }, quantity: 2 }]);
+      }
+      return routeFetch(u);
+    });
+  const holdings = [
+    { holdingType: "security", instrument: { symbol: "AAPL" }, quantity: 2, localCurrency: "USD" },
+    { holdingType: "cash", quantity: 250, localCurrency: "GBP" },
+  ];
+
+  it("records a match after the backfill", async () => {
+    backfill(250);
+    const { ctx, storage } = makeCtx({ syncStates: { c1: { lastSync: null, importedRefs: [] } }, holdings });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { result } = renderHook(() => useSync(ctx as any));
+    await act(async () => {
+      await result.current.syncAll();
+    });
+    const r = result.current.results!.perAccount[0];
+    expect(r.error).toBeUndefined();
+    expect(r.verification).toMatchObject({ ok: true, positions: 1 });
+    expect(r.log).toContain("Matches Trading 212: 1 positions and the cash balance.");
+    expect(JSON.parse(storage.get("t212_sync_c1")!).verification.ok).toBe(true);
+  });
+
+  it("fails the sync with every difference, and checks again on the next sync until it matches", async () => {
+    backfill(1822);
+    const { ctx, storage } = makeCtx({ syncStates: { c1: { lastSync: null, importedRefs: [] } }, holdings });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { result } = renderHook(() => useSync(ctx as any));
+    await act(async () => {
+      await result.current.syncAll();
+    });
+    let r = result.current.results!.perAccount[0];
+    expect(r.error).toBe("Does not match Trading 212: 1 difference (see the log). First: Cash GBP: Trading 212 1822, Wealthfolio 250.");
+    expect(JSON.parse(storage.get("t212_sync_c1")!).verification.ok).toBe(false);
+
+    // The next (incremental) sync checks again; now it matches.
+    net(async (url: string) => {
+      const u = String(url);
+      if (u.includes("account/summary")) return jsonResponse({ id: 1, currency: "GBP", cash: { availableToTrade: 250 } });
+      if (u.includes("/positions")) {
+        return jsonResponse([{ instrument: { ticker: "AAPL_US_EQ", isin: "US0378331005", currency: "USD" }, quantity: 2 }]);
+      }
+      return jsonResponse({ items: [], nextPagePath: null });
+    });
+    await act(async () => {
+      await result.current.syncAll();
+    });
+    r = result.current.results!.perAccount[0];
+    expect(r.verification?.ok).toBe(true);
+    expect(r.error).toBeUndefined();
+  });
+});
+
+describe("useSync — switching a Holdings account to Transactions", () => {
+  it("keeps the snapshots (never calls the refused delete) and starts the full backfill", async () => {
+    let downloads = 0;
+    net(async (url: string) => {
+      const u = String(url);
+      if (u.includes("amazonaws.com")) return textResponse(++downloads === 1 ? SAMPLE_CSV : CSV_HDR);
+      if (u.includes("/exports")) return jsonResponse([FINISHED_REPORT]);
+      return routeFetch(u);
+    });
+    const { ctx, snapshotsDelete, importFn, storage } = makeCtx({
+      connections: [{ id: "c1", name: "Invest", accountId: "acc-1", trackingMode: "HOLDINGS" }],
+      existingAccounts: [{ id: "acc-1", trackingMode: "TRANSACTIONS" }],
+      existingSnapshots: [{ snapshotDate: "2026-01-01" }],
+      syncStates: { c1: { lastSync: "2026-03-01T00:00:00.000Z", importedRefs: [] } },
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { result } = renderHook(() => useSync(ctx as any));
+    await act(async () => {
+      await result.current.syncAll(new Set(["c1"]));
+    });
+
+    const r = result.current.results!.perAccount[0];
+    expect(r.error).toBeUndefined();
+    expect(snapshotsDelete).not.toHaveBeenCalled();
+    expect(r.log.join("\n")).toMatch(/Kept the Holdings snapshots[\s\S]*Full backfill/);
+    expect(importFn).toHaveBeenCalled();
+    expect(JSON.parse(storage.get("t212_connections")!)[0].trackingMode).toBe("TRANSACTIONS");
+  });
+
+  it("stops with a clear message, and keeps the old mode, when deleting the old activities fails", async () => {
+    net((url) => routeHoldingsFetch(url));
+    const { ctx, snapshotsSave, activitiesSaveMany, storage } = makeCtx({
+      connections: [{ id: "c1", name: "Invest", accountId: "acc-1", trackingMode: "TRANSACTIONS" }],
+      existingAccounts: [{ id: "acc-1", trackingMode: "HOLDINGS" }],
+      existingActivities: [{ id: "a1" }],
+    });
+    activitiesSaveMany.mockRejectedValueOnce(new Error("database is locked"));
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { result } = renderHook(() => useSync(ctx as any));
+    await act(async () => {
+      await result.current.syncAll(new Set(["c1"]));
+    });
+
+    const r = result.current.results!.perAccount[0];
+    expect(r.error).toMatch(/Could not switch to HOLDINGS mode.*database is locked/);
+    expect(snapshotsSave).not.toHaveBeenCalled();
+    expect(JSON.parse(storage.get("t212_connections")!)[0].trackingMode).toBe("TRANSACTIONS");
   });
 });
 

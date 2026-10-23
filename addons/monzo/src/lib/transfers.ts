@@ -3,9 +3,11 @@ import {
   MOVE_MATCH_WINDOW_MS,
   T212_CASH_ISA_PROVIDER_ID,
   TRADING_212_PAYEE,
-  convertAndLinkMoves,
+  isTrading212Payee,
   jsonStore,
+  linkMovesBetween,
   locateLedgerRows,
+  trading212Refs,
   type ImportLedger,
   type MoveLinkOutcome,
   type MoveRow,
@@ -207,41 +209,30 @@ export function flexCreditsOf(
     .map((tx) => flexRepaymentCredit(tx, flexAccountId, categoryLabels, ownNames));
 }
 
-const MOVE_TYPES = ["WITHDRAWAL", "DEPOSIT", "TRANSFER_OUT", "TRANSFER_IN"];
-
 /**
  * Pairs Monzo savings moves with Trading 212 Cash ISA rows and, for each confident pair, converts
- * both to a linked transfer (see kit `convertAndLinkMoves`). The Cash ISA is the account the
- * Trading 212 add-on keeps it in (`providerAccountId`), or one whose name mentions Trading 212 and ISA. Only Monzo
- * rows whose payee reads "Trading 212" take part, so two unrelated moves of the same amount are
- * not mistaken for each other; a row with no counterpart, or a tie, is left as it is (an unlinked
- * transfer would drop an ISA deposit from the allowance). Does nothing when there is no Cash ISA.
+ * both to a linked transfer (see kit `linkMovesBetween`). The Cash ISA is the account the
+ * Trading 212 add-on keeps it in (`providerAccountId`), or one whose name mentions Trading 212 and
+ * ISA. Only Monzo rows whose payee points at Trading 212 (its name or one of the user's Trading
+ * 212 account numbers) take part, so two unrelated moves of the same amount are not mistaken for
+ * each other; a row with no counterpart, or a tie, is left as it is (an unlinked transfer would
+ * drop an ISA deposit from the allowance). Does nothing when there is no Cash ISA.
  */
 export async function matchWithCashIsa(
   ctx: AddonContext,
   monzoAccountIds: string[],
 ): Promise<MoveLinkOutcome> {
-  const none: MoveLinkOutcome = { linked: 0, ambiguous: [], failed: [] };
   try {
     const accounts = await ctx.api.accounts.getAll();
-    const isaIds = accounts
-      .filter(
-        (a) =>
-          !monzoAccountIds.includes(a.id) &&
-          (a.providerAccountId === T212_CASH_ISA_PROVIDER_ID ||
-            (TRADING_212_PAYEE.test(a.name) && /isa/i.test(a.name))),
-      )
-      .map((a) => a.id);
-    if (isaIds.length === 0) return none;
-
-    const rowsOf = async (ids: string[]) =>
-      (await Promise.all(ids.map((id) => ctx.api.activities.getAll(id))))
-        .flat()
-        .filter((r) => MOVE_TYPES.includes(r.activityType)) as unknown as MoveRow[];
-    const mine = (await rowsOf(monzoAccountIds)).filter((r) => TRADING_212_PAYEE.test(r.comment ?? ""));
-    if (mine.length === 0) return none;
-    return await convertAndLinkMoves(ctx, mine, await rowsOf(isaIds));
+    const refs = trading212Refs(accounts);
+    return await linkMovesBetween(ctx, {
+      accounts,
+      mine: monzoAccountIds,
+      theirs: (a) =>
+        a.providerAccountId === T212_CASH_ISA_PROVIDER_ID || (TRADING_212_PAYEE.test(a.name) && /isa/i.test(a.name)),
+      mineRow: (r) => isTrading212Payee(r.comment, refs),
+    });
   } catch (err) {
-    return { ...none, failed: [(err as Error).message] };
+    return { linked: 0, ambiguous: [], failed: [(err as Error).message] };
   }
 }

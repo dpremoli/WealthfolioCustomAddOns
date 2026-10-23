@@ -18,7 +18,8 @@ const FEE = "FEE" as ActivityImport["activityType"];
  *
  *   - Transfer / Exchange → TRANSFER_IN (credit) or TRANSFER_OUT (debit). A cross-currency
  *     exchange therefore becomes a TRANSFER_OUT on one currency's account and a TRANSFER_IN
- *     on the other's — each account reconciles independently, no cross-account link needed.
+ *     on the other's — each account reconciles independently; the import then links the two
+ *     legs (see `exchanges.ts`) so Wealthfolio shows them as one move between own accounts.
  *   - Top-up → DEPOSIT (incoming funding / salary; income, not spending).
  *   - Anything else (Card Payment, ATM, Card Refund, Cashback, …) → DEPOSIT/WITHDRAWAL by sign.
  */
@@ -43,7 +44,7 @@ export function mapType(revolutType: string, amount: number): ActivityImport["ac
  *
  * Returns `null` when the opening balance can't be derived (no Balance column) or is
  * zero (nothing to seed). The id, day and comment are deterministic, so re-importing
- * the same statement reproduces the identical row and the host de-dupes it cleanly.
+ * the same statement reproduces the identical row and the import ledger recognises it.
  *
  * Caveat: this assumes a single statement covering the account's start. Importing a
  * second statement that begins *earlier* would seed a second, different opening balance.

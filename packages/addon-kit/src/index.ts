@@ -46,10 +46,14 @@ export {
   isMoneyIn,
   isMoneyOut,
   isMoveMatch,
+  isTrading212Payee,
+  linkMovesBetween,
   matchMoves,
   moveLinkNote,
   type MoveLinkOutcome,
   type MoveMatches,
   type MoveRow,
+  T212_PROVIDER,
+  trading212Refs,
 } from "./move-match";
 export { startBackgroundChecks, type BackgroundChecksOptions } from "./scheduler";

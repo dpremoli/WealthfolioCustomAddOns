@@ -1,10 +1,15 @@
 import { useState } from "react";
 import type { Account, ActivityImport, AddonContext, SnapshotHoldingInput } from "@wealthfolio/addon-sdk";
 import {
+  T212_PROVIDER,
   appendStep,
+  isTrading212Payee,
+  linkMovesBetween,
   markLastDone,
+  moveLinkNote,
   round2,
-  selectNewActivities,
+  trading212Refs,
+  type ExistingActivityLike,
   spendingRulesNote,
   syncSpendingRules,
   type SyncProgress as KitSyncProgress,
@@ -37,7 +42,26 @@ import {
 } from "../lib/mapper";
 import { parseCsv, mapCsvRow } from "../lib/csv";
 import { cardSpendingRules } from "../lib/spending-category";
-import { SymbolResolver, type ResolveDiag } from "../lib/symbol-resolver";
+import { SymbolResolver, importAssetFields, type ResolveDiag } from "../lib/symbol-resolver";
+import { ActivityImporter, describeRejected, type ImportUnit, type RejectedRow } from "../lib/importer";
+import { CARD_FUNDING_COMMENT, fundingForExisting, isFundingId, withCardFunding } from "../lib/card-funding";
+import { foldMonthlyInterest } from "../lib/interest";
+import { repairSplits, type PositionGap } from "../lib/split-repair";
+import {
+  describeRow,
+  mapCurrencyConversion,
+  mapStockSplit,
+  pairStockSplits,
+  splitCorporateRows,
+} from "../lib/corporate-actions";
+import {
+  PortfolioUpdates,
+  compareWithTrading212,
+  resolvePositions,
+  trading212Cash,
+  verificationLines,
+  type Verification,
+} from "../lib/verify";
 import {
   addImportedRefs,
   clearAccountData,
@@ -56,6 +80,7 @@ import {
   setCardLastSync,
   setLastSync,
   setSymbolMap,
+  setVerification,
   updateConnection,
 } from "./use-config";
 
@@ -78,10 +103,6 @@ interface SyncState {
 type ProgressFn = (p: Omit<SyncProgress, "accountName">) => void;
 
 const PAGE_GUARD = 500; // hard cap on pages per endpoint
-
-// Initial activity batch size for checkImport/import. The backend rejects
-// oversized batches with a 422; oversized chunks are adaptively halved at runtime.
-const IMPORT_CHUNK_SIZE = 20;
 
 // Trading 212 caps each CSV export at ~1 year, so a full backfill walks back in
 // one-year windows. Caps the walk so a sparse history can't loop forever.
@@ -151,7 +172,12 @@ async function collectJsonActivities(
   importedRefs: Set<string>,
   accountId: string,
   resolver: SymbolResolver,
-): Promise<{ activities: ActivityImport[]; unresolved: number; nonTrade: Record<string, number> }> {
+): Promise<{
+  activities: ActivityImport[];
+  unresolved: number;
+  unresolvedRows: string[];
+  nonTrade: Record<string, number>;
+}> {
   const orders = await collectSince<HistoricalOrder>(
     (c) => client.pageOrders(c),
     (o) => o.fill?.filledAt || o.order?.createdAt,
@@ -166,6 +192,8 @@ async function collectJsonActivities(
 
   const activities: ActivityImport[] = [];
   let unresolved = 0;
+  // Trades left out because their symbol did not resolve (each leaves a position wrong).
+  const unresolvedRows: string[] = [];
   // Fills that are not trades (splits, stock dividends, spin-offs, …) are not imported;
   // counted so the log says what was left out.
   const nonTrade: Record<string, number> = {};
@@ -183,25 +211,30 @@ async function collectJsonActivities(
     if (!activity) continue;
     const ticker = o.instrument?.ticker ?? o.ticker;
     if (!ticker) continue;
-    const symbol = await resolver.resolve(ticker, o.instrument);
-    if (!symbol) {
+    const resolved = await resolver.resolveDetailed(ticker, o.instrument);
+    if (!resolved) {
       unresolved++;
+      unresolvedRows.push(
+        `Not imported: ${o.side ?? "order"} ${ho.fill?.filledAt ?? o.createdAt ?? ""} ${ticker} ` +
+          `(${o.instrument?.name ?? "?"}, ISIN ${o.instrument?.isin ?? "?"}, order ${o.id}): symbol not matched`,
+      );
       continue;
     }
-    activities.push({ ...activity, symbol });
+    activities.push({ ...activity, ...importAssetFields(resolved) });
   }
 
   for (const d of dividends) {
     if (importedRefs.has(`t212-div-${d.reference}`)) continue;
-    let symbol: string | null = null;
-    if (d.type !== "INTEREST") {
-      symbol = d.ticker ? await resolver.resolve(d.ticker, d.instrument) : null;
-      if (!symbol) {
-        unresolved++;
-        continue;
-      }
+    if (d.type === "INTEREST") {
+      activities.push(mapDividendToActivity(d, accountId, null));
+      continue;
     }
-    activities.push(mapDividendToActivity(d, accountId, symbol));
+    const resolved = d.ticker ? await resolver.resolveDetailed(d.ticker, d.instrument) : null;
+    if (!resolved) {
+      unresolved++;
+      continue;
+    }
+    activities.push({ ...mapDividendToActivity(d, accountId, resolved.symbol), ...importAssetFields(resolved) });
   }
 
   for (const t of transactions) {
@@ -209,7 +242,7 @@ async function collectJsonActivities(
     activities.push(mapTransactionToActivity(t, accountId));
   }
 
-  return { activities, unresolved, nonTrade };
+  return { activities, unresolved, unresolvedRows, nonTrade };
 }
 
 /** Log line for non-trade fills left out of the import, if any. */
@@ -320,36 +353,13 @@ async function categoriseCardSpending(ctx: AddonContext, log: string[]): Promise
   if (note) log.push(note);
 }
 
-/** Marks a row to bypass Wealthfolio's content-hash dedupe (see {@link reconcileWithAccount}). */
-function forced(a: ActivityImport): ActivityImport {
-  return { ...a, forceImport: true };
-}
-
-/**
- * The rows of `batch` the account does not already hold. Wealthfolio's own duplicate
- * check (checkImport's `duplicateOfId`) is a content hash, so it would drop the second
- * of two genuinely identical same-day rows (two equal deposits, two equal fills) and lose
- * real money; the kit's `selectNewActivities` matches by count instead. `fresh` rows are
- * marked `forceImport`; `dropped` are those already present (every row carries an id).
- */
-async function reconcileWithAccount(
-  ctx: AddonContext,
-  accountId: string,
-  batch: ActivityImport[],
-): Promise<{ fresh: ActivityImport[]; dropped: ActivityImport[] }> {
-  if (batch.length === 0) return { fresh: [], dropped: [] };
-  const fresh = selectNewActivities(batch, await ctx.api.activities.getAll(accountId));
-  const kept = new Set(fresh.map((a) => a.id));
-  return { fresh, dropped: batch.filter((a) => !kept.has(a.id)) };
-}
-
 /**
  * Self-contained card pipeline: fetches the connection's card rows ({@link fetchCardActivities})
- * and imports them into the dedicated card account, advancing the card watermark. Used by the
+ * and imports them into the dedicated card account, each with the transfer pair that funds it
+ * from the investing account ({@link withCardFunding}), advancing the card watermark. Used by the
  * HOLDINGS path (whose main account has no activity import) and by incremental TRANSACTIONS
  * syncs (where card data isn't in the JSON feed). The TRANSACTIONS *full backfill* doesn't use
- * this — it routes card rows inline through the shared CSV loop. Import uses the same
- * checkImport → adaptive-halve → import pattern as the main path; card volume is low.
+ * this — it routes card rows inline through the shared CSV loop.
  */
 async function syncCardAccount(
   ctx: AddonContext,
@@ -358,9 +368,10 @@ async function syncCardAccount(
   mainAccountId: string,
   cardAccountId: string,
   resolver: SymbolResolver,
+  importer: ActivityImporter,
   log: string[],
   onProgress: ProgressFn,
-): Promise<{ imported: number; duplicates: number }> {
+): Promise<{ imported: number; duplicates: number; rejected: RejectedRow[] }> {
   // The card windows end "now", so the watermark is when this run started, not finished.
   const startedAt = new Date().toISOString();
   const { cardLastSync } = await getSyncState(ctx, conn.id);
@@ -372,7 +383,7 @@ async function syncCardAccount(
       `Card history refreshed ${Math.round(sinceCard / 60_000)} min ago; next refresh in ` +
         `${Math.ceil((CARD_REFRESH_MS - sinceCard) / 60_000)} min.`,
     );
-    return { imported: 0, duplicates: 0 };
+    return { imported: 0, duplicates: 0, rejected: [] };
   }
   const importedRefs = await getImportedRefs(ctx, conn.id);
   const { activities: acts, complete } = await fetchCardActivities(
@@ -386,55 +397,12 @@ async function syncCardAccount(
     onProgress,
   );
 
-  let imported = 0;
-  let duplicates = 0;
-  const accounted: string[] = [];
-
-  const doImport = async (items: ActivityImport[]): Promise<void> => {
-    if (items.length === 0) return;
-    try {
-      const res = await ctx.api.activities.import(items);
-      imported += res.summary.imported;
-      for (const a of items) if (a.id) accounted.push(a.id);
-    } catch (e) {
-      if (items.length > 1) {
-        const mid = Math.ceil(items.length / 2);
-        await doImport(items.slice(0, mid));
-        await doImport(items.slice(mid));
-        return;
-      }
-      throw new Error(`card import rejected a single activity: ${errDetail(e)} — payload=${JSON.stringify(items[0])}`);
-    }
-  };
-
-  const process = async (chunk: ActivityImport[]): Promise<void> => {
-    if (chunk.length === 0) return;
-    let checked: ActivityImport[];
-    try {
-      checked = await ctx.api.activities.checkImport(chunk);
-    } catch (e) {
-      if (chunk.length > 1) {
-        const mid = Math.ceil(chunk.length / 2);
-        await process(chunk.slice(0, mid));
-        await process(chunk.slice(mid));
-        return;
-      }
-      throw new Error(`card checkImport rejected a single activity: ${errDetail(e)} — payload=${JSON.stringify(chunk[0])}`);
-    }
-    // Duplicates were already removed by `selectNewActivities`; checkImport's own
-    // content-hash `duplicateOfId` would wrongly drop genuine identical same-day rows.
-    await doImport(checked.filter((a) => a.isValid !== false).map(forced));
-  };
-
-  const { fresh, dropped } = await reconcileWithAccount(ctx, cardAccountId, acts);
-  duplicates += dropped.length;
-  for (const a of dropped) if (a.id) accounted.push(a.id);
-  if (fresh.length > 0) onProgress({ phase: "import", message: `Importing ${fresh.length} card activities…` });
-  for (let i = 0; i < fresh.length; i += IMPORT_CHUNK_SIZE) {
-    await process(fresh.slice(i, i + IMPORT_CHUNK_SIZE));
-  }
-
-  if (accounted.length > 0) await addImportedRefs(ctx, conn.id, accounted);
+  if (acts.length > 0) onProgress({ phase: "import", message: `Importing ${acts.length} card activities…` });
+  const out = await importer.import(acts.map((a) => withCardFunding(a, mainAccountId)));
+  if (out.accounted.length > 0) await addImportedRefs(ctx, conn.id, out.accounted);
+  // Count card rows, not the funding transfers that travel with them.
+  const imported = out.importedIds.filter((id) => !isFundingId(id)).length;
+  const duplicates = out.accounted.filter((id) => !isFundingId(id)).length - imported;
   // Advance the watermark once every window was read, even when they were all empty (an
   // account with no card spending): otherwise every sync would repeat the multi-year walk.
   // After a failed export, leave it so the next sync retries the same windows.
@@ -443,8 +411,32 @@ async function syncCardAccount(
   } else {
     log.push("Card history incomplete (an export failed); the next sync retries it.");
   }
-  if (imported > 0 || duplicates > 0) log.push(`Card account: ${imported} imported, ${duplicates} duplicates.`);
-  return { imported, duplicates };
+  if (imported > 0 || duplicates > 0) {
+    log.push(`Card account: ${imported} imported, ${duplicates} duplicates (each with its funding transfer).`);
+  }
+  return { imported, duplicates, rejected: out.rejected };
+}
+
+/**
+ * Adds the funding transfer pair for card rows the card account already holds without one
+ * (imported before the add-on funded card spending), so its balance and the investing account's
+ * cash both match Trading 212. Pairs already there are left out, so this is a no-op once done.
+ */
+async function fundExistingCardRows(
+  importer: ActivityImporter,
+  mainAccountId: string,
+  cardAccountId: string,
+  log: string[],
+): Promise<RejectedRow[]> {
+  const units = fundingForExisting(
+    (await importer.existingIn(cardAccountId)) as (ExistingActivityLike & { id?: string })[],
+    cardAccountId,
+    mainAccountId,
+  );
+  const out = await importer.import(units);
+  if (out.imported > 0) log.push(`Card funding: added ${out.imported / 2} transfer pairs for earlier card rows.`);
+  // Funding pairs for earlier rows are not new activity; keep them out of the sync's counts.
+  return out.rejected;
 }
 
 /**
@@ -601,6 +593,7 @@ async function syncOne(
   resolver: SymbolResolver,
   onProgress: ProgressFn,
   confirmedModeSwitches: Set<string>,
+  updates: PortfolioUpdates,
 ): Promise<SyncResult> {
   const log: string[] = [];
   const base = { connectionId: conn.id, accountId: conn.accountId, accountName: conn.name, log };
@@ -636,9 +629,18 @@ async function syncOne(
           error: `Tracking mode changed to ${liveMode}. Run Sync All and confirm to re-sync.`,
         };
       }
-      log.push(`Tracking mode changed ${current} → ${liveMode}; clearing ${current} data and re-syncing.`);
-      onProgress({ phase: "map", message: `Clearing ${current.toLowerCase()} data…` });
-      await clearAccountData(ctx, conn.id, accountId, current);
+      log.push(`Tracking mode changed ${current} → ${liveMode}; re-syncing in ${liveMode} mode.`);
+      onProgress({ phase: "map", message: `Switching to ${liveMode.toLowerCase()} mode…` });
+      try {
+        log.push(await clearAccountData(ctx, conn.id, accountId, current));
+      } catch (e) {
+        // Leave the connection on its old mode so the user can retry (or switch back) knowingly.
+        const message =
+          `Could not switch to ${liveMode} mode: deleting the ${current} data failed (${errDetail(e)}). ` +
+          "Nothing was re-synced; try again, or switch the account back in Wealthfolio.";
+        log.push(message);
+        return { ...base, imported: 0, duplicates: 0, unresolved: 0, finishedAt: new Date().toISOString(), error: message };
+      }
       await updateConnection(ctx, conn.id, { trackingMode: liveMode });
       mode = liveMode;
     }
@@ -658,14 +660,19 @@ async function syncOne(
       ? await ensureCardAccount(ctx, conn, await client.getAccountSummary(), settings.cardAccountType ?? "CASH")
       : undefined;
 
+    // One importer per connection: it reads each account's activities once for the whole sync.
+    const importer = new ActivityImporter(ctx);
+
     if (mode === "HOLDINGS") {
       const res = await syncHoldings(ctx, client, conn, accountId, resolver, onProgress, log, base);
       const out: SyncResult = { ...res, finishedAt: new Date().toISOString() };
       if (cardAccountId) {
-        const card = await syncCardAccount(ctx, client, conn, accountId, cardAccountId, resolver, log, onProgress);
+        const card = await syncCardAccount(ctx, client, conn, accountId, cardAccountId, resolver, importer, log, onProgress);
+        const rejected = [...card.rejected, ...(await fundExistingCardRows(importer, accountId, cardAccountId, log))];
+        logRejected(log, rejected);
         out.imported += card.imported;
         out.duplicates += card.duplicates;
-        out.card = card;
+        out.card = { imported: card.imported, duplicates: card.duplicates };
         await categoriseCardSpending(ctx, log);
         // Surface the card import in the Summary tab too — HOLDINGS only has Holdings + Card.
         if (card.imported > 0) {
@@ -683,91 +690,46 @@ async function syncOne(
     // per year-window (checkpointing as it goes); other paths import a single batch.
     let imported = 0;
     let duplicates = 0;
-    let invalidCount = 0;
-    let invalidDetail: string | null = null;
     let totalToImport = 0;
     let unresolved = 0;
     const tally: Record<string, number> = {};
+    const rejected: RejectedRow[] = [];
+    // Trades (and corporate actions) that never reached the account: each one leaves a position
+    // wrong, so the sync result says so loudly instead of only counting them.
+    const droppedTrades: string[] = [];
     let cardResult: { imported: number; duplicates: number } | null = null;
+    // Whether this sync finished a full backfill (then the account is checked against Trading 212).
+    let backfillFinished = false;
 
-    // Imports one batch: validates+imports in chunks (halving on backend rejection),
-    // tallies the outcome, and persists this batch's refs so an interrupted backfill
-    // doesn't re-import what already landed. Wealthfolio's checkImport/import rejects
-    // oversized batches with a 422, so we chunk and adaptively halve down to a single
-    // row, which isolates a genuinely bad row.
-    const importActivities = async (batch: ActivityImport[]): Promise<void> => {
-      if (batch.length === 0) return;
-      totalToImport += batch.length;
-      for (const a of batch) {
+    // Imports one batch (see `ActivityImporter`) and persists its refs, so an interrupted
+    // backfill doesn't re-import what already landed. A unit is a row, or a card row with the
+    // transfer pair that funds it.
+    const importActivities = async (units: ImportUnit[]): Promise<void> => {
+      if (units.length === 0) return;
+      for (const a of units.flat()) {
+        // Funding transfers are bookkeeping for a card row, not activity of their own.
+        if (a.comment === CARD_FUNDING_COMMENT) continue;
+        totalToImport++;
         const k = String(a.activityType);
         tally[k] = (tally[k] ?? 0) + 1;
       }
-      const accounted: string[] = [];
-
-      const doImport = async (items: ActivityImport[]): Promise<void> => {
-        if (items.length === 0) return;
-        try {
-          const res = await ctx.api.activities.import(items);
-          imported += res.summary.imported;
-          for (const a of items) if (a.id) accounted.push(a.id);
-        } catch (e) {
-          if (items.length > 1) {
-            const mid = Math.ceil(items.length / 2);
-            await doImport(items.slice(0, mid));
-            await doImport(items.slice(mid));
-            return;
-          }
-          throw new Error(`import rejected a single activity: ${errDetail(e)} — payload=${JSON.stringify(items[0])}`);
-        }
-      };
-
-      const process = async (chunk: ActivityImport[]): Promise<void> => {
-        if (chunk.length === 0) return;
-        let checked: ActivityImport[];
-        try {
-          checked = await ctx.api.activities.checkImport(chunk);
-        } catch (e) {
-          if (chunk.length > 1) {
-            const mid = Math.ceil(chunk.length / 2);
-            await process(chunk.slice(0, mid));
-            await process(chunk.slice(mid));
-            return;
-          }
-          throw new Error(`checkImport rejected a single activity: ${errDetail(e)} — payload=${JSON.stringify(chunk[0])}`);
-        }
-
-        // Duplicates were already removed by `reconcileWithAccount`; checkImport's own
-        // content-hash `duplicateOfId` would wrongly drop genuine identical same-day rows.
-        const invalid = checked.filter((a) => a.isValid === false);
-        const toImport = checked.filter((a) => a.isValid !== false).map(forced);
-        invalidCount += invalid.length;
-        if (!invalidDetail && invalid.length > 0) {
-          const withErrors = invalid.find((a) => a.errors && Object.keys(a.errors).length > 0);
-          invalidDetail = `${withErrors?.errors ? JSON.stringify(withErrors.errors) : "no detail"} — first: ${describeActivity(invalid[0])}`;
-        }
-
-        await doImport(toImport);
-      };
-
-      // Leave out what the account already holds (by content and count), e.g. after a
-      // sync-history reset or an interrupted run.
-      const { fresh, dropped } = await reconcileWithAccount(ctx, accountId, batch);
-      duplicates += dropped.length;
-      for (const a of dropped) if (a.id) accounted.push(a.id);
-
-      for (let i = 0; i < fresh.length; i += IMPORT_CHUNK_SIZE) {
-        const chunk = fresh.slice(i, i + IMPORT_CHUNK_SIZE);
-        onProgress({
-          phase: "import",
-          message: `Importing activities… ${Math.min(i + chunk.length, fresh.length)}/${fresh.length}`,
-          current: i + chunk.length,
-          total: fresh.length,
-        });
-        await process(chunk);
+      const out = await importer.import(units, (done, total) =>
+        onProgress({ phase: "import", message: `Importing activities… ${done}/${total}`, current: done, total }),
+      );
+      // Funding transfers are bookkeeping for their card row; count activities only.
+      const importedNow = out.importedIds.filter((id) => !isFundingId(id)).length;
+      imported += importedNow;
+      duplicates += out.accounted.filter((id) => !isFundingId(id)).length - importedNow;
+      rejected.push(...out.rejected);
+      for (const r of out.rejected) {
+        if (TRADE_TYPES.includes(String(r.activity.activityType))) droppedTrades.push(describeRejected(r));
       }
-
-      if (accounted.length > 0) await addImportedRefs(ctx, conn.id, accounted);
+      if (out.accounted.length > 0) await addImportedRefs(ctx, conn.id, out.accounted);
     };
+
+    // A card row goes with its funding transfer pair; every other row on its own.
+    const unitOf = (a: ActivityImport): ImportUnit =>
+      cardAccountId && a.accountId === cardAccountId ? withCardFunding(a, accountId) : [a];
 
     if (since === null) {
       log.push("Full backfill (no previous sync) via CSV export.");
@@ -853,34 +815,86 @@ async function syncOne(
         }
         emptyStreak = 0;
 
-        const windowActivities: ActivityImport[] = [];
-        for (const row of rows) {
+        const windowUnits: ImportUnit[] = [];
+        const take = (unit: ImportUnit) => {
+          const ids = unit.map((a) => a.id ?? "");
+          if (ids.some((id) => id && (seen.has(id) || importedRefs.has(id)))) return;
+          for (const id of ids) if (id) seen.add(id);
+          windowUnits.push(unit);
+        };
+
+        // Events that span rows: a split is a "close" row and an "open" row, a currency conversion
+        // is two currencies and a fee.
+        const { rest, splitRows, conversionRows } = splitCorporateRows(rows);
+        const { splits, unpaired } = pairStockSplits(splitRows);
+        for (const split of splits) {
+          const resolved = await resolver.resolveDetailed(split.ticker, {
+            isin: split.isin,
+            name: split.name,
+            currency: split.currency,
+          });
+          if (resolved) {
+            take([mapStockSplit(split, accountId, resolved)]);
+          } else {
+            const line = `Not imported: stock split ${split.time.slice(0, 10)} ${split.ticker} (${split.name ?? "?"}, ISIN ${split.isin ?? "?"}): symbol not matched`;
+            log.push(line);
+            droppedTrades.push(line);
+          }
+        }
+        for (const row of unpaired) {
+          const line = `Not imported: ${describeRow(row)}: no matching open/close row, or the ticker changed (a swap into another security, not a split)`;
+          log.push(line);
+          droppedTrades.push(line);
+        }
+        for (const row of conversionRows) {
+          const { units, problem } = mapCurrencyConversion(row, accountId);
+          if (problem) log.push(`Not imported: ${describeRow(row)}: ${problem}`);
+          for (const unit of units) take(unit);
+        }
+
+        for (const row of rest) {
           const act = await mapCsvRow(row, accountId, resolver, cardAccountId);
           if (act) {
             const id = act.id ?? "";
             if (id && !seen.has(id) && !importedRefs.has(id)) {
               seen.add(id);
-              windowActivities.push(act);
+              windowUnits.push(unitOf(act));
             }
-          } else {
-            // Count failed symbol lookups as unresolved; otherwise record the
-            // unmapped action so dropped rows are visible in the log.
-            const action = (row["Action"] ?? "").trim();
-            const a = action.toLowerCase();
-            if (
-              row["Ticker"]?.trim() &&
-              (a.endsWith(" buy") || a.endsWith(" sell") || a.startsWith("dividend"))
-            ) {
-              unresolved++;
-            } else if (action) {
-              skipped[action] = (skipped[action] ?? 0) + 1;
-            }
+            continue;
+          }
+          // Say exactly which rows were left out and why, so a wrong position can be traced.
+          const action = (row["Action"] ?? "").trim();
+          const a = action.toLowerCase();
+          const ticker = row["Ticker"]?.trim();
+          const isTrade = a.endsWith(" buy") || a.endsWith(" sell");
+          if (ticker && (isTrade || a.startsWith("dividend"))) {
+            unresolved++;
+            const matched = await resolver.resolveDetailed(ticker, { isin: row["ISIN"]?.trim() || undefined });
+            const why = matched ? "no usable quantity, price or amount" : "symbol not matched";
+            const line =
+              `Not imported: ${action} ${row["Time"] ?? ""} ${ticker} (${row["Name"] ?? "?"}, ISIN ${row["ISIN"] || "?"}, ` +
+              `qty ${row["No. of shares"] || "?"}, ID ${row["ID"] || "?"}): ${why}`;
+            log.push(line);
+            if (isTrade) droppedTrades.push(line);
+          } else if (action) {
+            skipped[action] = (skipped[action] ?? 0) + 1;
           }
         }
 
+        // Optionally fold the daily interest of finished months into monthly totals.
+        const singles = foldMonthlyInterest(
+          windowUnits.filter((u) => u.length === 1).map((u) => u[0]),
+          {
+            enabled: settings.monthlyInterest === true,
+            accountId,
+            before: new Date(backfillStart),
+            windowKey: windowStart.toISOString().slice(0, 10),
+            existing: await importer.existingIn(accountId),
+          },
+        );
         // Import this window and checkpoint before moving on, so an interruption
         // resumes from here rather than re-fetching everything already imported.
-        await importActivities(windowActivities);
+        await importActivities([...windowUnits.filter((u) => u.length > 1), ...singles.map((a) => [a])]);
         windowEnd = windowStart;
         await setBackfillCheckpoint(ctx, conn.id, windowStart.toISOString());
       }
@@ -894,7 +908,7 @@ async function syncOne(
       if (exportFailed) {
         // CSV unavailable — use JSON paging for the initial full sync.
         log.push("CSV export unavailable → falling back to JSON paging.");
-        const { activities: jsonActs, unresolved: u, nonTrade } = await collectJsonActivities(
+        const { activities: jsonActs, unresolved: u, unresolvedRows, nonTrade } = await collectJsonActivities(
           client,
           null,
           importedRefs,
@@ -902,9 +916,11 @@ async function syncOne(
           resolver,
         );
         unresolved += u;
+        for (const line of unresolvedRows) log.push(line);
+        droppedTrades.push(...unresolvedRows);
         const note = nonTradeNote(nonTrade);
         if (note) log.push(note);
-        await importActivities(jsonActs);
+        await importActivities(jsonActs.map(unitOf));
         backfillComplete = true;
       }
 
@@ -919,6 +935,7 @@ async function syncOne(
         // Card rows were routed inline during the backfill above — mark the card
         // pipeline backfilled so incremental syncs only fetch a recent top-up window.
         if (cardAccountId) await setCardLastSync(ctx, conn.id, watermark);
+        backfillFinished = true;
       } else {
         log.push("Backfill incomplete — next sync resumes from the checkpoint.");
       }
@@ -926,7 +943,7 @@ async function syncOne(
       // ── JSON incremental (since last watermark) ──────────────────────────
       log.push(`Incremental sync since ${since}.`);
       onProgress({ phase: "export", message: "Fetching recent activity…" });
-      const { activities: jsonActs, unresolved: u, nonTrade } = await collectJsonActivities(
+      const { activities: jsonActs, unresolved: u, unresolvedRows, nonTrade } = await collectJsonActivities(
         client,
         since,
         importedRefs,
@@ -934,9 +951,11 @@ async function syncOne(
         resolver,
       );
       unresolved += u;
+      for (const line of unresolvedRows) log.push(line);
+      droppedTrades.push(...unresolvedRows);
       const note = nonTradeNote(nonTrade);
       if (note) log.push(note);
-      await importActivities(jsonActs);
+      await importActivities(jsonActs.map(unitOf));
       // Pages are read newest-first from when this run started; anything newer is for
       // the next run, so the watermark is the start time, not the finish time.
       await setLastSync(ctx, conn.id, syncStartedAt);
@@ -945,12 +964,15 @@ async function syncOne(
       // via its own watermark: a one-time backfill the first time extraction is on, then a
       // recent top-up window thereafter.
       if (cardAccountId) {
-        cardResult = await syncCardAccount(ctx, client, conn, accountId, cardAccountId, resolver, log, onProgress);
-        imported += cardResult.imported;
-        duplicates += cardResult.duplicates;
+        const card = await syncCardAccount(ctx, client, conn, accountId, cardAccountId, resolver, importer, log, onProgress);
+        cardResult = { imported: card.imported, duplicates: card.duplicates };
+        rejected.push(...card.rejected);
+        imported += card.imported;
+        duplicates += card.duplicates;
       }
     }
 
+    if (cardAccountId) rejected.push(...(await fundExistingCardRows(importer, accountId, cardAccountId, log)));
     if (cardResult) tally.Card = (tally.Card ?? 0) + cardResult.imported;
     if (cardAccountId) await categoriseCardSpending(ctx, log);
 
@@ -959,28 +981,48 @@ async function syncOne(
         .map(([k, v]) => `${v} ${k}`)
         .join(", ") || "none";
     log.push(`Mapped ${totalToImport} activities: ${breakdownLine}.`);
-    if (unresolved > 0) log.push(`${unresolved} rows skipped (symbol not matched).`);
-    log.push(
-      `Import: ${imported} imported, ${duplicates} duplicates, ${invalidCount} invalid.`,
-    );
+    if (unresolved > 0) log.push(`${unresolved} rows skipped (listed above).`);
+    logRejected(log, rejected);
+    log.push(`Import: ${imported} imported, ${duplicates} duplicates, ${rejected.length} not imported.`);
 
-    const finishedAt = new Date().toISOString();
-
-    // Nothing imported but some rows were flagged invalid — surface why.
-    if (imported === 0 && invalidCount > 0) {
-      return {
-        ...base,
-        imported,
-        duplicates,
-        unresolved,
-        breakdown: tally,
-        card: cardResult ?? undefined,
-        finishedAt,
-        error: `${invalidCount}/${totalToImport} rows invalid: ${invalidDetail ?? "no detail"}`,
-      };
+    // The acceptance test of a backfill: do Wealthfolio's holdings and cash match Trading 212's?
+    // Checked when a backfill finishes, and on every later sync until it matches.
+    let verification: Verification | undefined;
+    const previous = (await getSyncState(ctx, conn.id)).verification;
+    if (backfillFinished || (previous && !previous.ok)) {
+      try {
+        verification = await verifyAndRepair(ctx, client, accountId, resolver, importer, updates, onProgress, log);
+        await setVerification(ctx, conn.id, verification);
+        log.push(...verificationLines(verification));
+      } catch (e) {
+        log.push(`Could not compare with Trading 212's positions and cash: ${errDetail(e)}`);
+      }
     }
 
-    return { ...base, imported, duplicates, unresolved, breakdown: tally, card: cardResult ?? undefined, finishedAt };
+    const finishedAt = new Date().toISOString();
+    const result: SyncResult = {
+      ...base,
+      imported,
+      duplicates,
+      unresolved,
+      breakdown: tally,
+      card: cardResult ?? undefined,
+      finishedAt,
+      verification,
+    };
+    // A trade that never reached the account leaves its position wrong: say so loudly.
+    if (droppedTrades.length > 0) {
+      result.error =
+        `${droppedTrades.length} trade or corporate-action row${droppedTrades.length === 1 ? " was" : "s were"} not imported, so ` +
+        `holdings will not match Trading 212 (see the log). First: ${droppedTrades[0]}`;
+    } else if (verification && !verification.ok && verification.settled) {
+      result.error =
+        `Does not match Trading 212: ${verification.mismatches.length} difference` +
+        `${verification.mismatches.length === 1 ? "" : "s"} (see the log). First: ${verification.mismatches[0]}`;
+    } else if (imported === 0 && rejected.length > 0) {
+      result.error = `${rejected.length} rows not imported: ${describeRejected(rejected[0])}`;
+    }
+    return result;
   } catch (err) {
     const message = isUnauthorized(err)
       ? "Trading 212 rejected this API key. Check it in Settings."
@@ -988,6 +1030,89 @@ async function syncOne(
     log.push(`Error: ${message}`);
     return { ...base, imported: 0, duplicates: 0, unresolved: 0, finishedAt: new Date().toISOString(), error: message };
   }
+}
+
+/** How long the check waits for Wealthfolio to finish recalculating after the import. */
+const VERIFY_WAIT_MS = 3 * 60 * 1000;
+
+/**
+ * Compares the account in Wealthfolio with Trading 212: the holdings Wealthfolio derived from the
+ * imported activities (`portfolio.getHoldings`, the numbers the user sees) against `/positions`,
+ * and the cash against `/account/summary` — the same calls HOLDINGS mode snapshots from. Waits
+ * for the recalculation the import queued first, since holdings read straight after an import
+ * are stale.
+ */
+async function verifyAccount(
+  ctx: AddonContext,
+  client: Trading212Client,
+  accountId: string,
+  resolver: SymbolResolver,
+  importer: ActivityImporter,
+  updates: PortfolioUpdates,
+  onProgress: ProgressFn,
+): Promise<{ verification: Verification; gaps: PositionGap[] }> {
+  onProgress({ phase: "done", message: "Checking holdings and cash against Trading 212…" });
+  const settled =
+    importer.lastWriteAt === 0 ? true : await updates.settledAfter(importer.lastWriteAt, VERIFY_WAIT_MS);
+  const summary = await client.getAccountSummary();
+  const positions = await resolvePositions(await client.getPositions(), resolver);
+  const holdings = await ctx.api.portfolio.getHoldings(accountId);
+  // Wallets in other currencies are converted into the account currency; without rates (or the
+  // permission to read them) those wallets are noted as not compared rather than failed.
+  const rates = await (async () => {
+    try {
+      return await ctx.api.exchangeRates.getAll();
+    } catch {
+      return [];
+    }
+  })();
+  const { gaps, ...cmp } = compareWithTrading212({
+    positions,
+    cash: trading212Cash(summary),
+    accountCurrency: summary.currency || "GBP",
+    holdings,
+    rates,
+  });
+  return { verification: { ...cmp, checkedAt: new Date().toISOString(), settled }, gaps };
+}
+
+/**
+ * Checks the account against Trading 212 and, for a position that is short by a split Trading 212
+ * never listed in its history, adds that split ({@link repairSplits}) and checks again. Only
+ * splits whose date and ratio reproduce Trading 212's quantity exactly are added.
+ */
+async function verifyAndRepair(
+  ctx: AddonContext,
+  client: Trading212Client,
+  accountId: string,
+  resolver: SymbolResolver,
+  importer: ActivityImporter,
+  updates: PortfolioUpdates,
+  onProgress: ProgressFn,
+  log: string[],
+): Promise<Verification> {
+  let { verification, gaps } = await verifyAccount(ctx, client, accountId, resolver, importer, updates, onProgress);
+  // The repair compares the account's activities with Trading 212's quantity, not Wealthfolio's
+  // holdings, so it does not wait for the recalculation: if that was merely not finished, the
+  // activities agree with Trading 212 and nothing is added.
+  if (!verification.ok && gaps.length > 0) {
+    const added = await repairSplits(importer, resolver, accountId, gaps, log);
+    if (added > 0) {
+      log.push(`Added ${added} missing split${added === 1 ? "" : "s"}; checking again.`);
+      ({ verification } = await verifyAccount(ctx, client, accountId, resolver, importer, updates, onProgress));
+    }
+  }
+  return verification;
+}
+
+/** Activity types whose loss leaves a position wrong. */
+const TRADE_TYPES = ["BUY", "SELL", "SPLIT"];
+
+/** Logs each row Wealthfolio did not import (capped, so a systematic failure stays readable). */
+function logRejected(log: string[], rejected: RejectedRow[]): void {
+  const MAX = 200;
+  for (const r of rejected.slice(0, MAX)) log.push(describeRejected(r));
+  if (rejected.length > MAX) log.push(`…and ${rejected.length - MAX} more rows not imported.`);
 }
 
 /** Extracts a readable message from a thrown value (Error, string, or object). */
@@ -1001,10 +1126,30 @@ function errDetail(e: unknown): string {
   }
 }
 
-/** One-line summary of an activity for diagnostic error messages. */
-function describeActivity(a: ActivityImport | undefined): string {
-  if (!a) return "(none)";
-  return `${a.activityType} ${a.symbol ?? "-"} ${String(a.date ?? "")} amt=${a.amount ?? "-"} qty=${a.quantity ?? "-"} px=${a.unitPrice ?? "-"} fee=${a.fee ?? "-"} ccy=${a.currency ?? "-"} fx=${a.fxRate ?? "-"}`;
+/**
+ * Finds the bank side of an investing account's deposits and withdrawals (a Monzo or Revolut
+ * account another add-on keeps in Wealthfolio, say) and turns each confident pair into a linked
+ * transfer (kit `linkMovesBetween`: same amount and currency, within 3 days, unique). Only bank
+ * rows whose payee points at Trading 212 take part — its name ("To Trading 212 UK Limited",
+ * "Trading TwoOneTwo") or one of the user's Trading 212 account numbers quoted as the reference.
+ * Rows without a counterpart stay deposits and withdrawals: Wealthfolio's ISA allowance counts a
+ * deposit, and a linked transfer from outside the ISA, but not an unlinked transfer. The card
+ * funding pairs are already linked and are left out. Never throws.
+ */
+async function linkWithBankAccounts(ctx: AddonContext, accountId: string) {
+  try {
+    const accounts = await ctx.api.accounts.getAll();
+    const refs = trading212Refs(accounts);
+    return await linkMovesBetween(ctx, {
+      accounts,
+      mine: [accountId],
+      theirs: (a) => a.provider !== T212_PROVIDER && a.accountType !== "SECURITIES",
+      mineRow: (r) => r.comment !== CARD_FUNDING_COMMENT,
+      theirRow: (r) => isTrading212Payee(r.comment, refs),
+    });
+  } catch (err) {
+    return { linked: 0, ambiguous: [] as string[], failed: [(err as Error).message] };
+  }
 }
 
 /** Options for {@link runSyncAll}. */
@@ -1047,10 +1192,29 @@ export async function runSyncAll(
     await getSymbolMap(ctx),
   );
 
-  const perAccount: SyncResult[] = [];
-  for (const conn of connections) {
-    const report: ProgressFn = (p) => opts.onProgress?.({ accountName: conn.name, ...p });
-    perAccount.push(await syncOne(ctx, settings, conn, resolver, report, confirmedModeSwitches));
+  // Watches Wealthfolio's recalculations, so a check after an import reads settled holdings.
+  const updates = new PortfolioUpdates(ctx);
+  // Trading 212 rate-limits per API key, so connections (each with its own key) sync side by
+  // side: an Invest and an ISA backfill export and import at the same time.
+  let perAccount: SyncResult[];
+  try {
+    perAccount = await Promise.all(
+      connections.map((conn) => {
+        const report: ProgressFn = (p) => opts.onProgress?.({ accountName: conn.name, ...p });
+        return syncOne(ctx, settings, conn, resolver, report, confirmedModeSwitches, updates);
+      }),
+    );
+  } finally {
+    updates.stop();
+  }
+
+  // Pair each account's deposits and withdrawals with the bank side of the move, one account at a
+  // time so two accounts never race for the same bank row.
+  for (const r of perAccount) {
+    const conn = connections.find((c) => c.id === r.connectionId);
+    if (!conn || conn.needsCredentials || connectionMode(conn) !== "TRANSACTIONS") continue;
+    const note = moveLinkNote("your bank accounts", await linkWithBankAccounts(ctx, r.accountId));
+    if (note) r.log.push(note);
   }
 
   if (resolver.isDirty) await setSymbolMap(ctx, resolver.snapshot());

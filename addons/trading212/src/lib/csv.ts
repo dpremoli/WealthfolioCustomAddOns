@@ -1,7 +1,7 @@
 import type { ActivityImport } from "@wealthfolio/addon-sdk";
 import { cashSymbol } from "@wf-addons/kit";
 import { accountPerActivityRate, chargesInActivityCurrency } from "./mapper";
-import type { SymbolResolver } from "./symbol-resolver";
+import { importAssetFields, type SymbolResolver } from "./symbol-resolver";
 import { mapSpendingCategory } from "./spending-category";
 
 type ActivityType = ActivityImport["activityType"];
@@ -79,7 +79,7 @@ export function parseCsv(text: string): Record<string, string>[] {
 }
 
 /** Parses a numeric string from a T212 CSV. Removes comma thousands-separators. */
-function parseAmount(s: string | undefined): number {
+export function parseAmount(s: string | undefined): number {
   if (!s || !s.trim()) return 0;
   const clean = s.trim().replace(/\s/g, "").replace(/,/g, "");
   const n = parseFloat(clean);
@@ -87,7 +87,7 @@ function parseAmount(s: string | undefined): number {
 }
 
 /** Returns the first non-empty value from the given column name candidates. */
-function col(row: Record<string, string>, ...names: string[]): string {
+export function col(row: Record<string, string>, ...names: string[]): string {
   for (const n of names) {
     const v = row[n];
     if (v !== undefined && v !== "") return v;
@@ -101,7 +101,7 @@ function col(row: Record<string, string>, ...names: string[]): string {
  * import expects ISO 8601, so we insert the `T` and append `Z` (T212 times are UTC).
  * Already-ISO values (with `T` and a `Z`/offset) pass through unchanged.
  */
-function toIsoDate(s: string): string {
+export function toIsoDate(s: string): string {
   const t = s.trim();
   // Already ISO with a timezone — leave as-is.
   if (/T\d{2}:\d{2}/.test(t) && /(Z|[+-]\d{2}:?\d{2})$/.test(t)) return t;
@@ -144,6 +144,15 @@ function tradeFxAndFee(
       {
         amount: Math.abs(parseAmount(row["Currency conversion fee"])),
         currency: col(row, "Currency (Currency conversion fee)") || accountCurrency,
+      },
+      // Taxes Trading 212 adds to the trade; its Total includes them.
+      {
+        amount: Math.abs(parseAmount(row["Stamp duty reserve tax"])),
+        currency: col(row, "Currency (Stamp duty reserve tax)") || accountCurrency,
+      },
+      {
+        amount: Math.abs(parseAmount(row["French transaction tax"])),
+        currency: col(row, "Currency (French transaction tax)") || accountCurrency,
       },
     ],
     priceCurrency,
@@ -205,7 +214,9 @@ export async function mapCsvRow(
     actionLower === "deposit" ||
     actionLower === "withdrawal" ||
     actionLower === "withdraw" ||
-    actionLower.includes("interest");
+    actionLower.includes("interest") ||
+    actionLower === "result adjustment" ||
+    actionLower === "stock distribution";
   if (!csvId && !actionLower.startsWith("dividend") && !cashAction) return null;
   const cashId = csvId || stableId(actionLower);
 
@@ -218,15 +229,15 @@ export async function mapCsvRow(
     const priceCurrency = col(row, "Currency (Price / share)") || currency;
     // Pass the share's quote currency so cross-listings resolve to the right
     // exchange (e.g. a USD price picks TSM over the MXN-quoted TSMN).
-    const symbol = await resolver.resolve(ticker, { isin, name, currency: priceCurrency });
-    if (!symbol) return null;
+    const resolved = await resolver.resolveDetailed(ticker, { isin, name, currency: priceCurrency });
+    if (!resolved) return null;
     const { fxRate, fee } = tradeFxAndFee(row, qty, unitPrice, priceCurrency, currency);
     return {
       id: `t212-order-${csvId}`,
       accountId,
       activityType: "BUY" as ActivityType,
       date,
-      symbol,
+      ...importAssetFields(resolved),
       quantity: qty,
       unitPrice,
       fee: fee > 0 ? fee : undefined,
@@ -245,15 +256,15 @@ export async function mapCsvRow(
     const unitPrice = parseAmount(row["Price / share"]);
     if (qty <= 0 || unitPrice <= 0) return null;
     const priceCurrency = col(row, "Currency (Price / share)") || currency;
-    const symbol = await resolver.resolve(ticker, { isin, name, currency: priceCurrency });
-    if (!symbol) return null;
+    const resolved = await resolver.resolveDetailed(ticker, { isin, name, currency: priceCurrency });
+    if (!resolved) return null;
     const { fxRate, fee } = tradeFxAndFee(row, qty, unitPrice, priceCurrency, currency);
     return {
       id: `t212-order-${csvId}`,
       accountId,
       activityType: "SELL" as ActivityType,
       date,
-      symbol,
+      ...importAssetFields(resolved),
       quantity: qty,
       unitPrice,
       fee: fee > 0 ? fee : undefined,
@@ -265,19 +276,101 @@ export async function mapCsvRow(
     };
   }
 
+  // ── STOCK DISTRIBUTION (spin-off): shares received for nothing ──────────
+  // New shares at zero cost, with no cash and no contribution (an internal transfer in).
+  if (actionLower === "stock distribution") {
+    const qty = parseAmount(row["No. of shares"]);
+    if (!ticker || qty <= 0) return null;
+    const priceCurrency = col(row, "Currency (Price / share)") || currency;
+    const resolved = await resolver.resolveDetailed(ticker, { isin, name, currency: priceCurrency });
+    if (!resolved) return null;
+    return {
+      id: `t212-dist-${cashId}`,
+      accountId,
+      activityType: "TRANSFER_IN" as ActivityType,
+      date,
+      ...importAssetFields(resolved),
+      quantity: qty,
+      unitPrice: 0,
+      currency: priceCurrency,
+      isExternal: false,
+      isValid: true,
+      isDraft: false,
+      comment: ["Stock distribution", name].filter(Boolean).join(" · "),
+    };
+  }
+
+  // ── ADJUSTMENTS: dividend/withholding-tax corrections, rights proceeds ───
+  // Trading 212 signs these: a credit adds cash, a clawback ("Dividend Correction due to wrongful
+  // distribution") takes it back. Wealthfolio amounts are positive, so a clawback is a fee.
+  if (actionLower === "dividend adjustment" || actionLower === "result adjustment") {
+    const signed = parseAmount(totalStr);
+    if (signed === 0) return null;
+    if (signed < 0) {
+      return {
+        id: `t212-txn-${cashId}`,
+        accountId,
+        activityType: "FEE" as ActivityType,
+        date,
+        symbol: cashSymbol(currency),
+        amount: Math.abs(signed),
+        currency,
+        isValid: true,
+        isDraft: false,
+        comment: notes,
+      };
+    }
+    if (ticker && actionLower.startsWith("dividend")) {
+      const priceCurrency = col(row, "Currency (Price / share)") || undefined;
+      const resolved = await resolver.resolveDetailed(ticker, { isin, name, currency: priceCurrency });
+      if (resolved) {
+        return {
+          id: `t212-div-${stableId(actionLower)}`,
+          accountId,
+          activityType: "DIVIDEND" as ActivityType,
+          date,
+          ...importAssetFields(resolved),
+          amount: signed,
+          currency,
+          isValid: true,
+          isDraft: false,
+          comment: notes,
+        };
+      }
+    }
+    return {
+      id: `t212-txn-${cashId}`,
+      accountId,
+      activityType: "INTEREST" as ActivityType,
+      date,
+      symbol: cashSymbol(currency),
+      amount: signed,
+      currency,
+      isValid: true,
+      isDraft: false,
+      comment: notes,
+    };
+  }
+
   // ── DIVIDEND ───────────────────────────────────────────────────────────
   if (actionLower.startsWith("dividend")) {
     if (total <= 0) return null;
     // A dividend tied to a security (has a ticker) → DIVIDEND on that symbol.
     if (ticker) {
-      const symbol = await resolver.resolve(ticker, { isin, name });
-      if (!symbol) return null;
+      // Same hints as the trades, so the cached listing is the one the trades and the HOLDINGS
+      // snapshot use (the per-share price column carries the instrument's currency).
+      const priceCurrency = col(row, "Currency (Price / share)") || undefined;
+      const resolved = await resolver.resolveDetailed(ticker, { isin, name, currency: priceCurrency });
+      if (!resolved) return null;
       return {
         id: `t212-div-${stableId(actionLower)}`,
         accountId,
         activityType: "DIVIDEND" as ActivityType,
         date,
-        symbol,
+        ...importAssetFields(resolved),
+        // A return of capital is the company handing back part of the price paid: it lowers the
+        // cost basis instead of counting as income.
+        ...(/return of capital/i.test(action) ? { subtype: "RETURN_OF_CAPITAL" } : {}),
         amount: total,
         currency,
         isValid: true,
@@ -387,11 +480,13 @@ export async function mapCsvRow(
   }
 
   // ── FEE / CHARGE (standalone rows — fees embedded in trades are in the fee field) ─
+  // A plain "Currency conversion" row moves cash from one currency to another; it is not a fee
+  // (booking it as one took the whole converted amount out of the account). Its fee, when
+  // charged, has its own "Currency conversion fee" row.
   if (
     actionLower.includes("fee") ||
     actionLower.includes("charge") ||
-    actionLower.includes("stamp duty") ||
-    actionLower.includes("currency conversion")
+    actionLower.includes("stamp duty")
   ) {
     if (total <= 0) return null;
     return {

@@ -1,13 +1,13 @@
 {
   "id": "trading212-addon",
   "name": "Trading 212 Sync",
-  "version": "2.5.0",
+  "version": "2.6.0",
   "description": "Sync your Trading 212 investment account (trades, dividends, deposits, withdrawals, fees and interest) into Wealthfolio, directly from the Trading 212 API.",
   "author": "dpremoli",
   "license": "GPL-3.0-only",
   "main": "dist/addon.js",
-  "sdkVersion": "3.9.0",
-  "minWealthfolioVersion": "3.9.0",
+  "sdkVersion": "3.11.0",
+  "minWealthfolioVersion": "3.11.0",
   "enabled": true,
   "keywords": ["trading212", "broker", "sync", "api", "investments"],
   "network": {
@@ -32,8 +32,8 @@
   },
   "hostDependencies": {
     "@tanstack/react-query": "^5.90.0",
-    "@wealthfolio/addon-sdk": "^3.9.0",
-    "@wealthfolio/ui": "^3.9.0",
+    "@wealthfolio/addon-sdk": "^3.11.0",
+    "@wealthfolio/ui": "^3.11.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
   },
@@ -75,8 +75,18 @@
     },
     {
       "category": "events",
-      "functions": ["onUpdateComplete"],
-      "purpose": "Trigger a background refresh of already-synced accounts when Wealthfolio refreshes its portfolio"
+      "functions": ["onUpdateStart", "onUpdateComplete"],
+      "purpose": "Trigger a background refresh of already-synced accounts when Wealthfolio refreshes its portfolio, and wait for the recalculation an import queued before checking the account against Trading 212"
+    },
+    {
+      "category": "currency",
+      "functions": ["getAll"],
+      "purpose": "Convert the cash Wealthfolio holds in other currencies (a GBP or USD wallet) into the account currency when comparing it with Trading 212's total"
+    },
+    {
+      "category": "portfolio",
+      "functions": ["getHoldings"],
+      "purpose": "After a Transactions-mode backfill, compare the holdings and cash Wealthfolio derived from the imported activities with Trading 212's positions and cash"
     },
     {
       "category": "ui",

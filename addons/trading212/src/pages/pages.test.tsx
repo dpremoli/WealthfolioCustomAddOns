@@ -119,7 +119,8 @@ describe("pages (smoke)", () => {
     fireEvent.click(screen.getByText("Cash ISA"));
 
     expect(screen.queryByPlaceholderText("API key ID")).toBeNull();
-    expect((screen.getByPlaceholderText("Trading 212 Cash ISA") as HTMLInputElement).value).toBe(
+    // The name field appears once the Cash ISA lookup has found there is no account yet.
+    expect(((await screen.findByPlaceholderText("Trading 212 Cash ISA")) as HTMLInputElement).value).toBe(
       "Trading 212 Cash ISA",
     );
     const input = screen.getByTestId("t212-cash-isa-files") as HTMLInputElement;

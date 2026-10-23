@@ -528,3 +528,112 @@ describe("mapCsvRow — currency conversion", () => {
     expect(await mapCsvRow(cashRow("Currency conversion", { Total: "1000", ID: "CC1" }), ACC, makeResolver())).toBeNull();
   });
 });
+
+describe("mapCsvRow — rows seen in real exports", () => {
+  const R = makeResolver({
+    MDT_US_EQ: "MDT|XNYS",
+    TROW_US_EQ: "TROW|XNAS",
+    HOST_US_EQ: "HOST|XNAS",
+  });
+
+  it("books a stock distribution as shares received at no cost, internal (no contribution)", async () => {
+    const act = await mapCsvRow(
+      tradeRow("Stock distribution", {
+        Ticker: "HOST_US_EQ",
+        ISIN: "US42227T3032",
+        Name: "Host Digital",
+        "No. of shares": "0.01440327",
+        "Price / share": "0",
+        Total: "0",
+        ID: "",
+      }),
+      ACC,
+      R,
+    );
+    expect(act).toMatchObject({
+      activityType: "TRANSFER_IN",
+      symbol: "HOST",
+      exchangeMic: "XNAS",
+      instrumentType: "EQUITY",
+      quantity: 0.01440327,
+      unitPrice: 0,
+      currency: "USD",
+      isExternal: false,
+      comment: "Stock distribution · Host Digital",
+    });
+    expect(act!.id).toMatch(/^t212-dist-/);
+  });
+
+  it("a dividend adjustment that is a clawback takes the cash back instead of paying it", async () => {
+    const act = await mapCsvRow(
+      cashRow("Dividend adjustment", {
+        Total: "-0.02",
+        "Currency (Total)": "EUR",
+        Notes: "SEMB - Dividend Correction due to wrongful distribution",
+        ID: "ADJ1",
+      }),
+      ACC,
+      R,
+    );
+    expect(act).toMatchObject({ activityType: "FEE", amount: 0.02, currency: "EUR", symbol: "$CASH-EUR" });
+    expect(act!.comment).toContain("wrongful distribution");
+  });
+
+  it("a positive dividend or result adjustment is cash income", async () => {
+    for (const [action, notes] of [
+      ["Dividend adjustment", "Chubb Ltd dividend payment of 0.86 per share, ex-date 14.09.2023"],
+      ["Result adjustment", "Withholding tax refund - interest on cash Q4 2023."],
+      ["Result adjustment", "Proceeds from sale of Pennon Group PLC rights (PNNN)"],
+    ]) {
+      const act = await mapCsvRow(cashRow(action, { Total: "1.71", "Currency (Total)": "EUR", Notes: notes, ID: "" }), ACC, R);
+      expect(act).toMatchObject({ activityType: "INTEREST", amount: 1.71, currency: "EUR", comment: notes });
+    }
+  });
+
+  it("a return of capital reduces cost basis (subtype) rather than counting as income", async () => {
+    const act = await mapCsvRow(
+      tradeRow("Dividend (Return of capital non us)", {
+        Ticker: "MDT_US_EQ",
+        ISIN: "IE00BTN1Y115",
+        Name: "Medtronic",
+        "No. of shares": "0.0362032",
+        "Price / share": "0.435",
+        "Exchange rate": "0.634985",
+        Total: "0.01",
+        "Currency (Total)": "EUR",
+        ID: "",
+      }),
+      ACC,
+      R,
+    );
+    expect(act).toMatchObject({ activityType: "DIVIDEND", subtype: "RETURN_OF_CAPITAL", symbol: "MDT", exchangeMic: "XNYS", amount: 0.01 });
+  });
+
+  it("a bonus dividend is a plain cash dividend, with no subtype", async () => {
+    const act = await mapCsvRow(
+      tradeRow("Dividend (Bonus)", { Ticker: "TROW_US_EQ", ISIN: "US74144T1088", Total: "0.17", "Currency (Total)": "EUR", ID: "" }),
+      ACC,
+      R,
+    );
+    expect(act).toMatchObject({ activityType: "DIVIDEND", amount: 0.17 });
+    expect("subtype" in act!).toBe(false);
+  });
+
+  it("puts stamp duty reserve tax (and French transaction tax) into the trade's fee", async () => {
+    const act = await mapCsvRow(
+      tradeRow("Market buy", {
+        "Price / share": "100",
+        "Currency (Price / share)": "GBP",
+        "Exchange rate": "1",
+        "Charge amount": "0.50",
+        "Stamp duty reserve tax": "0.30",
+        "Currency (Stamp duty reserve tax)": "GBP",
+        "French transaction tax": "0.20",
+        "Currency (French transaction tax)": "GBP",
+      }),
+      ACC,
+      RESOLVER,
+    );
+    expect(act!.fee).toBeCloseTo(1.0, 6);
+  });
+});

@@ -280,7 +280,7 @@ describe("useSync — JSON incremental path", () => {
     });
 
     const r = result.current.results!.perAccount[0];
-    expect(r.error).toMatch(/^5 trade rows were not imported, so holdings will not match Trading 212/);
+    expect(r.error).toMatch(/^5 trade or corporate-action rows were not imported, so holdings will not match Trading 212/);
     const notImported = r.log.filter((l) => l.startsWith("Not imported: BUY 2026-04-01 AAPL"));
     expect(notImported).toHaveLength(5);
     expect(notImported[0]).toMatch(/\(t212-order-1\): checkImport refused it: Unprocessable Entity/);
@@ -977,6 +977,53 @@ describe("useSync — tracking-mode drift", () => {
     expect(snapshotsSave).toHaveBeenCalledTimes(1);
     // Connection's recorded mode updated to the new mode.
     expect(JSON.parse(storage.get("t212_connections")!)[0].trackingMode).toBe("HOLDINGS");
+  });
+});
+
+describe("useSync — corporate actions and currency conversions in a backfill", () => {
+  // Columns as in CSV_HDR: Action,Time,ISIN,Ticker,Name,No. of shares,Price / share,Currency (Price / share),
+  // Exchange rate,Total,Currency (Total),Withholding tax,Currency (Withholding tax),Charge amount,
+  // Currency (Charge amount),Notes,ID,Currency conversion fee,Currency (Currency conversion fee)
+  const csv = [
+    CSV_HDR,
+    "Stock split close,2026-07-02T07:28:15Z,US22788C1053,CRWD_US_EQ,CrowdStrike,0.17237746,471.87,USD,1.16382887,69.89,EUR,,,,,,SPL1,,",
+    "Stock split open,2026-07-02T07:28:15Z,US22788C1053,CRWD_US_EQ,CrowdStrike,0.68950984,117.97,USD,1.16382887,69.89,EUR,,,,,,SPL2,,",
+    "Currency conversion,2025-09-04T13:06:05Z,,,,,,,,-13.00,GBP,,,,,10000.00 EUR -> 8665.30 GBP,FX1,-13.00,GBP",
+    "Stock distribution,2025-02-11T09:00:00Z,US42227T3032,HOST_US_EQ,Host Digital,0.01440327,0,USD,,0,EUR,,,,,,DST1,,",
+  ].join("\n");
+
+  it("imports a split as SPLIT, a conversion as one linked-able unit plus its fee, and a distribution at no cost", async () => {
+    let downloads = 0;
+    net(async (url: string) => {
+      const u = String(url);
+      if (u.includes("amazonaws.com")) return textResponse(++downloads === 1 ? csv : CSV_HDR);
+      if (u.includes("/exports")) return jsonResponse([FINISHED_REPORT]);
+      return routeFetch(u);
+    });
+    const { ctx, importFn } = makeCtx({
+      syncStates: { c1: { lastSync: null, importedRefs: [] } },
+      searchTicker: async () => [{ symbol: "CRWD", exchangeMic: "XNAS", currency: "USD", score: 1, quoteType: "EQUITY" }],
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { result } = renderHook(() => useSync(ctx as any));
+    await act(async () => {
+      await result.current.syncAll();
+    });
+
+    const calls = importFn.mock.calls.map((c) => c[0] as { id: string; activityType: string; amount?: number; currency?: string }[]);
+    const all = calls.flat();
+    expect(all.find((a) => a.activityType === "SPLIT")).toMatchObject({ amount: 4, currency: "USD" });
+    // The two currency legs travel in the same import call, so Wealthfolio can link them.
+    const call = calls.find((c) => c.some((a) => a.id === "t212-fx-FX1-out"))!;
+    expect(call.map((a) => [a.id, a.activityType, a.amount, a.currency])).toEqual(
+      expect.arrayContaining([
+        ["t212-fx-FX1-out", "TRANSFER_OUT", 10000, "EUR"],
+        ["t212-fx-FX1-in", "TRANSFER_IN", 8665.3, "GBP"],
+      ]),
+    );
+    expect(all.find((a) => a.id === "t212-fx-FX1-fee")).toMatchObject({ activityType: "FEE", amount: 13, currency: "GBP" });
+    expect(all.find((a) => a.id.startsWith("t212-dist-"))).toMatchObject({ activityType: "TRANSFER_IN" });
+    expect(result.current.results!.perAccount[0].log.join("\n")).not.toMatch(/Skipped \(not imported\)/);
   });
 });
 

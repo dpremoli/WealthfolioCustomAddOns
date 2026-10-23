@@ -47,6 +47,13 @@ import { ActivityImporter, describeRejected, type ImportUnit, type RejectedRow }
 import { CARD_FUNDING_COMMENT, fundingForExisting, isFundingId, withCardFunding } from "../lib/card-funding";
 import { foldMonthlyInterest } from "../lib/interest";
 import {
+  describeRow,
+  mapCurrencyConversion,
+  mapStockSplit,
+  pairStockSplits,
+  splitCorporateRows,
+} from "../lib/corporate-actions";
+import {
   PortfolioUpdates,
   compareWithTrading212,
   resolvePositions,
@@ -808,7 +815,43 @@ async function syncOne(
         emptyStreak = 0;
 
         const windowUnits: ImportUnit[] = [];
-        for (const row of rows) {
+        const take = (unit: ImportUnit) => {
+          const ids = unit.map((a) => a.id ?? "");
+          if (ids.some((id) => id && (seen.has(id) || importedRefs.has(id)))) return;
+          for (const id of ids) if (id) seen.add(id);
+          windowUnits.push(unit);
+        };
+
+        // Events that span rows: a split is a "close" row and an "open" row, a currency conversion
+        // is two currencies and a fee.
+        const { rest, splitRows, conversionRows } = splitCorporateRows(rows);
+        const { splits, unpaired } = pairStockSplits(splitRows);
+        for (const split of splits) {
+          const resolved = await resolver.resolveDetailed(split.ticker, {
+            isin: split.isin,
+            name: split.name,
+            currency: split.currency,
+          });
+          if (resolved) {
+            take([mapStockSplit(split, accountId, resolved)]);
+          } else {
+            const line = `Not imported: stock split ${split.time.slice(0, 10)} ${split.ticker} (${split.name ?? "?"}, ISIN ${split.isin ?? "?"}): symbol not matched`;
+            log.push(line);
+            droppedTrades.push(line);
+          }
+        }
+        for (const row of unpaired) {
+          const line = `Not imported: ${describeRow(row)}: no matching open/close row, or the ticker changed (a swap into another security, not a split)`;
+          log.push(line);
+          droppedTrades.push(line);
+        }
+        for (const row of conversionRows) {
+          const { units, problem } = mapCurrencyConversion(row, accountId);
+          if (problem) log.push(`Not imported: ${describeRow(row)}: ${problem}`);
+          for (const unit of units) take(unit);
+        }
+
+        for (const row of rest) {
           const act = await mapCsvRow(row, accountId, resolver, cardAccountId);
           if (act) {
             const id = act.id ?? "";
@@ -969,7 +1012,7 @@ async function syncOne(
     // A trade that never reached the account leaves its position wrong: say so loudly.
     if (droppedTrades.length > 0) {
       result.error =
-        `${droppedTrades.length} trade row${droppedTrades.length === 1 ? " was" : "s were"} not imported, so ` +
+        `${droppedTrades.length} trade or corporate-action row${droppedTrades.length === 1 ? " was" : "s were"} not imported, so ` +
         `holdings will not match Trading 212 (see the log). First: ${droppedTrades[0]}`;
     } else if (verification && !verification.ok && verification.settled) {
       result.error =

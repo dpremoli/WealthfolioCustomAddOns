@@ -15,7 +15,7 @@ export interface KnownSplit {
   isin: string;
   /** First trading day at the new price (YYYY-MM-DD). */
   date: string;
-  /** New shares per old share: 20 for a 20:1 split, 0.1 for a 1:10 reverse split. */
+  /** New shares per old share: 20 for a 20:1 split, 0.1 for a 1:10 reverse split, 2/3 for a 2-for-3 consolidation. */
   ratio: number;
   name: string;
 }
@@ -33,4 +33,9 @@ export const KNOWN_SPLITS: KnownSplit[] = [
   { isin: "US88160R1014", date: "2022-08-25", ratio: 3, name: "Tesla" },
   { isin: "US11135F1012", date: "2024-07-15", ratio: 10, name: "Broadcom" },
   { isin: "US1696561059", date: "2024-06-26", ratio: 50, name: "Chipotle" },
+  // Trading 212 books every Pennon row under the post-consolidation ISIN, 2021 included. Holding
+  // 0.23384732 before it; dividend rows show 0.2338473200 on 2021-07-21 and 0.1558982100 (= ×2/3)
+  // on 2021-09-06. With no trades between June and 2021-07-29, any date from 2021-07-22 to
+  // 2021-07-29 replays to the same quantity (0.321687, Trading 212's position).
+  { isin: "GB00BNNTLN49", date: "2021-07-26", ratio: 2 / 3, name: "Pennon (2-for-3 consolidation)" },
 ];

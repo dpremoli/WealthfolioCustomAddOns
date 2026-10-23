@@ -177,10 +177,11 @@ its history export**, so the imported trades fall short by the split. The add-on
 the check below (Trading 212 holds 2.1649, the trades add up to 0.108245) and, for a security in
 its built-in list of known splits (`src/lib/known-splits.ts`, keyed by ISIN), adds the `SPLIT`
 **only if applying it reproduces Trading 212's quantity exactly**. Wealthfolio's stored prices are
-split-adjusted, so the date cannot be found from them; that is why the list supplies it. A split
-or consolidation that is not on the list (Pennon's ×0.805 consolidation, say) is described in the
-log with the ratio it implies, so you can add a `SPLIT` in Wealthfolio's Activities by hand, or
-add the ISIN and date to the list.
+split-adjusted, so the date cannot be found from them; that is why the list supplies it. It also
+holds consolidations, such as Pennon's 2-for-3 of July 2021 (ratio 2/3). A split or consolidation
+that is not on the list is described in the log with the overall ratio it implies (a position of
+which only part predates the event changes by less than the event's own ratio), so you can add a
+`SPLIT` in Wealthfolio's Activities by hand, or add the ISIN and date to the list.
 
 ### Checking a backfill against Trading 212
 

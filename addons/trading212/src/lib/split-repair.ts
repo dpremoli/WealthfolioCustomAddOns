@@ -76,6 +76,15 @@ export interface SplitProposal {
   reason: string;
 }
 
+/** A ratio as people say it: 20:1, 1:10, 2:3 (a 2-for-3 consolidation); else "×0.805". */
+export function describeRatio(ratio: number): string {
+  for (let b = 1; b <= 12; b++) {
+    const a = Math.round(ratio * b);
+    if (a >= 1 && Math.abs(ratio - a / b) < 1e-9) return `${a}:${b}`;
+  }
+  return `×${String(Math.round(ratio * 1e6) / 1e6)}`;
+}
+
 const tolerance = (held: number) => 1e-4 + 2e-5 * Math.abs(held);
 const fmt = (n: number) => String(Math.round(n * 1e6) / 1e6);
 const dayDistance = (a: string, b: string) => Math.abs(Date.parse(a) - Date.parse(b)) / 86_400_000;
@@ -118,8 +127,9 @@ export function proposeSplits(input: {
   const hint =
     ratio === undefined
       ? ""
-      : ` (×${fmt(snapRatio(ratio, 1e-4))}): a split or consolidation Trading 212 did not export is the likely cause. ` +
-        `Add a SPLIT activity for it in Wealthfolio, or tell us the ISIN and date so it can be added to the known splits`;
+      : ` (overall ×${fmt(snapRatio(ratio, 1e-4))}; only the shares bought before the event change, so its own ratio ` +
+        `is stronger): a split or consolidation Trading 212 did not export is the likely cause. ` +
+        `Add a SPLIT activity for it in Wealthfolio, or add the ISIN and date to the known splits`;
   if (candidates.length === 0) {
     return { splits: [], reason: `${gap}${hint || "."}${isin ? ` No known split for ${isin}.` : ""}` };
   }
@@ -134,14 +144,14 @@ export function proposeSplits(input: {
     else if (chosen.length === best[0].length) best.push(chosen);
   }
   if (best.length === 1) {
-    return { splits: best[0], reason: `${gap}: ${best[0].map((s) => `${s.ratio}:1 on ${s.date}`).join(" and ")} reproduces it exactly.` };
+    return { splits: best[0], reason: `${gap}: ${best[0].map((s) => `${describeRatio(s.ratio)} on ${s.date}`).join(" and ")} reproduces it exactly.` };
   }
   if (best.length > 1) {
     return { splits: [], reason: `${gap}: several known splits would explain it equally well, so none was added.` };
   }
   return {
     splits: [],
-    reason: `${gap}: the known splits for ${isin} (${candidates.map((c) => `${c.ratio}:1 on ${c.date}`).join(", ")}) do not reproduce it${hint || "."}`,
+    reason: `${gap}: the known splits for ${isin} (${candidates.map((c) => `${describeRatio(c.ratio)} on ${c.date}`).join(", ")}) do not reproduce it${hint || "."}`,
   };
 }
 
@@ -169,7 +179,7 @@ export async function repairSplits(
     const resolved = await resolver.resolveDetailed(gap.ticker, { isin: gap.isin, name: gap.name, currency: gap.currency });
     if (!resolved) continue;
     for (const s of proposal.splits) {
-      log.push(`${gap.ticker}: adding the ${s.ratio}:1 split of ${s.date} that Trading 212's history does not list. ${proposal.reason}`);
+      log.push(`${gap.ticker}: adding the ${describeRatio(s.ratio)} split of ${s.date} that Trading 212's history does not list. ${proposal.reason}`);
       units.push([
         {
           id: `t212-split-${s.isin}-${s.date.replace(/-/g, "")}`,
@@ -181,7 +191,7 @@ export async function repairSplits(
           currency: gap.currency ?? "USD",
           isValid: true,
           isDraft: false,
-          comment: `Stock split ${s.ratio}:1 (not in the Trading 212 export; found from the position difference)`,
+          comment: `Stock split ${describeRatio(s.ratio)} (not in the Trading 212 export; found from the position difference)`,
         },
       ]);
     }

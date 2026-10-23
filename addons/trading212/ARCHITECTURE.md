@@ -481,8 +481,9 @@ versions must match or packaging refuses. The bundle imports only host-provided 
 ## Extension points & known limitations
 
 - **Corporate actions**: explicit split pairs, distributions and conversions are mapped; splits
-  with no row in the export need the known-splits table for their date, and consolidations whose
-  ratio is not whole (Pennon ×0.805) are only described. An incremental (JSON) sync does not see a
+  with no row in the export need the known-splits table for their date (it holds fractional
+  ratios too: Pennon's 2-for-3 consolidation is 2/3), and a split that is not in it is only
+  described, with the overall ratio it implies. An incremental (JSON) sync does not see a
   new split's row; the check reports the position and a re-sync after **Reset** brings it in. A
   swap into a different ticker or ISIN is reported, not mapped. Wealthfolio's `SPLIT` takes the
   ratio in `amount`, needs the asset, and applies to lots bought strictly before the split day.

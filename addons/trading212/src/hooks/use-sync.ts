@@ -46,6 +46,7 @@ import { SymbolResolver, importAssetFields, type ResolveDiag } from "../lib/symb
 import { ActivityImporter, describeRejected, type ImportUnit, type RejectedRow } from "../lib/importer";
 import { CARD_FUNDING_COMMENT, fundingForExisting, isFundingId, withCardFunding } from "../lib/card-funding";
 import { foldMonthlyInterest } from "../lib/interest";
+import { repairSplits, type PositionGap } from "../lib/split-repair";
 import {
   describeRow,
   mapCurrencyConversion,
@@ -990,7 +991,7 @@ async function syncOne(
     const previous = (await getSyncState(ctx, conn.id)).verification;
     if (backfillFinished || (previous && !previous.ok)) {
       try {
-        verification = await verifyAccount(ctx, client, accountId, resolver, importer, updates, onProgress);
+        verification = await verifyAndRepair(ctx, client, accountId, resolver, importer, updates, onProgress, log);
         await setVerification(ctx, conn.id, verification);
         log.push(...verificationLines(verification));
       } catch (e) {
@@ -1049,20 +1050,59 @@ async function verifyAccount(
   importer: ActivityImporter,
   updates: PortfolioUpdates,
   onProgress: ProgressFn,
-): Promise<Verification> {
+): Promise<{ verification: Verification; gaps: PositionGap[] }> {
   onProgress({ phase: "done", message: "Checking holdings and cash against Trading 212…" });
   const settled =
     importer.lastWriteAt === 0 ? true : await updates.settledAfter(importer.lastWriteAt, VERIFY_WAIT_MS);
   const summary = await client.getAccountSummary();
   const positions = await resolvePositions(await client.getPositions(), resolver);
   const holdings = await ctx.api.portfolio.getHoldings(accountId);
-  const cmp = compareWithTrading212({
+  // Wallets in other currencies are converted into the account currency; without rates (or the
+  // permission to read them) those wallets are noted as not compared rather than failed.
+  const rates = await (async () => {
+    try {
+      return await ctx.api.exchangeRates.getAll();
+    } catch {
+      return [];
+    }
+  })();
+  const { gaps, ...cmp } = compareWithTrading212({
     positions,
     cash: trading212Cash(summary),
     accountCurrency: summary.currency || "GBP",
     holdings,
+    rates,
   });
-  return { ...cmp, checkedAt: new Date().toISOString(), settled };
+  return { verification: { ...cmp, checkedAt: new Date().toISOString(), settled }, gaps };
+}
+
+/**
+ * Checks the account against Trading 212 and, for a position that is short by a split Trading 212
+ * never listed in its history, adds that split ({@link repairSplits}) and checks again. Only
+ * splits whose date and ratio reproduce Trading 212's quantity exactly are added.
+ */
+async function verifyAndRepair(
+  ctx: AddonContext,
+  client: Trading212Client,
+  accountId: string,
+  resolver: SymbolResolver,
+  importer: ActivityImporter,
+  updates: PortfolioUpdates,
+  onProgress: ProgressFn,
+  log: string[],
+): Promise<Verification> {
+  let { verification, gaps } = await verifyAccount(ctx, client, accountId, resolver, importer, updates, onProgress);
+  // The repair compares the account's activities with Trading 212's quantity, not Wealthfolio's
+  // holdings, so it does not wait for the recalculation: if that was merely not finished, the
+  // activities agree with Trading 212 and nothing is added.
+  if (!verification.ok && gaps.length > 0) {
+    const added = await repairSplits(importer, resolver, accountId, gaps, log);
+    if (added > 0) {
+      log.push(`Added ${added} missing split${added === 1 ? "" : "s"}; checking again.`);
+      ({ verification } = await verifyAccount(ctx, client, accountId, resolver, importer, updates, onProgress));
+    }
+  }
+  return verification;
 }
 
 /** Activity types whose loss leaves a position wrong. */

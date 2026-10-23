@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { AddonContext, Holding } from "@wealthfolio/addon-sdk";
-import { PortfolioUpdates, compareWithTrading212, trading212Cash, verificationLines } from "./verify";
+import { PortfolioUpdates, compareWithTrading212, convertRate, trading212Cash, verificationLines } from "./verify";
 
 const security = (symbol: string, quantity: number): Holding =>
   ({ holdingType: "security", instrument: { symbol }, quantity, localCurrency: "USD" }) as unknown as Holding;
@@ -20,7 +20,7 @@ describe("compareWithTrading212", () => {
       accountCurrency: "EUR",
       holdings: [security("NVDA", 10.95500003), security("CRWD", 0.69), cashOf("EUR", 1822.42)],
     });
-    expect(v).toEqual({ ok: true, mismatches: [], positions: 2 });
+    expect(v).toEqual({ ok: true, mismatches: [], notes: [], positions: 2, gaps: [] });
   });
 
   it("lists every wrong position, extra position and cash difference", () => {
@@ -41,9 +41,40 @@ describe("compareWithTrading212", () => {
       "NVDA (NVDA_US_EQ): Trading 212 holds 10.955, Wealthfolio 1.0955.",
       "CRWD (CRWD_US_EQ): Trading 212 holds 0.69, Wealthfolio 0.",
       "LTC-EUR: Wealthfolio holds 2, Trading 212 none.",
-      "Cash EUR: Trading 212 1822, Wealthfolio 12810.11.",
-      "Cash GBP: Wealthfolio holds 3699, Trading 212 keeps all cash in EUR.",
     ]);
+    // With a GBP wallet and no rate the cash cannot be compared: said so, not called a difference.
+    expect(v.notes).toEqual(["Cash in GBP (3699) was not compared: Wealthfolio has no GBP→EUR exchange rate."]);
+    // The positions Wealthfolio holds a wrong quantity of are handed on for the split repair.
+    expect(v.gaps.map((g) => [g.ticker, g.held, g.derived])).toEqual([
+      ["NVDA_US_EQ", 10.955, 1.0955],
+      ["CRWD_US_EQ", 0.69, 0],
+    ]);
+  });
+
+  describe("cash in several currencies (an account with a GBP and a USD wallet)", () => {
+    const rates = [
+      { fromCurrency: "GBP", toCurrency: "EUR", rate: 1.15 },
+      { fromCurrency: "EUR", toCurrency: "USD", rate: 1.1 },
+    ];
+    const cashCheck = (cash: number, holdings: Holding[]) =>
+      compareWithTrading212({ positions: [], cash, accountCurrency: "EUR", holdings, rates });
+
+    it("compares the wallets as one total in the account currency, within the rates' margin", () => {
+      // 800 EUR + 1000 GBP (×1.15) + 110 USD (÷1.1) = 800 + 1150 + 100.
+      const wallets = [cashOf("EUR", 800), cashOf("GBP", 1000), cashOf("USD", 110)];
+      expect(cashCheck(2050, wallets).ok).toBe(true);
+      expect(cashCheck(2060, wallets).ok).toBe(true); // 0.5% apart: the two sides' rates
+      const off = cashCheck(1822, wallets);
+      expect(off.ok).toBe(false);
+      expect(off.mismatches).toEqual([
+        "Cash: Trading 212 1822 EUR, Wealthfolio 2050 EUR (EUR 800 + GBP 1000 + USD 110, converted at Wealthfolio's rates; allowed to differ by 1% for the rates).",
+      ]);
+    });
+
+    it("still compares account-currency cash exactly when there is no other wallet", () => {
+      expect(cashCheck(1822, [cashOf("EUR", 1822.02)]).ok).toBe(true);
+      expect(cashCheck(1822, [cashOf("EUR", 1900)]).ok).toBe(false);
+    });
   });
 
   it("sums cross-listings that resolve to one symbol, and ignores an exchange suffix", () => {
@@ -132,5 +163,19 @@ describe("verificationLines", () => {
     ]);
     expect(verificationLines({ ...base, ok: false, settled: true })[0]).toBe("Does not match Trading 212 (1 difference):");
     expect(verificationLines({ ...base, ok: false, settled: false })[0]).toMatch(/may be temporary/);
+  });
+});
+
+describe("convertRate", () => {
+  const rates = [
+    { fromCurrency: "GBP", toCurrency: "EUR", rate: 1.15 },
+    { fromCurrency: "EUR", toCurrency: "USD", rate: 1.1 },
+  ];
+  it("uses a direct rate, its inverse, or one common currency in between", () => {
+    expect(convertRate(rates, "GBP", "EUR")).toBe(1.15);
+    expect(convertRate(rates, "EUR", "GBP")).toBeCloseTo(1 / 1.15, 10);
+    expect(convertRate(rates, "gbp", "usd")).toBeCloseTo(1.15 * 1.1, 10);
+    expect(convertRate(rates, "EUR", "EUR")).toBe(1);
+    expect(convertRate(rates, "EUR", "JPY")).toBeNull();
   });
 });

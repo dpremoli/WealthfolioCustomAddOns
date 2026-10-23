@@ -153,14 +153,34 @@ are verified before they replace the stored ones.
 | Withdrawal | `WITHDRAWAL` |
 | Fee | `FEE` |
 | Transfer | `TRANSFER_IN` / `TRANSFER_OUT` |
+| Stock split open + close (one pair) | `SPLIT`, ratio = shares after ÷ before |
+| Stock distribution (spin-off) | `TRANSFER_IN` of the shares at no cost (internal: no cash, no contribution) |
+| Currency conversion | `TRANSFER_OUT` + `TRANSFER_IN` in the same account (linked as a currency exchange), plus a `FEE` |
+| Dividend adjustment / Result adjustment | cash income, or a `FEE` when negative (a clawback) |
+| Dividend (Return of capital …) | `DIVIDEND` with subtype `RETURN_OF_CAPITAL` (lowers the cost basis) |
 | Card debit / credit / cashback (with card extraction on) | `WITHDRAWAL` / `DEPOSIT` / `INTEREST` on the card account, plus a linked transfer pair with the investing account |
 
 Holdings are derived by Wealthfolio from these activities — make sure the account
 stays in **`TRANSACTIONS`** tracking mode.
 
-**Not imported yet:** stock splits, stock distributions, result adjustments and currency
-conversions. They are listed in the sync log ("Skipped (not imported): …"), and the check
-below reports the positions and cash they leave wrong.
+Trade fees include the stamp duty reserve tax and French transaction tax columns, since
+Trading 212's total includes them.
+
+**Several currencies.** An account topped up in GBP or USD keeps a wallet per currency: a
+deposit stays in the currency it was made in, and a currency conversion moves cash between
+wallets. Wealthfolio shows each wallet; Trading 212's API reports one cash total in the account
+currency, so the check below compares the wallets' total, converted at Wealthfolio's rates.
+
+**Splits Trading 212 does not list.** Older splits (Amazon and Alphabet 20:1, Sherwin-Williams
+and Walmart 3:1, NVIDIA 10:1 …) are applied to your position by Trading 212 but have **no row in
+its history export**, so the imported trades fall short by the split. The add-on notices from
+the check below (Trading 212 holds 2.1649, the trades add up to 0.108245) and, for a security in
+its built-in list of known splits (`src/lib/known-splits.ts`, keyed by ISIN), adds the `SPLIT`
+**only if applying it reproduces Trading 212's quantity exactly**. Wealthfolio's stored prices are
+split-adjusted, so the date cannot be found from them; that is why the list supplies it. A split
+or consolidation that is not on the list (Pennon's ×0.805 consolidation, say) is described in the
+log with the ratio it implies, so you can add a `SPLIT` in Wealthfolio's Activities by hand, or
+add the ISIN and date to the list.
 
 ### Checking a backfill against Trading 212
 
@@ -168,8 +188,7 @@ When a Transactions-mode backfill finishes, the add-on waits for Wealthfolio to 
 account and compares what it shows with Trading 212 — every position from `/equity/positions`
 (the call Holdings mode uses) and the cash from `/equity/account/summary`. Each difference is
 listed in the sync log (a wrong quantity, a position on one side only, an instrument that did not
-match a symbol, cash in the wrong amount or left in another currency), the sync ends with an
-error, and the dashboard shows **"N differences from Trading 212"** with the list on hover. The
+match a symbol, cash in the wrong amount), the sync ends with an error, and the dashboard shows **"N differences from Trading 212"** with the list on hover. The
 check runs again on every sync until the account matches, then shows **"Matches Trading 212"**.
 
 Every row Wealthfolio did not import is listed too, with its type, date, symbol, Trading 212
@@ -296,6 +315,17 @@ never a separate fee.
 ---
 
 ## Upgrading to 2.6.0
+
+- **Stock splits, spin-offs, adjustments and currency conversions are imported** (see the
+  mapping table). An account that was never backfilled needs nothing. One that an earlier version
+  backfilled holds rows the old mapping got wrong: a "Currency conversion" was booked as a fee of
+  its whole amount, and a negative "Dividend adjustment" as income. Clear that account's
+  activities in Wealthfolio's Activities page, then **Reset** it in Settings and sync, so the
+  history is rebuilt with the new mapping (switching an account's tracking mode away and back
+  does the same).
+- **Per-currency cash is expected.** A GBP deposit stays in a GBP wallet; the check compares
+  the total in the account currency (within 1% for the exchange rates).
+- Updating adds a permission for exchange rates (`currency.getAll`).
 
 - **Switching an account from Holdings to Transactions works now.** It used to stop at
   "Clearing holdings data…" because Wealthfolio refuses to delete an add-on account's snapshots;

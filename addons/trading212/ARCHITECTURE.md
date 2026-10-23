@@ -187,8 +187,20 @@ delete ends the sync with a clear error and leaves the connection on its old mod
 matches), `verifyAccount` waits for the recalculation the import queued (`PortfolioUpdates`:
 an `onUpdateStart` after the last import, then its `onUpdateComplete`; up to 3 min), then
 compares `portfolio.getHoldings(accountId)` with `/equity/positions` (resolved with the same
-resolver) and the account-currency cash from `/account/summary`. Differences are logged, fail the
+resolver) and the cash from `/account/summary`. Trading 212 reports one cash figure in the account
+currency for all wallets, so with cash in other currencies Wealthfolio's wallets are converted at
+its exchange rates (`currency.getAll`) and compared within 1%. Differences are logged, fail the
 sync, and are kept in `t212_sync_{id}.verification` for the dashboard badge.
+
+**Silent splits.** Trading 212 applies older splits to a position without a history row, so the
+imported trades fall short. For each position whose quantity differs, `repairSplits` replays the
+account's activities with the known splits for the position's ISIN (`known-splits.ts`) and adds
+the `SPLIT` activities only if the quantity then equals Trading 212's to within rounding
+(`proposeSplits`; the smallest set that fits, never a tie). The date has to come from the table:
+Wealthfolio's stored quotes are split-adjusted (Yahoo's `close`), and the host never fetches split
+events (`events=div` only), so there is no price jump to find. Positions no known split explains
+are described in the log with the ratio they imply. The repair compares activities, not
+Wealthfolio's holdings, so it does not wait for the recalculation.
 
 ### Background auto-sync (`auto-sync.ts`)
 
@@ -257,6 +269,16 @@ uses it as-is — nothing re-derives it. What each mapping emits:
 | Transaction `FEE` | `FEE` | the fee | |
 | Transaction `INTEREST_ON_FREE_CASH` / `LENDING_INTEREST` | `INTEREST` | ledger amount | `cashSymbol(ccy)`; newer API types. |
 | Transaction `TRANSFER` | `TRANSFER_IN` / `TRANSFER_OUT` | ledger amount (by sign) | |
+
+CSV-only rows (`csv.ts`, `corporate-actions.ts`): `Stock split open`+`close` → one `SPLIT` with
+`amount` = shares after ÷ before (snapped to a whole ratio or its reciprocal within the rounding of
+the share counts, `snapRatio`); `Stock distribution` → `TRANSFER_IN` of the shares at unit price 0,
+`isExternal: false`; `Currency conversion` → a `TRANSFER_OUT`/`TRANSFER_IN` pair in one account
+with `isExternal: false` and the comment "Currency exchange", sent as one `ImportUnit` (Wealthfolio
+links a same-account exchange only when both legs arrive in one import call — `is_fx_import_label`
+in `activities_service.rs`), plus a `FEE` for the Total; `Dividend adjustment`/`Result adjustment`
+→ income, or a `FEE` when the Total is negative; `Dividend (Return of capital …)` → `DIVIDEND` with
+subtype `RETURN_OF_CAPITAL`.
 
 Trades deliberately omit `amount` rather than send a total, so the writer's own derivation is
 the single source of truth and charges can't be double-counted. All monetary fields are in the
@@ -458,10 +480,12 @@ versions must match or packaging refuses. The bundle imports only host-provided 
 
 ## Extension points & known limitations
 
-- **Stock splits / distributions / result adjustments / currency conversions**: still skipped
-  (listed in the log; the backfill check reports what they leave wrong). Wealthfolio's `SPLIT`
-  takes the ratio in `amount`, needs the asset, and applies to lots bought strictly before the
-  split day. The CSV row formats are not documented, so they wait for real export rows.
+- **Corporate actions**: explicit split pairs, distributions and conversions are mapped; splits
+  with no row in the export need the known-splits table for their date, and consolidations whose
+  ratio is not whole (Pennon ×0.805) are only described. An incremental (JSON) sync does not see a
+  new split's row; the check reports the position and a re-sync after **Reset** brings it in. A
+  swap into a different ticker or ISIN is reported, not mapped. Wealthfolio's `SPLIT` takes the
+  ratio in `amount`, needs the asset, and applies to lots bought strictly before the split day.
 - **Instruments metadata**: the ~5 MB feed can't pass the 2 MB cap, so HOLDINGS relies on the
   instrument data embedded in positions/orders. A future metadata fallback would need a
   different source.
@@ -469,9 +493,9 @@ versions must match or packaging refuses. The bundle imports only host-provided 
   is declared); see the error text if the broker refuses it.
 - **Legacy single-key auth is unsupported** (the broker only builds Basic auth from a stored
   base64 `keyId:secret`).
-- **Trade charges beyond `Charge amount` / `Currency conversion fee`** (e.g. stamp duty columns
-  in the CSV) aren't added to `fee`, so Wealthfolio's derived total can differ from Trading 212's
-  by those taxes.
+- **Trade charges**: `Charge amount`, `Currency conversion fee`, `Stamp duty reserve tax` and
+  `French transaction tax` go into `fee`; any other charge column would make Wealthfolio's derived
+  total differ from Trading 212's.
 - **History depth**: bounded by what Trading 212's history endpoints return; there is
   no separate backfill of pre-API-era data via these endpoints.
 

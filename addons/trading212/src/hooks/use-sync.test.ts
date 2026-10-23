@@ -63,7 +63,7 @@ function makeCtx(opts: {
   existingAccounts?: { id: string; providerAccountId?: string; trackingMode?: string }[];
   existingActivities?: { id: string }[];
   existingSnapshots?: { snapshotDate: string }[];
-  holdings?: unknown[];
+  holdings?: unknown[] | (() => unknown[]);
 }) {
   const connections = opts.connections ?? [
     { id: "c1", name: "Trading 212 (Invest)", accountId: "acc-1" },
@@ -139,7 +139,9 @@ function makeCtx(opts: {
           save: snapshotsSave,
           delete: snapshotsDelete,
         },
-        portfolio: { getHoldings: async () => opts.holdings ?? [] },
+        portfolio: {
+          getHoldings: async () => (typeof opts.holdings === "function" ? opts.holdings() : (opts.holdings ?? [])),
+        },
       },
     },
     storage,
@@ -977,6 +979,81 @@ describe("useSync — tracking-mode drift", () => {
     expect(snapshotsSave).toHaveBeenCalledTimes(1);
     // Connection's recorded mode updated to the new mode.
     expect(JSON.parse(storage.get("t212_connections")!)[0].trackingMode).toBe("HOLDINGS");
+  });
+});
+
+describe("useSync — a split Trading 212 never listed", () => {
+  const amzn = (qty: number) => ({ holdingType: "security", instrument: { symbol: "AMZN" }, quantity: qty, localCurrency: "USD" });
+  const csv = [
+    CSV_HDR,
+    "Market buy,2021-09-01T10:00:00Z,US0231351067,AMZN_US_EQ,Amazon,0.108245,3400,USD,1.37,268.50,GBP,,,,,,B1,,",
+  ].join("\n");
+  const route = (u: string) => {
+    if (u.includes("amazonaws.com")) return textResponse(downloads++ === 0 ? csv : CSV_HDR);
+    if (u.includes("/exports")) return jsonResponse([FINISHED_REPORT]);
+    if (u.includes("account/summary")) return jsonResponse({ id: 1, currency: "GBP", cash: { availableToTrade: 0 } });
+    // Trading 212 holds 20× what the one buy adds up to: Amazon split 20:1 on 2022-06-06.
+    if (u.includes("/positions"))
+      return jsonResponse([{ instrument: { ticker: "AMZN_US_EQ", isin: "US0231351067", name: "Amazon", currency: "USD" }, quantity: 2.1649 }]);
+    return routeFetch(u);
+  };
+  let downloads = 0;
+
+  it("adds the 20:1 split from the position difference, then finds the account matches", async () => {
+    downloads = 0;
+    net(async (url: string) => route(String(url)));
+    let imports: { mock: { calls: unknown[][] } } | undefined;
+    const { ctx, importFn } = makeCtx({
+      syncStates: { c1: { lastSync: null, importedRefs: [] } },
+      searchTicker: async () => [{ symbol: "AMZN", exchangeMic: "XNAS", currency: "USD", score: 1, quoteType: "EQUITY" }],
+      holdings: () => {
+        const split = (imports!.mock.calls.flatMap((c) => c[0]) as { activityType: string }[]).some((a) => a.activityType === "SPLIT");
+        return [amzn(split ? 2.1649 : 0.108245)];
+      },
+    });
+    imports = importFn;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { result } = renderHook(() => useSync(ctx as any));
+    await act(async () => {
+      await result.current.syncAll();
+    });
+
+    const split = importFn.mock.calls.flatMap((c) => c[0] as ActivityImport[]).find((a) => a.activityType === "SPLIT");
+    expect(split).toMatchObject({ id: "t212-split-US0231351067-20220606", amount: 20, date: "2022-06-06T00:00:00.000Z", symbol: "AMZN", currency: "USD" });
+    const r = result.current.results!.perAccount[0];
+    expect(r.error).toBeUndefined();
+    expect(r.verification?.ok).toBe(true);
+    const log = r.log.join("\n");
+    expect(log).toContain("adding the 20:1 split of 2022-06-06 that Trading 212's history does not list");
+    expect(log).toContain("Added 1 missing split; checking again.");
+    expect(log).toContain("Matches Trading 212");
+  });
+
+  it("leaves a position it cannot explain wrong, says why, and fails the sync", async () => {
+    downloads = 0;
+    net(async (url: string) => {
+      const u = String(url);
+      if (u.includes("/positions"))
+        return jsonResponse([{ instrument: { ticker: "AMZN_US_EQ", isin: "US0231351067", name: "Amazon", currency: "USD" }, quantity: 0.5 }]);
+      return route(u);
+    });
+    const { ctx, importFn } = makeCtx({
+      syncStates: { c1: { lastSync: null, importedRefs: [] } },
+      searchTicker: async () => [{ symbol: "AMZN", exchangeMic: "XNAS", currency: "USD", score: 1, quoteType: "EQUITY" }],
+      holdings: () => [amzn(0.108245)],
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { result } = renderHook(() => useSync(ctx as any));
+    await act(async () => {
+      await result.current.syncAll();
+    });
+    expect(importFn.mock.calls.flatMap((c) => c[0] as ActivityImport[]).some((a) => a.activityType === "SPLIT")).toBe(false);
+    const r = result.current.results!.perAccount[0];
+    // No events API in this host, so it cannot tell the recalculation finished: the difference is
+    // reported as possibly temporary rather than failing the sync.
+    expect(r.verification).toMatchObject({ ok: false, settled: false });
+    expect(r.verification!.mismatches[0]).toContain("Trading 212 holds 0.5, Wealthfolio 0.108245");
+    expect(r.log.join("\n")).toContain("do not reproduce it");
   });
 });
 

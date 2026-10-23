@@ -4,7 +4,7 @@ import { escapeRegex, type SpendingRuleSpec } from "@wf-addons/kit";
 // Maps Trading 212's card "Merchant category" values onto Wealthfolio spending-category
 // labels. T212 emits a small MCC-derived set on `Card debit` rows (RETAIL_STORES, TRANSPORT,
 // RESTAURANTS, …). The label is written into the activity comment, and
-// {@link cardSpendingRules} turns it into Wealthfolio categorisation rules (SDK 3.9
+// {@link cardSpendingRules} turns it into Wealthfolio categorisation rules (SDK 3.11
 // `spending` API) that file the activity under the matching spend category. Keep the target labels below aligned with your Wealthfolio spending
 // categories if you want the comment text to match them exactly — this is the one place to edit.
 const T212_TO_WEALTHFOLIO: Record<string, string> = {

@@ -1,6 +1,6 @@
 # Repo notes for Claude
 
-pnpm monorepo of Wealthfolio add-ons targeting Wealthfolio / addon SDK **3.9** (sandboxed runtime).
+pnpm monorepo of Wealthfolio add-ons targeting Wealthfolio / addon SDK **3.11** (sandboxed runtime).
 
 - `addons/<name>/` — one add-on each; `manifest.json` and `package.json` versions must match
   (`tooling/package-addon.mjs` refuses otherwise).

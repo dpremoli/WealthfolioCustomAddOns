@@ -77,7 +77,7 @@ export function SyncActivity<P extends string>({ phases, isSyncing, progress, st
                 </span>
               )}
             </div>
-            <Progress value={percent} className={percent == null ? "animate-pulse" : ""} />
+            <Progress value={percent ?? null} className={percent == null ? "animate-pulse" : ""} />
           </div>
         )}
 

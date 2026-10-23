@@ -6,8 +6,8 @@
   "author": "dpremoli",
   "license": "GPL-3.0-only",
   "main": "dist/addon.js",
-  "sdkVersion": "3.9.0",
-  "minWealthfolioVersion": "3.9.0",
+  "sdkVersion": "3.11.0",
+  "minWealthfolioVersion": "3.11.0",
   "enabled": true,
   "keywords": ["trading212", "broker", "sync", "api", "investments"],
   "network": {
@@ -32,8 +32,8 @@
   },
   "hostDependencies": {
     "@tanstack/react-query": "^5.90.0",
-    "@wealthfolio/addon-sdk": "^3.9.0",
-    "@wealthfolio/ui": "^3.9.0",
+    "@wealthfolio/addon-sdk": "^3.11.0",
+    "@wealthfolio/ui": "^3.11.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
   },

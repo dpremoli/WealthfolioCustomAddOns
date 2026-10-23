@@ -4,7 +4,7 @@ Import your **Revolut** account statements into [Wealthfolio](https://wealthfoli
 and feed your card spending into the spending module — all from a CSV export.
 
 Part of the [Wealthfolio custom add-ons monorepo](../../README.md), alongside the Monzo
-and Trading 212 add-ons; unlike those it is **CSV-only**. Requires **Wealthfolio 3.9+**.
+and Trading 212 add-ons; unlike those it is **CSV-only**. Requires **Wealthfolio 3.11+**.
 
 ## Why CSV (and not an API)?
 

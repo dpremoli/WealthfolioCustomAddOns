@@ -6,7 +6,7 @@ dividends, interest, deposits, withdrawals and fees — each tagged to the corre
 Wealthfolio activity type, with tickers matched to Wealthfolio symbols automatically.
 
 Part of the [Wealthfolio custom add-ons monorepo](../../README.md). Requires
-**Wealthfolio 3.9+** (add-on SDK 3.9.0).
+**Wealthfolio 3.11+** (add-on SDK 3.11.0).
 
 **Architecture**: a TypeScript/React add-on that runs in Wealthfolio's sandbox and calls
 the Trading 212 API **directly** through the host's network broker — there is no proxy

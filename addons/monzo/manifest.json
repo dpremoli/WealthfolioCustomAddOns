@@ -1,13 +1,13 @@
 {
   "id": "monzo-addon",
   "name": "Monzo Bank Sync",
-  "version": "2.8.1",
+  "version": "2.8.2",
   "description": "Sync Monzo Bank transactions straight into your Wealthfolio cash accounts, for the spending module. No proxy server needed.",
   "author": "dpremoli",
   "license": "GPL-3.0-only",
   "main": "dist/addon.js",
-  "sdkVersion": "3.9.0",
-  "minWealthfolioVersion": "3.9.0",
+  "sdkVersion": "3.11.0",
+  "minWealthfolioVersion": "3.11.0",
   "enabled": true,
   "keywords": ["monzo", "bank", "sync", "oauth", "spending"],
   "network": {
@@ -33,8 +33,8 @@
   },
   "hostDependencies": {
     "@tanstack/react-query": "^5.90.0",
-    "@wealthfolio/addon-sdk": "^3.9.0",
-    "@wealthfolio/ui": "^3.9.0",
+    "@wealthfolio/addon-sdk": "^3.11.0",
+    "@wealthfolio/ui": "^3.11.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
   },

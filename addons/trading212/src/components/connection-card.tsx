@@ -131,9 +131,7 @@ function VerificationBadge({ v }: { v: NonNullable<ConnectionSyncState["verifica
   return (
     <TooltipProvider>
       <Tooltip>
-        <TooltipTrigger asChild>
-          <span className="cursor-default">{badge}</span>
-        </TooltipTrigger>
+        <TooltipTrigger render={<span className="cursor-default" />}>{badge}</TooltipTrigger>
         <TooltipContent side="bottom" className="max-w-md">
           {v.ok ? (
             `${v.positions} positions and the cash balance matched on ${new Date(v.checkedAt).toLocaleString()}.`
@@ -162,11 +160,9 @@ export function LastSync({ label, iso }: { label: string; iso: string | null }) 
   return (
     <TooltipProvider>
       <Tooltip>
-        <TooltipTrigger asChild>
-          <span className="text-muted-foreground flex items-center gap-1 cursor-default">
+        <TooltipTrigger render={<span className="text-muted-foreground flex items-center gap-1 cursor-default" />}>
             <Icons.Clock size={11} weight="duotone" /> {label}: {relativeTime(iso)}
-          </span>
-        </TooltipTrigger>
+          </TooltipTrigger>
         <TooltipContent side="bottom">{new Date(iso).toLocaleString()}</TooltipContent>
       </Tooltip>
     </TooltipProvider>

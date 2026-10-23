@@ -2,7 +2,7 @@
 
 Sync your **Monzo** transactions straight into [Wealthfolio](https://wealthfolio.app) cash
 accounts, so they feed the spending module. Part of the
-[Wealthfolio custom add-ons monorepo](../../README.md). Requires **Wealthfolio 3.9+**.
+[Wealthfolio custom add-ons monorepo](../../README.md). Requires **Wealthfolio 3.11+**.
 
 Version 2 talks to the Monzo API **directly** from inside Wealthfolio. There is no proxy
 server, no Docker container and nothing to host: you register a small OAuth client with

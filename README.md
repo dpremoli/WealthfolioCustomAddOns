@@ -1,7 +1,7 @@
 # Wealthfolio Custom Add-ons
 
 Personal [Wealthfolio](https://wealthfolio.app) add-ons, built against
-**Wealthfolio 3.9 / addon SDK 3.9** (the sandboxed add-on runtime introduced in 3.6).
+**Wealthfolio 3.11 / addon SDK 3.11** (the sandboxed add-on runtime introduced in 3.6).
 
 | Add-on | What it does | Data source |
 |---|---|---|

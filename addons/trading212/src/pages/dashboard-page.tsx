@@ -130,8 +130,7 @@ export default function DashboardPage({ ctx }: AddonPageProps) {
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Tracking mode changed</AlertDialogTitle>
-            <AlertDialogDescription asChild>
-              <div className="space-y-2">
+            <AlertDialogDescription render={<div className="space-y-2" />}>
                 <p>
                   The tracking mode of {pendingDrifts.length > 1 ? "these accounts was" : "this account was"}{" "}
                   changed in Wealthfolio. Re-syncing rebuilds {pendingDrifts.length > 1 ? "them" : "it"} in
@@ -154,7 +153,6 @@ export default function DashboardPage({ ctx }: AddonPageProps) {
                     </li>
                   ))}
                 </ul>
-              </div>
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

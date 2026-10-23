@@ -363,9 +363,7 @@ function RelativeWithTooltip({ iso }: { iso: string }) {
   return (
     <TooltipProvider>
       <Tooltip>
-        <TooltipTrigger asChild>
-          <span className="cursor-default">{relativeTime(iso)}</span>
-        </TooltipTrigger>
+        <TooltipTrigger render={<span className="cursor-default" />}>{relativeTime(iso)}</TooltipTrigger>
         <TooltipContent side="bottom">{new Date(iso).toLocaleString()}</TooltipContent>
       </Tooltip>
     </TooltipProvider>
@@ -579,9 +577,8 @@ export default function SettingsPage({ ctx, location }: AddonPageProps) {
           <div className="space-y-1.5">
             <Label>Environment</Label>
             <ToggleGroup
-              type="single"
-              value={env}
-              onValueChange={(v) => v && setEnv(v as T212Env)}
+              value={[env]}
+              onValueChange={(v) => v[0] && setEnv(v[0] as T212Env)}
               variant="outline"
               className="w-fit"
             >
@@ -610,9 +607,8 @@ export default function SettingsPage({ ctx, location }: AddonPageProps) {
             <div className="ml-10 space-y-1.5">
               <Label>Card account type</Label>
               <ToggleGroup
-                type="single"
-                value={cardAccountType}
-                onValueChange={(v) => v && setCardAccountType(v as "CASH" | "CREDIT_CARD")}
+                  value={[cardAccountType]}
+                onValueChange={(v) => v[0] && setCardAccountType(v[0] as "CASH" | "CREDIT_CARD")}
                 variant="outline"
                 className="w-fit"
               >
@@ -708,9 +704,8 @@ export default function SettingsPage({ ctx, location }: AddonPageProps) {
           <div className="space-y-1.5">
             <Label>Account type</Label>
             <ToggleGroup
-              type="single"
-              value={accountType}
-              onValueChange={(v) => v && pickType(v as AddAccountType)}
+              value={[accountType]}
+              onValueChange={(v) => v[0] && pickType(v[0] as AddAccountType)}
               variant="outline"
               className="w-fit"
             >
@@ -746,9 +741,8 @@ export default function SettingsPage({ ctx, location }: AddonPageProps) {
             <div className="space-y-1.5">
               <Label>Sync mode</Label>
               <ToggleGroup
-                type="single"
-                value={trackingMode}
-                onValueChange={(v) => v && setTrackingMode(v as T212TrackingMode)}
+                  value={[trackingMode]}
+                onValueChange={(v) => v[0] && setTrackingMode(v[0] as T212TrackingMode)}
                 variant="outline"
                 className="w-fit"
               >

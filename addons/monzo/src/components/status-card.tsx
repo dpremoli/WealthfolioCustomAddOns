@@ -71,11 +71,9 @@ function LastSync({ iso }: { iso: string | null }) {
   return (
     <TooltipProvider>
       <Tooltip>
-        <TooltipTrigger asChild>
-          <span className="flex w-fit items-center gap-1 cursor-default">
+        <TooltipTrigger render={<span className="flex w-fit items-center gap-1 cursor-default" />}>
             <Icons.Clock size={12} weight="duotone" /> Last sync: {relativeTime(iso)}
-          </span>
-        </TooltipTrigger>
+          </TooltipTrigger>
         <TooltipContent side="bottom">{new Date(iso).toLocaleString()}</TooltipContent>
       </Tooltip>
     </TooltipProvider>

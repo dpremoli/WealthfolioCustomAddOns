@@ -337,13 +337,13 @@ describe("inferSplit — a split found from the dividend rows' share counts", ()
     // 2/3 on 2021-09-06, but a December count (0.1) that no ratio of the same holding gives.
     const r = inferSplit({ held, events, dividends: [...dividends, ["2021-12-02", 0.1]] });
     expect(r.split).toBeUndefined();
-    expect(r.reason).toContain("do not agree on one clean ratio");
+    expect(r.reason).toContain("do not agree on one usual ratio");
   });
 
-  it("proposes nothing when the share count is not a clean ratio of anything held", () => {
+  it("proposes nothing when the share count is not a usual ratio of anything held", () => {
     const r = inferSplit({ held, events, dividends: [["2021-07-21", 0.23384732], ["2021-09-06", 0.17]] });
     expect(r.split).toBeUndefined();
-    expect(r.reason).toContain("do not agree on one clean ratio");
+    expect(r.reason).toContain("do not agree on one usual ratio");
   });
 
   it("proposes nothing when a later dividend agrees with the activities again", () => {
@@ -373,6 +373,86 @@ describe("inferSplit — a split found from the dividend rows' share counts", ()
   it("does not repeat a dividend row it was given twice", () => {
     const r = inferSplit({ held, events, dividends: [...dividends, ...dividends] });
     expect(r.split?.ratio).toBe(2 / 3);
+  });
+});
+
+describe("inferSplit — what the dividend counts cannot show, and what it refuses", () => {
+  const pennon: QtyEvent[] = [
+    buy("2021-03-10", 0.15),
+    buy("2021-06-15", 0.08384732),
+    buy("2021-07-29", 0.09429628),
+    buy("2021-11-04", 0.0714921),
+  ];
+  const pennonDividends: DividendShares[] = [["2021-07-21", 0.23384732], ["2021-09-06", 0.15589821]];
+
+  it("dates it in the middle of the days that reproduce the quantity", () => {
+    // 2021-07-22 to 2021-07-29 are eight days: the fourth is 2021-07-25.
+    expect(inferSplit({ held: 0.321687, events: pennon, dividends: pennonDividends }).split?.date).toBe("2021-07-25");
+  });
+
+  it("does not take a missing buy or sell for an odd split: only the usual ratios are read", () => {
+    // 5 shares and a buy of 1 the activities lack: 6:5 would fit exactly, but it is no usual ratio.
+    const miss = inferSplit({ held: 6, events: [buy("2020-01-10", 5)], dividends: [["2020-03-15", 5], ["2020-06-15", 6]] });
+    expect(miss.split).toBeUndefined();
+    expect(miss.reason).toContain("do not agree on one usual ratio");
+    expect(inferSplit({ held: 140, events: [buy("2020-01-10", 120)], dividends: [["2020-03-15", 120], ["2020-06-15", 140]] }).split).toBeUndefined();
+  });
+
+  it("does not place a split when a trade moved the holding between the last matching dividend's record and pay dates", () => {
+    // Bought 10, split 2:1 on 03-10 (not listed), bought 5 more on 03-15; the dividend paid 03-20
+    // quotes the 10 held on its record date, 03-01. The replay says 15 by then: the split could be
+    // anywhere before 03-15, so the window opened at 03-21 would mis-date it and scale the 5 as well.
+    const r = inferSplit({
+      held: 25,
+      events: [buy("2020-01-02", 10), buy("2020-03-15", 5)],
+      dividends: [["2020-03-20", 10], ["2020-06-20", 25]],
+    });
+    expect(r.split).toBeUndefined();
+    expect(r.reason).toContain("a later trade had already changed");
+  });
+
+  it("is not fooled by a post-split dividend that quotes what an earlier holding was", () => {
+    // 20 held, 10 sold on 03-01, a 2:1 split on 05-01 (not listed) gives 20 again: the dividend of
+    // 05-20 quotes 20, as the holding in February did, but it is not an unsplit one.
+    const r = inferSplit({
+      held: 20,
+      events: [buy("2020-01-01", 20), sell("2020-03-01", 10)],
+      dividends: [["2020-02-01", 20], ["2020-05-20", 20], ["2020-09-20", 20]],
+    });
+    expect(r.split).toBeUndefined();
+  });
+
+  it("gives the same answer when the activities hold a split (the slow path) as when they do not", () => {
+    const withSplit: QtyEvent[] = [{ day: "2021-01-04", kind: "split", value: 1 }, ...pennon];
+    const a = inferSplit({ held: 0.321687, events: pennon, dividends: pennonDividends });
+    const b = inferSplit({ held: 0.321687, events: withSplit, dividends: pennonDividends });
+    expect(b.split).toEqual(a.split);
+    expect(a.split?.ratio).toBe(2 / 3);
+  });
+
+  it("finds a split in a long history of daily buys without stalling", () => {
+    // 1,800 one-share buys, a real 2:1 split in the middle of a year, annual dividends.
+    const events: QtyEvent[] = [];
+    for (let i = 0; i < 1800; i++) events.push(buy(new Date(Date.UTC(2020, 0, 1) + i * 86_400_000).toISOString().slice(0, 10), 1));
+    const split = "2021-06-10"; // lots bought before it are doubled
+    const shares = (day: string) => events.filter((e) => e.day <= day).reduce((n, e) => n + (e.day < split ? 2 : 1), 0);
+    const dividends: DividendShares[] = [["2020-12-31", 366], ["2021-12-31", shares("2021-12-31")], ["2022-12-31", shares("2022-12-31")]];
+    const t = Date.now();
+    const r = inferSplit({ held: shares("9999-12-31"), events, dividends });
+    expect(Date.now() - t).toBeLessThan(2000);
+    expect(r.split).toMatchObject({ date: split, ratio: 2, after: "2020-12-31", before: "2021-12-31" });
+  });
+
+  it("gives up within its work budget on a long history that also holds a split", () => {
+    const events: QtyEvent[] = [{ day: "2019-01-01", kind: "split", value: 1 }];
+    for (let i = 0; i < 1800; i++) events.push(buy(new Date(Date.UTC(2020, 0, 1) + i * 86_400_000).toISOString().slice(0, 10), 1));
+    const split = "2021-06-10";
+    const shares = (day: string) => events.filter((e) => e.kind === "add" && e.day <= day).reduce((n, e) => n + (e.day < split ? 2 : 1), 0);
+    const dividends: DividendShares[] = [["2020-12-31", 366], ["2021-12-31", shares("2021-12-31")], ["2022-12-31", shares("2022-12-31")]];
+    const t = Date.now();
+    const r = inferSplit({ held: shares("9999-12-31"), events, dividends });
+    expect(Date.now() - t).toBeLessThan(10_000);
+    expect(r.split === undefined ? r.reason : "").toMatch(/too many activities|^$/);
   });
 });
 

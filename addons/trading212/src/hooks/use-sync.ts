@@ -231,7 +231,8 @@ async function collectJsonActivities(
   const dividendShares: DividendShare[] = [];
   for (const d of dividends) {
     const isin = d.instrument?.isin;
-    if (d.type !== "INTEREST" && isin && d.quantity && d.quantity > 0 && d.paidOn) {
+    // Interest and adjustments carry no holding of their own (the CSV path leaves them out too).
+    if (d.type !== "INTEREST" && !/adjust/i.test(d.type ?? "") && isin && d.quantity && d.quantity > 0 && d.paidOn) {
       dividendShares.push({ isin, day: d.paidOn.slice(0, 10), shares: d.quantity });
     }
     if (importedRefs.has(`t212-div-${d.reference}`)) continue;
@@ -1005,7 +1006,16 @@ async function syncOne(
     const previous = (await getSyncState(ctx, conn.id)).verification;
     if (backfillFinished || (previous && !previous.ok)) {
       try {
-        const dividends = await getDividendShares(ctx, conn.id);
+        // A trade left out of the account looks, in the dividend counts, just like a split. With
+        // rows missing the counts are not used: add the rows (the log lists them) and sync again.
+        let dividends = await getDividendShares(ctx, conn.id);
+        if (droppedTrades.length > 0 && Object.keys(dividends).length > 0) {
+          log.push(
+            `Not looking for splits in the dividend rows: ${droppedTrades.length} trade or corporate-action row` +
+              `${droppedTrades.length === 1 ? " was" : "s were"} not imported, which could be what the position is short of.`,
+          );
+          dividends = {};
+        }
         verification = await verifyAndRepair(ctx, client, accountId, resolver, importer, updates, onProgress, log, dividends);
         await setVerification(ctx, conn.id, verification);
         log.push(...verificationLines(verification));

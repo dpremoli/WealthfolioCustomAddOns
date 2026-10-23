@@ -210,13 +210,19 @@ dropped by Reset). `inferSplit` replays the position's activities without the sp
 *unchanged* when its count equals one of the replayed holdings in the 100 days before it (the
 record date precedes the pay date, so trades in between are not in the count); the first
 *changed* one and the last unchanged one before it bound the split (every later dividend must be
-changed). For each candidate day in that window, the holding at a later time is linear in the
-ratio (`f0 + ratio·a`, a split scales the lots held before it), so each changed dividend gives the
-ratios `(count − f0)/a` that would produce it; those that are clean (`cleanRatio`: whole,
-reciprocal or a fraction with a denominator up to 12) and shared by all changed dividends are
-tried with `simulateQuantity` against Trading 212's quantity, at `proposeSplits`' tolerance. The
+changed). The last unchanged one must match the replay's holding on its own pay date: if a trade
+came between its record and pay dates the split could hide before that trade, so nothing is
+inferred. For each candidate day in the window, the holding at a later time is linear in the ratio
+(`f0 + ratio·a`, a split scales the lots held before it), so each changed dividend gives the
+ratios `(count − f0)/a` that would produce it; those that are usual (`cleanRatio`: whole,
+reciprocal, 3:2, 2:3, 5:2, 2:5) and shared by all changed dividends are tried against Trading 212's
+quantity, at `proposeSplits`' tolerance, and the winner is re-checked with `simulateQuantity`. The
 SPLIT goes in only when exactly one ratio reproduces it; it is dated in the middle of the days that
-do. It runs only when the known-splits table proposed nothing (and did not tie).
+do. Without splits among the activities the holding is a prefix sum (lookups), otherwise each query
+replays them within a work budget (it gives up beyond it). A split and a trade missing from the
+account are indistinguishable here, so `use-sync` withholds the counts from any sync that left out
+a trade or corporate action, and `cleanRatio` leaves out fractions a missing trade could fake.
+It runs only when the known-splits table proposed nothing (and did not tie).
 
 ### Background auto-sync (`auto-sync.ts`)
 

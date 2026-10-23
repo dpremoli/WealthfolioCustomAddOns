@@ -1140,6 +1140,49 @@ describe("useSync — a split found from the dividend rows", () => {
   });
 });
 
+describe("useSync — no split is inferred while rows were left out", () => {
+  it("says so and adds nothing when a trade was not imported (it would look like a split)", async () => {
+    const row = (cells: Record<string, string>) => CSV_HDR.split(",").map((h) => cells[h] ?? "").join(",");
+    const trade = (time: string, shares: string, id: string) =>
+      row({ Action: "Market buy", Time: time, ISIN: "GB00BNNTLN49", Ticker: "PNN_EQ", Name: "Pennon", "No. of shares": shares, "Price / share": "1100", "Currency (Price / share)": "GBX", Total: "3", "Currency (Total)": "GBP", ID: id });
+    const dividend = (time: string, shares: string) =>
+      row({ Action: "Dividend (Ordinary)", Time: time, ISIN: "GB00BNNTLN49", Ticker: "PNN_EQ", Name: "Pennon", "No. of shares": shares, "Currency (Price / share)": "GBP", Total: "0.05", "Currency (Total)": "GBP" });
+    // One share bought, then a buy of 2 whose row has no usable quantity; Trading 212 holds 3 and
+    // its dividend counts go 1 → 3. That reads exactly like a 3:1 split, so it must not be used.
+    const csv = [
+      CSV_HDR,
+      trade("2020-01-10 09:00:00", "1", "B1"),
+      dividend("2020-03-15 08:00:00", "1"),
+      trade("2020-04-10 09:00:00", "0", "B2"), // not importable: a missing trade
+      dividend("2020-06-15 08:00:00", "3"),
+    ].join("\n");
+    let downloads = 0;
+    net(async (url: string) => {
+      const u = String(url);
+      if (u.includes("amazonaws.com")) return textResponse(downloads++ === 0 ? csv : CSV_HDR);
+      if (u.includes("/exports")) return jsonResponse([FINISHED_REPORT]);
+      if (u.includes("account/summary")) return jsonResponse({ id: 1, currency: "GBP", cash: { availableToTrade: 0 } });
+      if (u.includes("/positions"))
+        return jsonResponse([{ instrument: { ticker: "PNN_EQ", isin: "GB00BNNTLN49", name: "Pennon", currency: "GBX" }, quantity: 3 }]);
+      return routeFetch(u);
+    });
+    const { ctx, importFn } = makeCtx({
+      syncStates: { c1: { lastSync: null, importedRefs: [] } },
+      searchTicker: async () => [{ symbol: "PNN", exchangeMic: "XLON", currency: "GBX", score: 1, quoteType: "EQUITY" }],
+      holdings: () => [{ holdingType: "security", instrument: { symbol: "PNN" }, quantity: 1, localCurrency: "GBP" }],
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { result } = renderHook(() => useSync(ctx as any));
+    await act(async () => {
+      await result.current.syncAll();
+    });
+    expect(importFn.mock.calls.flatMap((c) => c[0] as ActivityImport[]).some((a) => a.activityType === "SPLIT")).toBe(false);
+    const r = result.current.results!.perAccount[0];
+    expect(r.error).toContain("not imported");
+    expect(r.log.join("\n")).toContain("Not looking for splits in the dividend rows: 1 trade or corporate-action row was not imported");
+  });
+});
+
 describe("useSync — dividend share counts from the JSON feed", () => {
   it("keeps the quantity of each dividend, by ISIN, even for a dividend already imported", async () => {
     net(async (url: string) => {
@@ -1149,6 +1192,7 @@ describe("useSync — dividend share counts from the JSON feed", () => {
           items: [
             { ticker: "PNN_EQ", reference: "d1", type: "ORDINARY", amount: 0.05, currency: "GBP", quantity: 0.23384732, paidOn: "2021-07-21T08:00:00Z", instrument: { ticker: "PNN_EQ", isin: "GB00BNNTLN49" } },
             { ticker: "PNN_EQ", reference: "d2", type: "INTEREST", amount: 0.01, currency: "GBP", quantity: 5, paidOn: "2021-08-01T08:00:00Z", instrument: { ticker: "PNN_EQ", isin: "GB00BNNTLN49" } },
+            { ticker: "PNN_EQ", reference: "d4", type: "DIVIDEND_ADJUSTMENT", amount: 0.01, currency: "GBP", quantity: 9, paidOn: "2021-08-02T08:00:00Z", instrument: { ticker: "PNN_EQ", isin: "GB00BNNTLN49" } },
             { ticker: "NOQ_EQ", reference: "d3", type: "ORDINARY", amount: 0.01, currency: "GBP", paidOn: "2021-08-01T08:00:00Z", instrument: { ticker: "NOQ_EQ", isin: "GB0000000000" } },
           ],
           nextPagePath: null,

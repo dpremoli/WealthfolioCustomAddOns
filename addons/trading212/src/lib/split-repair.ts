@@ -74,6 +74,8 @@ export interface SplitProposal {
   splits: KnownSplit[];
   /** Why there is none, or what the proposal rests on. */
   reason: string;
+  /** Several known splits explain the gap equally well: nothing else should be tried either. */
+  ambiguous?: boolean;
 }
 
 /** A ratio as people say it: 20:1, 1:10, 2:3 (a 2-for-3 consolidation); else "×0.805". */
@@ -147,11 +149,167 @@ export function proposeSplits(input: {
     return { splits: best[0], reason: `${gap}: ${best[0].map((s) => `${describeRatio(s.ratio)} on ${s.date}`).join(" and ")} reproduces it exactly.` };
   }
   if (best.length > 1) {
-    return { splits: [], reason: `${gap}: several known splits would explain it equally well, so none was added.` };
+    return { splits: [], reason: `${gap}: several known splits would explain it equally well, so none was added.`, ambiguous: true };
   }
   return {
     splits: [],
     reason: `${gap}: the known splits for ${isin} (${candidates.map((c) => `${describeRatio(c.ratio)} on ${c.date}`).join(", ")}) do not reproduce it${hint || "."}`,
+  };
+}
+
+/** What a dividend row says Trading 212 held when it paid: `[YYYY-MM-DD, "No. of shares"]`. */
+export type DividendShares = [day: string, shares: number];
+
+export interface InferredSplit {
+  /** The day the SPLIT is dated: the middle of the days that reproduce the quantity. */
+  date: string;
+  ratio: number;
+  /** The last dividend that still shows the unsplit holding. */
+  after: string;
+  /** The first dividend that shows the split one. */
+  before: string;
+  /** The first and last day in the window that reproduce Trading 212's quantity. */
+  from: string;
+  to: string;
+}
+
+export interface SplitInference {
+  split?: InferredSplit;
+  /** What it rests on, or why there is none. */
+  reason: string;
+}
+
+/** How long before a dividend's pay date the holding it quotes may date from (the record date comes first). */
+const LOOKBACK_DAYS = 100;
+/** The widest window of days between two dividends that is searched. */
+const MAX_WINDOW_DAYS = 800;
+
+const addDays = (d: string, n: number): string => new Date(Date.parse(d) + n * 86_400_000).toISOString().slice(0, 10);
+/** Dividend rows quote the holding to 10 decimals, so the replayed holding has to agree to within that. */
+const sharesTolerance = (shares: number) => 1e-6 + 1e-6 * Math.abs(shares);
+
+/**
+ * A ratio as a company announces it: a whole ratio (20:1, 3:1), its reciprocal (1:10) or a
+ * fraction with a small denominator (2:3, 3:2), when `ratio` is within `tolerance` (relative) of
+ * one, else null. 1 is not a split.
+ */
+export function cleanRatio(ratio: number, tolerance = 1e-5): number | null {
+  if (!Number.isFinite(ratio) || ratio <= 0) return null;
+  const near = (a: number, b: number) => Math.abs(a - b) <= tolerance * Math.max(a, b);
+  const whole = Math.round(ratio);
+  if (whole >= 2 && whole <= 100 && near(ratio, whole)) return whole;
+  const inverse = Math.round(1 / ratio);
+  if (inverse >= 2 && inverse <= 100 && near(1 / ratio, inverse)) return 1 / inverse;
+  for (let b = 2; b <= 12; b++) {
+    const a = Math.round(ratio * b);
+    if (a >= 1 && a <= 100 && a !== b && near(ratio, a / b)) return a / b;
+  }
+  return null;
+}
+
+/**
+ * Finds a split Trading 212 never listed from the dividend rows of the position. A row says how
+ * many shares Trading 212 held when it paid, so replaying the position's activities (without the
+ * split) shows where the two part company: the last dividend whose count the replay agrees with
+ * and the first whose count it does not bracket the split. The ratio is the count Trading 212
+ * quotes divided by the replayed holding the split acted on, which has to be a clean ratio (2:3,
+ * 3:1, 1:10 …) and the same for every dividend after it. The split is proposed only if, dated
+ * inside the window, it makes the activities add up to `held` exactly (the tolerance of
+ * {@link proposeSplits}). Nothing is proposed when the evidence is not clear: no dividend on one
+ * side of the window, a dividend that contradicts the order, ratios that are unclean or differ,
+ * or several ratios that fit.
+ */
+export function inferSplit(input: { held: number; events: QtyEvent[]; dividends: DividendShares[] }): SplitInference {
+  const { held, events } = input;
+  const none = (reason: string): SplitInference => ({ reason: `Dividend share counts: ${reason}` });
+  const tol = tolerance(held);
+  if (events.length === 0) return none("no activities for the position.");
+  if (Math.abs(simulateQuantity(events) - held) <= tol) return none("the activities already agree with Trading 212.");
+
+  const seen = new Set<string>();
+  const dividends = input.dividends
+    .filter(([d, n]) => /^\d{4}-\d{2}-\d{2}$/.test(d) && n > 0)
+    .filter(([d, n]) => !seen.has(`${d}|${n}`) && !!seen.add(`${d}|${n}`))
+    .sort((a, b) => (a[0] === b[0] ? a[1] - b[1] : a[0] < b[0] ? -1 : 1));
+  if (dividends.length < 2) return none(`${dividends.length} dividend row${dividends.length === 1 ? "" : "s"} for it, too few to place a split.`);
+
+  const eventDays = [...new Set(events.map((e) => e.day))].sort();
+  const upTo = (cutoff: string) => events.filter((e) => e.day <= cutoff);
+
+  // The holdings the replay gives in the lookback before a dividend: the one at its start, then
+  // the one after each event day. The count a row quotes is one of them (the record date is
+  // before the pay date, so trades in between are not in it).
+  const unsplit = (day: string): number[] => {
+    const lo = addDays(day, -LOOKBACK_DAYS);
+    return [lo, ...eventDays.filter((d) => d > lo && d <= day)].map((c) => simulateQuantity(upTo(c)));
+  };
+  const unchanged = dividends.map(([day, n]) => unsplit(day).some((q) => Math.abs(q - n) <= sharesTolerance(n)));
+  const k = unchanged.indexOf(false);
+  if (k < 0) return none("every dividend agrees with the activities, so none shows a change.");
+  if (k === 0) return none(`no dividend before the first difference (${dividends[0][0]}) agrees with the activities.`);
+  if (unchanged.slice(k).some(Boolean)) {
+    return none("a dividend after the first difference agrees with the activities again, so the counts are not one change.");
+  }
+  const after = dividends[k - 1][0];
+  const before = dividends[k][0];
+  const changed = dividends.slice(k);
+  const days: string[] = [];
+  for (let d = addDays(after, 1); d <= before; d = addDays(d, 1)) days.push(d);
+  if (days.length > MAX_WINDOW_DAYS) return none(`${after} to ${before} is too wide a window to search.`);
+
+  // With the split at `date` the holding at any later point is `f0 + ratio * a` (a split scales
+  // the lots bought before it), so each dividend gives the ratios that would produce its count.
+  const ratiosAt = (date: string): number[] => {
+    let common: number[] | null = null;
+    for (const [day, n] of changed) {
+      const lo = addDays(day, -LOOKBACK_DAYS) > date ? addDays(day, -LOOKBACK_DAYS) : date;
+      const cutoffs = new Set([lo, ...eventDays.filter((d) => d > lo && d <= day)]);
+      if (lo === date) cutoffs.add(addDays(date, -1)); // just after the split, before the day's own trades
+      const mine = new Set<number>();
+      for (const c of cutoffs) {
+        const f0 = simulateQuantity(upTo(c), [{ date, ratio: 0 }]);
+        const a = simulateQuantity(upTo(c), [{ date, ratio: 1 }]) - f0;
+        if (a <= 0) continue;
+        const ratio = cleanRatio((n - f0) / a);
+        if (ratio !== null) mine.add(ratio);
+      }
+      common = common === null ? [...mine] : common.filter((r) => mine.has(r));
+      if (common.length === 0) return [];
+    }
+    return common ?? [];
+  };
+
+  const fits: { date: string; ratio: number }[] = [];
+  let consistent = false;
+  for (const date of days) {
+    for (const ratio of ratiosAt(date)) {
+      consistent = true;
+      if (Math.abs(simulateQuantity(events, [{ date, ratio }]) - held) <= tol) fits.push({ date, ratio });
+    }
+  }
+  if (!consistent) {
+    return none(
+      `the dividends after ${after} do not agree on one clean ratio (2:3, 3:1, 1:10 …), so no split was inferred.`,
+    );
+  }
+  if (fits.length === 0) {
+    return none(`no split between ${after} and ${before} reproduces Trading 212's quantity (${fmt(held)}), so none was added.`);
+  }
+  const ratios = [...new Set(fits.map((f) => f.ratio))];
+  if (ratios.length > 1) {
+    return none(`${ratios.map(describeRatio).join(" and ")} both reproduce it between ${after} and ${before}, so none was added.`);
+  }
+  const ratio = ratios[0];
+  const dates = fits.map((f) => f.date);
+  const date = dates[Math.floor((dates.length - 1) / 2)];
+  const from = dates[0];
+  const to = dates[dates.length - 1];
+  const span = from === to ? from : `any date from ${from} to ${to}`;
+  return {
+    split: { date, ratio, after, before, from, to },
+    reason:
+      `Dividend share counts put a ${describeRatio(ratio)} split between ${after} and ${before}; ` +
+      `${span} makes the activities add up to ${fmt(held)}, as Trading 212 holds, so it is dated ${date}.`,
   };
 }
 
@@ -167,11 +325,25 @@ export async function repairSplits(
   accountId: string,
   gaps: PositionGap[],
   log: string[],
+  dividends: Record<string, DividendShares[]> = {},
 ): Promise<number> {
   const rows = (await importer.existingIn(accountId)) as RowLike[];
   const units: ActivityImport[][] = [];
   for (const gap of gaps) {
-    const proposal = proposeSplits({ isin: gap.isin, held: gap.held, events: quantityEvents(rows, gap.symbol) });
+    const events = quantityEvents(rows, gap.symbol);
+    let proposal = proposeSplits({ isin: gap.isin, held: gap.held, events });
+    let how = "the known splits";
+    if (proposal.splits.length === 0 && !proposal.ambiguous && gap.isin && dividends[gap.isin]) {
+      // No known split explains it: try the share counts the position's dividend rows report.
+      const inferred = inferSplit({ held: gap.held, events, dividends: dividends[gap.isin] });
+      if (inferred.split) {
+        const { date, ratio } = inferred.split;
+        proposal = { splits: [{ isin: gap.isin, date, ratio, name: gap.name ?? gap.ticker }], reason: inferred.reason };
+        how = "the dividend share counts";
+      } else {
+        proposal = { splits: [], reason: `${proposal.reason} ${inferred.reason}` };
+      }
+    }
     if (proposal.splits.length === 0) {
       log.push(`${gap.ticker} (${gap.name ?? "?"}): ${proposal.reason}`);
       continue;
@@ -180,6 +352,7 @@ export async function repairSplits(
     if (!resolved) continue;
     for (const s of proposal.splits) {
       log.push(`${gap.ticker}: adding the ${describeRatio(s.ratio)} split of ${s.date} that Trading 212's history does not list. ${proposal.reason}`);
+      const found = how === "the known splits" ? "found from the position difference" : `inferred from ${how}`;
       units.push([
         {
           id: `t212-split-${s.isin}-${s.date.replace(/-/g, "")}`,
@@ -191,7 +364,7 @@ export async function repairSplits(
           currency: gap.currency ?? "USD",
           isValid: true,
           isDraft: false,
-          comment: `Stock split ${describeRatio(s.ratio)} (not in the Trading 212 export; found from the position difference)`,
+          comment: `Stock split ${describeRatio(s.ratio)} (not in the Trading 212 export; ${found})`,
         },
       ]);
     }

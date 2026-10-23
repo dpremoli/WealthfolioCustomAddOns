@@ -77,6 +77,9 @@ export interface ConnectionSyncState {
   // synced independently of the JSON activity watermark). Absent ⇒ card history not yet
   // backfilled; set to the sync time after the first card backfill completes.
   cardLastSync?: string | null;
+  // The share count each dividend row reported ("No. of shares": the holding it was paid on),
+  // by ISIN, as [YYYY-MM-DD, shares]. Evidence for finding a split Trading 212 never listed.
+  dividendShares?: Record<string, [string, number][]>;
   // Last comparison of the account with Trading 212's positions and cash (Transactions mode),
   // made after a full backfill and again on each sync until it matches. Absent ⇒ never checked.
   verification?: {

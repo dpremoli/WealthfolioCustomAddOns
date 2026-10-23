@@ -199,8 +199,24 @@ the `SPLIT` activities only if the quantity then equals Trading 212's to within 
 (`proposeSplits`; the smallest set that fits, never a tie). The date has to come from the table:
 Wealthfolio's stored quotes are split-adjusted (Yahoo's `close`), and the host never fetches split
 events (`events=div` only), so there is no price jump to find. Positions no known split explains
-are described in the log with the ratio they imply. The repair compares activities, not
-Wealthfolio's holdings, so it does not wait for the recalculation.
+are tried against the position's dividend rows (`inferSplit`, below), and else described in the
+log with the ratio they imply. The repair compares activities, not Wealthfolio's holdings, so it
+does not wait for the recalculation.
+
+**Splits inferred from dividend rows.** A dividend row's `No. of shares` is the holding it was paid
+on. The sync keeps `[day, shares]` per ISIN in `t212_sync_{id}.dividendShares` (CSV rows via
+`dividendShareOf`, JSON items from `quantity`; recorded even for rows already imported, merged,
+dropped by Reset). `inferSplit` replays the position's activities without the split. A dividend is
+*unchanged* when its count equals one of the replayed holdings in the 100 days before it (the
+record date precedes the pay date, so trades in between are not in the count); the first
+*changed* one and the last unchanged one before it bound the split (every later dividend must be
+changed). For each candidate day in that window, the holding at a later time is linear in the
+ratio (`f0 + ratio·a`, a split scales the lots held before it), so each changed dividend gives the
+ratios `(count − f0)/a` that would produce it; those that are clean (`cleanRatio`: whole,
+reciprocal or a fraction with a denominator up to 12) and shared by all changed dividends are
+tried with `simulateQuantity` against Trading 212's quantity, at `proposeSplits`' tolerance. The
+SPLIT goes in only when exactly one ratio reproduces it; it is dated in the middle of the days that
+do. It runs only when the known-splits table proposed nothing (and did not tie).
 
 ### Background auto-sync (`auto-sync.ts`)
 
@@ -482,8 +498,9 @@ versions must match or packaging refuses. The bundle imports only host-provided 
 
 - **Corporate actions**: explicit split pairs, distributions and conversions are mapped; splits
   with no row in the export need the known-splits table for their date (it holds fractional
-  ratios too: Pennon's 2-for-3 consolidation is 2/3), and a split that is not in it is only
-  described, with the overall ratio it implies. An incremental (JSON) sync does not see a
+  ratios too: Pennon's 2-for-3 consolidation is 2/3). A split that is not in it is inferred from
+  the position's dividend rows when they are clear (see above), and otherwise only described,
+  with the overall ratio it implies. An incremental (JSON) sync does not see a
   new split's row; the check reports the position and a re-sync after **Reset** brings it in. A
   swap into a different ticker or ISIN is reported, not mapped. Wealthfolio's `SPLIT` takes the
   ratio in `amount`, needs the asset, and applies to lots bought strictly before the split day.

@@ -346,6 +346,33 @@ export async function addImportedRefs(
   await store(ctx).set(syncKey(id), { ...state, importedRefs: [...set] });
 }
 
+/** What a dividend row says about a position: it was paid on `shares` on `day`. */
+export interface DividendShare {
+  isin: string;
+  day: string;
+  shares: number;
+}
+
+/** The dividend share counts kept for a connection, by ISIN. */
+export async function getDividendShares(ctx: AddonContext, id: string): Promise<Record<string, [string, number][]>> {
+  return (await getSyncState(ctx, id)).dividendShares ?? {};
+}
+
+/** Adds dividend share counts to what is kept for a connection (a pair already held is not repeated). */
+export async function addDividendShares(ctx: AddonContext, id: string, entries: DividendShare[]): Promise<void> {
+  if (entries.length === 0) return;
+  const state = await getSyncState(ctx, id);
+  const all: Record<string, [string, number][]> = { ...(state.dividendShares ?? {}) };
+  let changed = false;
+  for (const e of entries) {
+    const list = (all[e.isin] = [...(all[e.isin] ?? [])]);
+    if (list.some(([d, n]) => d === e.day && n === e.shares)) continue;
+    list.push([e.day, e.shares]);
+    changed = true;
+  }
+  if (changed) await store(ctx).set(syncKey(id), { ...state, dividendShares: all });
+}
+
 export async function resetSyncState(ctx: AddonContext, id: string): Promise<void> {
   await store(ctx).delete(syncKey(id));
 }

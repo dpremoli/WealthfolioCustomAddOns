@@ -162,6 +162,22 @@ function tradeFxAndFee(
 }
 
 /**
+ * The holding a dividend row was paid on ("No. of shares"), with the row's day and ISIN. It tells
+ * what Trading 212 held on that date, which is how a split it never listed is found
+ * (see `inferSplit`). Adjustments carry no holding of their own.
+ */
+export function dividendShareOf(row: Record<string, string>): { isin: string; day: string; shares: number } | null {
+  const action = (row["Action"] ?? "").trim().toLowerCase();
+  if (!action.startsWith("dividend") || action.includes("adjustment")) return null;
+  const isin = row["ISIN"]?.trim();
+  const shares = parseAmount(row["No. of shares"]);
+  const time = col(row, "Time", "Time (UTC)");
+  if (!isin || !(shares > 0) || !time) return null;
+  const day = toIsoDate(time).slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(day) ? { isin, day, shares } : null;
+}
+
+/**
  * Maps one T212 CSV row to a Wealthfolio ActivityImport.
  *
  * Returns null for unrecognised actions (stock splits, spin-offs, unknown rows),

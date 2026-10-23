@@ -1,9 +1,20 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ActivityImport, AddonContext } from "@wealthfolio/addon-sdk";
 import { ActivityImporter } from "./importer";
 import type { KnownSplit } from "./known-splits";
 import { KNOWN_SPLITS } from "./known-splits";
-import { describeRatio, proposeSplits, quantityEvents, repairSplits, simulateQuantity, type PositionGap, type QtyEvent } from "./split-repair";
+import {
+  cleanRatio,
+  describeRatio,
+  inferSplit,
+  proposeSplits,
+  quantityEvents,
+  repairSplits,
+  simulateQuantity,
+  type DividendShares,
+  type PositionGap,
+  type QtyEvent,
+} from "./split-repair";
 import type { SymbolResolver } from "./symbol-resolver";
 
 const buy = (day: string, value: number): QtyEvent => ({ day, kind: "add", value });
@@ -246,5 +257,207 @@ describe("describeRatio", () => {
     expect(describeRatio(2 / 3)).toBe("2:3");
     expect(describeRatio(0.96)).toBe("×0.96");
     expect(describeRatio(0.804955)).toBe("×0.804955");
+  });
+});
+
+describe("cleanRatio", () => {
+  it("reads whole ratios, reciprocals and small fractions, and nothing else", () => {
+    expect(cleanRatio(20.0000001)).toBe(20);
+    expect(cleanRatio(0.1000001)).toBe(0.1);
+    expect(cleanRatio(0.15589821 / 0.23384732)).toBe(2 / 3);
+    expect(cleanRatio(1.5000001)).toBe(1.5);
+    expect(cleanRatio(0.804955)).toBeNull();
+    expect(cleanRatio(1)).toBeNull();
+    expect(cleanRatio(0)).toBeNull();
+    expect(cleanRatio(Number.NaN)).toBeNull();
+  });
+});
+
+describe("inferSplit — a split found from the dividend rows' share counts", () => {
+  // Pennon, from the real export: nothing in the table. The dividend of 2021-07-21 was paid on
+  // 0.23384732 shares; the one of 2021-09-06 on 0.15589821 (= ×2/3), which excludes the buy of
+  // 2021-07-29, so the holding it quotes dates from before that buy.
+  const events: QtyEvent[] = [
+    buy("2021-03-10", 0.15),
+    buy("2021-06-15", 0.08384732),
+    buy("2021-07-29", 0.09429628),
+    buy("2021-11-04", 0.0714921),
+  ];
+  const held = 0.321687;
+  const dividends: DividendShares[] = [
+    ["2021-07-21", 0.23384732],
+    ["2021-09-06", 0.15589821],
+  ];
+
+  it("finds 2:3 between 2021-07-21 and 2021-09-06 and lands on Trading 212's 0.321687", () => {
+    const r = inferSplit({ held, events, dividends });
+    expect(r.split).toMatchObject({ ratio: 2 / 3, after: "2021-07-21", before: "2021-09-06", from: "2021-07-22", to: "2021-07-29" });
+    expect(r.split!.date >= "2021-07-22" && r.split!.date <= "2021-07-29").toBe(true);
+    expect(simulateQuantity(events, [{ date: r.split!.date, ratio: r.split!.ratio }])).toBeCloseTo(held, 6);
+    expect(r.reason).toContain("2:3 split between 2021-07-21 and 2021-09-06");
+    expect(r.reason).toContain("any date from 2021-07-22 to 2021-07-29");
+  });
+
+  it("is not thrown by dividends after the split and later trades (each gives the same ratio)", () => {
+    // After the buy of 2021-11-04 the holding is 0.15589821 + 0.09429628 + 0.0714921 = 0.32168659,
+    // and a dividend in 2022 quotes it; it is not the unsplit holding times anything.
+    const later: DividendShares[] = [...dividends, ["2021-12-02", 0.15589821 + 0.09429628 + 0.0714921]];
+    expect(inferSplit({ held, events, dividends: later }).split).toMatchObject({ ratio: 2 / 3, from: "2021-07-22", to: "2021-07-29" });
+  });
+
+  it("works when the position has sold shares since, and for a whole ratio", () => {
+    // 10 shares, 3:1 split in the spring, 5 sold afterwards: 25 held.
+    const ev = [buy("2020-01-10", 10), sell("2020-09-01", 5), buy("2020-10-05", 1)];
+    const divs: DividendShares[] = [
+      ["2020-02-14", 10],
+      ["2020-05-15", 10],
+      ["2020-08-14", 30],
+      ["2020-11-13", 26],
+    ];
+    // 10×3 − 5 + 1 = 26.
+    const r = inferSplit({ held: 26, events: ev, dividends: divs });
+    expect(r.split).toMatchObject({ ratio: 3, after: "2020-05-15", before: "2020-08-14" });
+  });
+
+  it("finds a reverse split", () => {
+    const ev = [buy("2020-01-10", 100)];
+    const r = inferSplit({ held: 10, events: ev, dividends: [["2020-02-01", 100], ["2020-08-01", 10]] });
+    expect(r.split).toMatchObject({ ratio: 0.1 });
+  });
+
+  it("proposes nothing without a dividend that agrees before it, or one that differs after it", () => {
+    const only = (d: DividendShares[]) => inferSplit({ held, events, dividends: d });
+    expect(only([["2021-09-06", 0.15589821]]).split).toBeUndefined();
+    expect(only([["2021-09-06", 0.15589821], ["2021-10-06", 0.15589821]]).reason).toContain("no dividend before");
+    expect(only([["2021-07-21", 0.23384732], ["2021-08-21", 0.23384732]]).reason).toContain("none shows a change");
+    expect(only([]).reason).toContain("0 dividend rows");
+  });
+
+  it("proposes nothing when the dividends after the window disagree on the ratio", () => {
+    // 2/3 on 2021-09-06, but a December count (0.1) that no ratio of the same holding gives.
+    const r = inferSplit({ held, events, dividends: [...dividends, ["2021-12-02", 0.1]] });
+    expect(r.split).toBeUndefined();
+    expect(r.reason).toContain("do not agree on one clean ratio");
+  });
+
+  it("proposes nothing when the share count is not a clean ratio of anything held", () => {
+    const r = inferSplit({ held, events, dividends: [["2021-07-21", 0.23384732], ["2021-09-06", 0.17]] });
+    expect(r.split).toBeUndefined();
+    expect(r.reason).toContain("do not agree on one clean ratio");
+  });
+
+  it("proposes nothing when a later dividend agrees with the activities again", () => {
+    const r = inferSplit({ held, events, dividends: [...dividends, ["2021-12-02", 0.3996357]] });
+    expect(r.split).toBeUndefined();
+    expect(r.reason).toContain("agrees with the activities again");
+  });
+
+  it("proposes nothing when no date in the window reproduces Trading 212's quantity", () => {
+    const r = inferSplit({ held: 0.33, events, dividends });
+    expect(r.split).toBeUndefined();
+    expect(r.reason).toContain("reproduces Trading 212's quantity (0.33)");
+  });
+
+  it("proposes nothing when the position already agrees, or has no activities", () => {
+    expect(inferSplit({ held: 0.3996357, events, dividends }).reason).toContain("already agree");
+    expect(inferSplit({ held, events: [], dividends }).split).toBeUndefined();
+  });
+
+  it("proposes nothing when a clean ratio from the dividends is not what Trading 212 holds", () => {
+    // The dividend says ×2 (1 → 2 shares) but Trading 212 holds 4: the counts do not explain it.
+    const r = inferSplit({ held: 4, events: [buy("2020-01-01", 1)], dividends: [["2020-02-01", 1], ["2020-06-01", 2]] });
+    expect(r.split).toBeUndefined();
+    expect(r.reason).toContain("reproduces Trading 212's quantity (4)");
+  });
+
+  it("does not repeat a dividend row it was given twice", () => {
+    const r = inferSplit({ held, events, dividends: [...dividends, ...dividends] });
+    expect(r.split?.ratio).toBe(2 / 3);
+  });
+});
+
+describe("repairSplits — from the dividend rows, with Pennon out of the table", () => {
+  const entry = KNOWN_SPLITS.findIndex((k) => k.isin === "GB00BNNTLN49");
+  let removed: KnownSplit[] = [];
+  beforeEach(() => {
+    removed = KNOWN_SPLITS.splice(entry, 1);
+  });
+  afterEach(() => {
+    KNOWN_SPLITS.splice(entry, 0, ...removed);
+  });
+
+  const trades = [
+    ["2021-03-10", "0.15"],
+    ["2021-06-15", "0.08384732"],
+    ["2021-07-29", "0.0942963"],
+    ["2021-11-04", "0.0714921"],
+  ];
+  function setup() {
+    const imported: ActivityImport[][] = [];
+    const ctx = {
+      api: {
+        activities: {
+          getAll: async () => trades.map(([d, q]) => ({ activityType: "BUY", date: new Date(`${d}T10:00:00Z`), quantity: q, assetSymbol: "PNN" })),
+          checkImport: async (r: ActivityImport[]) => r,
+          import: async (r: ActivityImport[]) => {
+            imported.push(r);
+            return { summary: { imported: r.length, skipped: 0 } };
+          },
+        },
+      },
+    } as unknown as AddonContext;
+    const resolver = { resolveDetailed: async () => ({ symbol: "PNN", exchangeMic: "XLON" }) } as unknown as SymbolResolver;
+    return { importer: new ActivityImporter(ctx), resolver, imported };
+  }
+  const gap: PositionGap = {
+    ticker: "PNN_GB_EQ",
+    isin: "GB00BNNTLN49",
+    name: "Pennon",
+    symbol: "PNN",
+    currency: "GBX",
+    held: 0.321687,
+    derived: 0.3996357,
+  };
+  const dividends = { GB00BNNTLN49: [["2021-07-21", 0.23384732], ["2021-09-06", 0.15589821]] as DividendShares[] };
+
+  it("the table no longer holds Pennon", () => {
+    expect(KNOWN_SPLITS.some((k) => k.isin === "GB00BNNTLN49")).toBe(false);
+  });
+
+  it("imports a 2/3 SPLIT inside the window, says how it was found, and repeating adds nothing", async () => {
+    const t = setup();
+    const log: string[] = [];
+    expect(await repairSplits(t.importer, t.resolver, "inv", [gap], log, dividends)).toBe(1);
+    const split = t.imported[0][0];
+    expect(split).toMatchObject({ activityType: "SPLIT", symbol: "PNN", exchangeMic: "XLON", amount: 2 / 3, currency: "GBX" });
+    const day = String(split.date).slice(0, 10);
+    expect(day >= "2021-07-22" && day <= "2021-07-29").toBe(true);
+    expect(split.id).toBe(`t212-split-GB00BNNTLN49-${day.replace(/-/g, "")}`);
+    expect(split.comment).toContain("inferred from the dividend share counts");
+    expect(log[0]).toContain("adding the 2:3 split of");
+    expect(log[0]).toContain("between 2021-07-21 and 2021-09-06");
+    expect(await repairSplits(t.importer, t.resolver, "inv", [gap], log, dividends)).toBe(0);
+  });
+
+  it("imports nothing, and says why, without dividend rows or when they are not clear", async () => {
+    const t = setup();
+    const log: string[] = [];
+    expect(await repairSplits(t.importer, t.resolver, "inv", [gap], log)).toBe(0);
+    expect(await repairSplits(t.importer, t.resolver, "inv", [gap], log, { GB00BNNTLN49: [["2021-09-06", 0.15589821]] })).toBe(0);
+    expect(await repairSplits(t.importer, t.resolver, "inv", [gap], log, { GB0000000000: dividends.GB00BNNTLN49 })).toBe(0);
+    expect(t.imported).toEqual([]);
+    expect(log[1]).toContain("Dividend share counts: 1 dividend row");
+  });
+
+  it("prefers the table: with Pennon back in it the split is the table's and says so", async () => {
+    KNOWN_SPLITS.splice(entry, 0, ...removed);
+    try {
+      const t = setup();
+      expect(await repairSplits(t.importer, t.resolver, "inv", [gap], [], dividends)).toBe(1);
+      expect(t.imported[0][0]).toMatchObject({ id: "t212-split-GB00BNNTLN49-20210726" });
+      expect(t.imported[0][0].comment).toContain("found from the position difference");
+    } finally {
+      KNOWN_SPLITS.splice(entry, 1);
+    }
   });
 });

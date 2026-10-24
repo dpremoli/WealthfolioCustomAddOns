@@ -9,7 +9,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@wealthfolio/ui";
-import { addonRoute, describeUnsaved, jsonStore, type AddonPageProps } from "@wf-addons/kit";
+import { addonRoute, describeRefused, jsonStore, type AddonPageProps } from "@wf-addons/kit";
 import { ACCOUNTS_KEY, ADDON_ID, KEY_SAVINGS_ACCOUNT } from "../constants";
 import { parseRevolutCsv } from "../lib/csv-parser";
 import { importStatement, type StatementImportOutcome } from "../lib/import";
@@ -262,8 +262,8 @@ export default function CsvImportPage({ ctx }: AddonPageProps) {
                   <div className="space-y-1 text-sm text-destructive" role="alert">
                     <p>{result.error}</p>
                     <ul className="list-disc pl-5 text-xs">
-                      {result.unsaved.slice(0, 20).map((u) => (
-                        <li key={u.activity.id ?? describeUnsaved(u)}>{describeUnsaved(u)}</li>
+                      {describeRefused(result.refused, 20).map((line) => (
+                        <li key={line}>{line.trim()}</li>
                       ))}
                     </ul>
                   </div>

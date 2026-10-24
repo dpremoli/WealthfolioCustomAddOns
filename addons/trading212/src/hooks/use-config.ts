@@ -11,6 +11,7 @@ import {
   lastResultKey,
   pendingAuthSecretKey,
   refsKey,
+  refusedKey,
   syncKey,
 } from "../constants";
 import { Trading212Client } from "../lib/t212-client";
@@ -461,6 +462,7 @@ export async function resetSyncState(ctx: AddonContext, id: string): Promise<voi
   await store(ctx).delete(syncKey(id));
   for (const i of allShards()) await store(ctx).delete(refsKey(id, i));
   await store(ctx).delete(dividendsKey(id));
+  await store(ctx).delete(refusedKey(id));
   // Its log would describe a watermark that no longer exists.
   await store(ctx).delete(lastResultKey(id));
 }

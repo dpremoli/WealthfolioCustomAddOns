@@ -130,7 +130,8 @@ row is already linked) and `activities.linkTransfer` (to link the pair).
 
 If Wealthfolio refuses some rows (it answers "OK" even then), the import ends with an error that
 names the first row and Wealthfolio's reason and lists them. Refused rows are not remembered as
-imported: fix the cause and import the same statement again, and only those rows are added.
+imported: they wait in a small list of their own and are sent again with every later import (even
+of a statement that has nothing new for that account) until Wealthfolio stores them.
 
 ## Permissions
 

@@ -10,11 +10,16 @@ import {
   sourceRefOf,
   spendingRulesNote,
   syncSpendingRules,
-  describeUnsaved,
-  unsavedMessage,
+  describeRefused,
+  loadRefused,
+  pendingRows,
+  recordRefused,
+  refusedError,
+  saveRefused,
   withoutUnsaved,
   type ExistingActivityLike,
   type ImportLedger,
+  type RefusedRows,
   type SyncProgress,
   type SyncStep,
   type UnsavedRow,
@@ -29,6 +34,7 @@ import {
   KEY_LAST_SYNC,
   KEY_MAPPING,
   KEY_RECHECKED_90_DAYS,
+  KEY_REFUSED,
   KEY_RULE_KEYS,
 } from "../constants";
 import type {
@@ -138,10 +144,12 @@ export interface ImportOutcome {
   /** Rows Wealthfolio answered with as already there. */
   skipped: number;
   /**
-   * Rows Wealthfolio did not store, with its reason. They are not in the ledger, so the next
-   * import sends them again.
+   * Rows Wealthfolio did not store in this call, with its reason. They are not in the ledger; they
+   * wait in `refused` and are sent again at the start of every import.
    */
   unsaved: UnsavedRow[];
+  /** Every row Wealthfolio is refusing now (this call's and earlier ones), across accounts. */
+  refused: RefusedRows;
 }
 
 /**
@@ -155,7 +163,9 @@ export interface ImportOutcome {
  * not mistaken for it. Rows imported by versions before the ledger match by content.
  *
  * Wealthfolio answers 200 even when it stored nothing, so a row is recorded in the ledger only
- * when the answer says it was stored (kit `importStoredRows`); the rest come back as `unsaved`.
+ * when the answer says it was stored (kit `importStoredRows`); the rest come back as `unsaved`
+ * and wait in a list of their own (`KEY_REFUSED`), not behind the sync watermark: the refused rows
+ * of this account are reconciled and sent again with every import, and leave the list once stored.
  */
 export async function importNew(
   ctx: AddonContext,
@@ -169,11 +179,14 @@ export async function importNew(
    */
   savingsIds: ReadonlySet<string> = new Set()
 ): Promise<ImportOutcome> {
-  if (desired.length === 0) return { imported: 0, updated: 0, duplicates: 0, skipped: 0, unsaved: [] };
   const store = jsonStore(ctx.api.storage);
+  const refused = await loadRefused(ctx.api.storage, KEY_REFUSED);
+  // The rows refused earlier are reconciled and sent again with the new ones, once each.
+  const rows = pendingRows(refused, accountId, desired);
+  if (rows.length === 0) return { imported: 0, updated: 0, duplicates: 0, skipped: 0, unsaved: [], refused };
   const existing = normaliseLegacyCash(await ctx.api.activities.getAll(accountId));
   const reconciled = reconcileWithLedger(
-    desired,
+    rows,
     existing,
     await store.get<ImportLedger>(KEY_IMPORTED_IDS, {}),
     accountId,
@@ -189,15 +202,22 @@ export async function importNew(
   let imported = 0;
   let skipped = 0;
   let unsaved: UnsavedRow[] = [];
+  let accounted = [...present, ...adopted];
   if (toImport.length > 0) {
-    const r = await importStoredRows((rows) => ctx.api.activities.import(rows), toImport);
+    const r = await importStoredRows((batch) => ctx.api.activities.import(batch), toImport);
     imported = r.stored.length;
     skipped = r.duplicates.length;
     unsaved = r.unsaved;
+    accounted = [...accounted, ...r.stored, ...r.duplicates];
   }
-  // The ledger keeps entries only for rows Wealthfolio stored: an unsaved row is sent again.
+  // The ledger keeps entries only for rows Wealthfolio stored: an unsaved row is not recorded.
   const ledger = withoutUnsaved(reconciled.ledger, unsaved);
   await store.set(KEY_IMPORTED_IDS, ledger);
+  // Rows stored (or already there) leave the refused list; the ones refused now join it.
+  const refusedNow =
+    refused.entries.length > 0 || refused.dropped > 0 || unsaved.length > 0
+      ? await saveRefused(ctx.api.storage, KEY_REFUSED, recordRefused(refused, accounted, unsaved))
+      : refused;
 
   // Rewrite rows whose transaction changed since (payee name, notes, settled amount).
   let updated = 0;
@@ -219,7 +239,7 @@ export async function importNew(
         })),
       })
       .catch(() => null);
-    if (!res) return { imported, updated: 0, duplicates: present.length + adopted.length, skipped, unsaved };
+    if (!res) return { imported, updated: 0, duplicates: present.length + adopted.length, skipped, unsaved, refused: refusedNow };
     const failed = new Set((res.errors ?? []).map((e) => e.id));
     for (const { row, activity } of stale) {
       if (failed.has(row.id) || !activity.id) continue;
@@ -228,7 +248,7 @@ export async function importNew(
     }
     await store.set(KEY_IMPORTED_IDS, ledger);
   }
-  return { imported, updated, duplicates: present.length + adopted.length - updated, skipped, unsaved };
+  return { imported, updated, duplicates: present.length + adopted.length - updated, skipped, unsaved, refused: refusedNow };
 }
 
 /**
@@ -306,9 +326,6 @@ export function runSync(
     return result;
   });
 }
-
-/** How many unsaved rows a sync's log lists one by one. */
-const MAX_UNSAVED_LINES = 50;
 
 async function syncAll(ctx: AddonContext, onProgress: SyncProgressHandler): Promise<SyncResult> {
   await ensureMigrated(ctx);
@@ -391,7 +408,6 @@ async function syncAll(ctx: AddonContext, onProgress: SyncProgressHandler): Prom
   let skipped = 0;
   let duplicates = 0;
   let holdBack: string | null = null;
-  const unsaved: UnsavedRow[] = [];
   const breakdown: Record<string, number> = {};
 
   // Monzo shares all history only within 5 minutes of the user authenticating; after that,
@@ -499,9 +515,10 @@ async function syncAll(ctx: AddonContext, onProgress: SyncProgressHandler): Prom
       mapTransactionToActivity(tx, wealthfolioAccountId, categoryLabels, ownNames)
     );
     if (wealthfolioAccountId === flexWfId) desired.push(...flexCredits);
-    if (desired.length === 0) continue;
-
-    onProgress({ phase: "import", message: `Importing ${desired.length} transactions…` });
+    // (An account with nothing new still goes through `importNew`: rows refused earlier are retried.)
+    if (desired.length > 0) {
+      onProgress({ phase: "import", message: `Importing ${desired.length} transactions…` });
+    }
     const legacy = new Map(
       eligible.map((tx) => [tx.id, legacyActivity(tx, wealthfolioAccountId, categoryLabels)])
     );
@@ -513,7 +530,6 @@ async function syncAll(ctx: AddonContext, onProgress: SyncProgressHandler): Prom
     imported += outcome.imported;
     duplicates += outcome.duplicates;
     skipped += outcome.skipped;
-    unsaved.push(...outcome.unsaved);
   }
 
   // Pair up the repayment and refund legs as internal transfers. Best effort, like the rules.
@@ -532,25 +548,17 @@ async function syncAll(ctx: AddonContext, onProgress: SyncProgressHandler): Prom
   const watermark =
     holdBack && holdBack < startedAt.toISOString() ? holdBack : startedAt.toISOString();
   const finishedAt = new Date().toISOString();
+  await store.set(KEY_LAST_SYNC, watermark);
   await store.set(KEY_LAST_RUN, finishedAt);
-  // Rows Wealthfolio did not store hold the watermark (and the 90-day re-check) where they are,
-  // so the next sync reads them again; the ledger already leaves them out.
-  if (unsaved.length === 0) {
-    await store.set(KEY_LAST_SYNC, watermark);
-    // Whatever kind of sync this was, the last 90 days are now covered.
-    await store.set(KEY_RECHECKED_90_DAYS, true);
-  }
+  // Whatever kind of sync this was, the last 90 days are now covered. Rows Wealthfolio refuses
+  // do not hold this back (Monzo would not serve them again after 90 days): they wait in their
+  // own list, and are retried at the start of every sync.
+  await store.set(KEY_RECHECKED_90_DAYS, true);
   log.push(
     `Import: ${imported} imported, ${updated} updated, ${duplicates} already present, ${skipped} skipped.`
   );
-  if (unsaved.length > 0) {
-    log.push(
-      `${unsaved.length} row${unsaved.length === 1 ? "" : "s"} not saved by Wealthfolio (the sync is not marked as done, so ` +
-        `they are tried again next time):`
-    );
-    for (const u of unsaved.slice(0, MAX_UNSAVED_LINES)) log.push(`  ${describeUnsaved(u)}`);
-    if (unsaved.length > MAX_UNSAVED_LINES) log.push(`  …and ${unsaved.length - MAX_UNSAVED_LINES} more.`);
-  }
+  const refused = await loadRefused(ctx.api.storage, KEY_REFUSED);
+  log.push(...describeRefused(refused));
 
   // Keep Wealthfolio's Spending categories in step with Monzo's (rules keyed on the category
   // label in each comment). Best effort: never fails the sync.
@@ -569,7 +577,7 @@ async function syncAll(ctx: AddonContext, onProgress: SyncProgressHandler): Prom
     phase: "done",
     message: `Synced ${imported} transaction${imported === 1 ? "" : "s"}.`,
   });
-  return { imported, skipped, duplicates, breakdown, log, finishedAt, error: unsavedMessage(unsaved) };
+  return { imported, skipped, duplicates, breakdown, log, finishedAt, error: refusedError(refused) };
 }
 
 /** What the dashboard keeps showing of the last successful sync, across reloads. */
@@ -606,4 +614,6 @@ export async function resetSyncHistory(ctx: AddonContext): Promise<void> {
   const store = jsonStore(ctx.api.storage);
   await store.delete(KEY_LAST_SYNC);
   await store.delete(KEY_LAST_RESULT);
+  // The rows it holds are as old as the watermark: the next sync is a full one and finds them.
+  await store.delete(KEY_REFUSED);
 }

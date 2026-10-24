@@ -38,6 +38,8 @@ export const KEY_LAST_RUN = "monzo_last_run";
  * even when its comment changed, without writing the id into the comment.
  */
 export const KEY_IMPORTED_IDS = "monzo_imported_ids";
+/** Rows Wealthfolio refuses, kept apart from the watermark (kit `refused-rows`). */
+export const KEY_REFUSED = "monzo_refused";
 /**
  * ms since epoch the user last completed the OAuth login (decimal string). Set when the
  * authorisation code is exchanged, not on token refresh: Monzo shares the whole history only

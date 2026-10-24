@@ -54,9 +54,12 @@ interface Dataset {
 /** Installs a Trading 212 API that serves each connection (told apart by its key) its own export. */
 function installTrading212(host: FakeWealthfolio, data: Record<string, Dataset>, cashOf: (secret: string) => number) {
   const served = new Set<string>();
+  /** How many times history was asked for: an export listed or downloaded. */
+  const calls = { exports: 0 };
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (host.ctx.api as any).network.request = async (req: { url: string; auth?: { secretKey: string } }) => {
     const u = req.url;
+    if (u.includes("amazonaws.com") || u.includes("/exports")) calls.exports++;
     if (u.includes("amazonaws.com")) {
       const secret = /\/([^/]+)\.csv/.exec(u)?.[1] ?? "";
       const first = !served.has(secret);
@@ -73,6 +76,7 @@ function installTrading212(host: FakeWealthfolio, data: Record<string, Dataset>,
     }
     return json({ items: [], nextPagePath: null });
   };
+  return calls;
 }
 
 function connect(host: FakeWealthfolio, ids: { id: string; name: string; accountId: string; kind: "invest" | "isa" }[], settings: object = { env: "demo", extractCard: true }) {
@@ -114,9 +118,13 @@ function setup(opts: { dataset?: ReturnType<typeof realisticDataset> } = {}) {
   connect(host, CONNS);
   const d = opts.dataset ?? realisticDataset();
   // Trading 212's cash is whatever the stored rows add up to, so only the rows' presence is tested.
-  installTrading212(host, { t212_auth_inv: d.inv, t212_auth_isa: d.isa }, (secret) => host.cash(secret === "t212_auth_inv" ? "acc-inv" : "acc-isa"));
-  return { host, d };
+  const calls = installTrading212(host, { t212_auth_inv: d.inv, t212_auth_isa: d.isa }, (secret) => host.cash(secret === "t212_auth_inv" ? "acc-inv" : "acc-isa"));
+  return { host, d, calls };
 }
+
+const refusedList = (host: FakeWealthfolio, id: string): { id: string; reason: string; attempts: number }[] =>
+  JSON.parse(host.storage.get(`t212_refused_${id}`) ?? '{"entries":[]}').entries;
+const lastSyncOf = (host: FakeWealthfolio, id: string) => JSON.parse(host.storage.get(`t212_sync_${id}`) ?? "{}").lastSync ?? null;
 
 describe("a full backfill against a fake Wealthfolio 3.11", () => {
   it("stores every kind of row — trades, dividends, cash, card spending — and records ids only for stored rows", async () => {
@@ -166,31 +174,23 @@ describe("a full backfill against a fake Wealthfolio 3.11", () => {
 });
 
 describe("when the host does not store what was sent", () => {
-  it("a call refused by the host's own validation is not recorded: the bad row is reported, the rest stored, and it fails loudly", async () => {
+  it("a call refused by the host's own validation is not recorded: the bad row is reported, the rest stored, and the sync fails loudly", async () => {
     const { host } = setup();
     // Passes checkImport, then fails import's validation — the whole call stores nothing.
     host.importValidation = (a) => (a.comment === "BBB" && a.activityType === "BUY" && Number(a.unitPrice) === 52 ? "Symbol cannot be resolved" : null);
     const results = await runSyncAll(host.ctx, {});
     const inv = results.perAccount.find((r) => r.connectionId === "inv")!;
 
-    expect(inv.error).toMatch(/1 trade or corporate-action row was not imported/);
+    expect(inv.error).toMatch(/^1 row is refused by Wealthfolio and retried on every sync/);
     expect(inv.error).toMatch(/Symbol cannot be resolved/);
     expect(host.countsByType("acc-inv").BUY).toBe(17); // 18 less the refused one
     expect(host.countsByType("acc-inv").DEPOSIT).toBe(3); // sent in the same call, still stored
-    // The refused row has no recorded id, so a later sync reads it again.
-    expect([...(await refsOf(host, "inv"))].filter((r) => r.startsWith("t212-order-"))).toHaveLength(17 + 1 /* the sell */);
+    // The refused row has no recorded id…
     expect([...(await refsOf(host, "inv"))]).not.toContain("t212-order-BUY-BBB-2");
-    // …and the history is not marked as read, so that sync starts from the beginning.
-    expect(JSON.parse(host.storage.get("t212_sync_inv")!).lastSync).toBeNull();
-    expect(inv.log.join("\n")).toContain("not marked as read");
-
-    // The host is fixed; the next sync imports just the missing row.
-    host.importValidation = () => null;
-    installTrading212(host, { t212_auth_inv: realisticDataset().inv, t212_auth_isa: realisticDataset().isa }, (s) => host.cash(s === "t212_auth_inv" ? "acc-inv" : "acc-isa"));
-    const next = await runSyncAll(host.ctx, {});
-    expect(next.perAccount.find((r) => r.connectionId === "inv")!.error).toBeUndefined();
-    expect(host.countsByType("acc-inv").BUY).toBe(18);
-    expect(JSON.parse(host.storage.get("t212_sync_inv")!).lastSync).not.toBeNull();
+    // …it waits in the refused list, and the watermark moved on regardless.
+    expect(refusedList(host, "inv").map((e) => e.id)).toEqual(["t212-order-BUY-BBB-2"]);
+    expect(lastSyncOf(host, "inv")).not.toBeNull();
+    expect(inv.log.join("\n")).toMatch(/Wealthfolio refuses 1 row; they are tried again at the start of every sync/);
   });
 
   it("a row the writer policy refuses is left out and reported while the others are stored", async () => {
@@ -198,9 +198,10 @@ describe("when the host does not store what was sent", () => {
     host.policy = (a) => (a.activityType === "DIVIDEND" && Number(a.amount) === 4.25 ? "Preparation failed: no price for BBB" : null);
     const results = await runSyncAll(host.ctx, {});
     const inv = results.perAccount.find((r) => r.connectionId === "inv")!;
-    expect(inv.error).toMatch(/1 row was not saved/);
+    expect(inv.error).toMatch(/^1 row is refused by Wealthfolio/);
     expect(host.countsByType("acc-inv").DIVIDEND).toBe(2);
     expect([...(await refsOf(host, "inv"))].some((r) => r.startsWith("t212-div-") && r.includes("BBB"))).toBe(false);
+    expect(refusedList(host, "inv")).toHaveLength(1);
   });
 
   it("a host that answers 200 with nothing stored is never taken for success", async () => {
@@ -216,8 +217,121 @@ describe("when the host does not store what was sent", () => {
     expect(host.rows()).toHaveLength(0);
     expect(await refsOf(host, "inv")).toEqual(new Set());
     expect(await refsOf(host, "isa")).toEqual(new Set());
-    for (const r of results.perAccount) expect(r.error).toMatch(/not imported[\s\S]*import saved nothing/);
+    for (const r of results.perAccount) expect(r.error).toMatch(/rows are refused by Wealthfolio[\s\S]*import saved nothing/);
     (host.ctx.api.activities as { import: unknown }).import = real;
+  });
+});
+
+describe("a row Wealthfolio refuses on every call must not hold the watermark", () => {
+  const BAD = "t212-order-BUY-BBB-2";
+  const refuseTrade = (a: { id?: string; comment?: string; activityType?: unknown; unitPrice?: unknown }) =>
+    a.comment === "BBB" && a.activityType === "BUY" && Number(a.unitPrice) === 52 ? "Could not find 'BBB' in market data (delisted)" : null;
+
+  it("syncs 2 and 3 neither re-export history nor re-send anything but that row, and the error stays; once accepted it is stored once and the error clears", async () => {
+    const { host, calls } = setup();
+    host.validation = refuseTrade; // refused at checkImport, every time
+    const inv = (r: Awaited<ReturnType<typeof runSyncAll>>) => r.perAccount.find((x) => x.connectionId === "inv")!;
+
+    // Sync 1: the full backfill. The row is refused; everything else is saved; the watermark moves on.
+    const first = inv(await runSyncAll(host.ctx, {}));
+    expect(first.error).toMatch(/^1 row is refused by Wealthfolio and retried on every sync/);
+    expect(lastSyncOf(host, "inv")).not.toBeNull();
+    expect(JSON.parse(host.storage.get("t212_sync_inv")!).backfillCheckpoint ?? null).toBeNull();
+    expect(host.countsByType("acc-inv").BUY).toBe(17);
+    expect(refusedList(host, "inv")).toMatchObject([{ id: BAD, attempts: 1 }]);
+    const storedAfterFirst = host.rows().length;
+    const exportsAfterFirst = calls.exports;
+    expect(exportsAfterFirst).toBeGreaterThan(0);
+
+    // Syncs 2 and 3: history is not read again, only that row is sent to Wealthfolio, and it is still
+    // reported (error, log, attempts).
+    for (const attempt of [2, 3]) {
+      const checksBefore = host.checkedIds.length;
+      const r = inv(await runSyncAll(host.ctx, {}));
+      expect(calls.exports, `sync ${attempt} re-read the export`).toBe(exportsAfterFirst);
+      const checked = host.checkedIds.slice(checksBefore).flat();
+      expect(checked, `sync ${attempt}`).toEqual([BAD]);
+      expect(r.error).toMatch(/^1 row is refused by Wealthfolio and retried on every sync/);
+      expect(r.log.join("\n")).toContain(`Retrying 1 row Wealthfolio refused in earlier syncs.`);
+      expect(r.log.join("\n")).toContain(`(${BAD}): Could not find 'BBB' in market data (delisted) — refused ${attempt} times`);
+      expect(refusedList(host, "inv")).toMatchObject([{ id: BAD, attempts: attempt }]);
+      expect(host.rows()).toHaveLength(storedAfterFirst); // nothing new, nothing twice
+      expect(lastSyncOf(host, "inv")).not.toBeNull();
+    }
+
+    // The host accepts it: the next sync saves it once, the list empties and the error clears.
+    host.validation = () => null;
+    const fixed = inv(await runSyncAll(host.ctx, {}));
+    expect(fixed.error).toBeUndefined();
+    expect(host.countsByType("acc-inv").BUY).toBe(18);
+    expect(host.rows()).toHaveLength(storedAfterFirst + 1);
+    expect(refusedList(host, "inv")).toEqual([]);
+    expect(host.storage.has("t212_refused_inv")).toBe(false);
+    expect(fixed.log.join("\n")).toContain("Refused rows: 1 saved now, 0 still refused.");
+    expect(calls.exports).toBe(exportsAfterFirst);
+
+    // And it is not sent again.
+    const checksBefore = host.checkedIds.length;
+    const after = inv(await runSyncAll(host.ctx, {}));
+    expect(host.checkedIds.length).toBe(checksBefore);
+    expect(after.error).toBeUndefined();
+    expect(host.rows()).toHaveLength(storedAfterFirst + 1);
+  });
+
+  it("a row refused at import (not at check) is retried the same way, and is the only row sent", async () => {
+    const { host, calls } = setup();
+    host.importValidation = refuseTrade;
+    await runSyncAll(host.ctx, {});
+    const exportsAfterFirst = calls.exports;
+    const callsBefore = host.importCalls.length;
+    const second = (await runSyncAll(host.ctx, {})).perAccount.find((x) => x.connectionId === "inv")!;
+    expect(calls.exports).toBe(exportsAfterFirst);
+    // One import call, of that one row; the host refuses it again.
+    expect(host.importCalls.slice(callsBefore)).toEqual([expect.objectContaining({ sent: 1, stored: 0, success: false })]);
+    expect(second.error).toMatch(/refused/);
+    expect(refusedList(host, "inv")[0].attempts).toBe(2);
+  });
+
+  it("several refused rows: each leaves the list on its own once the host accepts it", async () => {
+    const { host } = setup();
+    host.validation = (a) => (a.activityType === "BUY" && a.comment === "BBB" && [51, 52].includes(Number(a.unitPrice)) ? "refused" : null);
+    await runSyncAll(host.ctx, {});
+    expect(refusedList(host, "inv").map((e) => e.id).sort()).toEqual(["t212-order-BUY-BBB-1", "t212-order-BUY-BBB-2"]);
+    host.validation = (a) => (a.activityType === "BUY" && a.comment === "BBB" && Number(a.unitPrice) === 52 ? "refused" : null);
+    const r = (await runSyncAll(host.ctx, {})).perAccount.find((x) => x.connectionId === "inv")!;
+    expect(refusedList(host, "inv").map((e) => e.id)).toEqual(["t212-order-BUY-BBB-2"]);
+    expect(r.error).toMatch(/^1 row is refused/);
+    expect(host.countsByType("acc-inv").BUY).toBe(17);
+  });
+
+  it("a card row the host refuses on every call waits in the list too, with its funding pair, and is saved once when accepted", async () => {
+    const { host, calls } = setup();
+    // The writer refuses the spend of £9 (CARD-4) but takes the funding transfers sent with it.
+    host.policy = (a) => (a.activityType === "WITHDRAWAL" && Number(a.amount) === 9 ? "Preparation failed: category unknown" : null);
+    const cardAccount = () => host.accounts.find((a) => a.id !== "acc-inv" && a.id !== "acc-isa")!.id;
+    const first = (await runSyncAll(host.ctx, {})).perAccount.find((x) => x.connectionId === "inv")!;
+    expect(first.error).toMatch(/^1 row is refused by Wealthfolio/);
+    expect(refusedList(host, "inv").map((e) => e.id)).toEqual(["t212-txn-CARD-4"]);
+    expect(host.countsByType(cardAccount()).WITHDRAWAL).toBe(24);
+    const exportsAfterFirst = calls.exports;
+    const total = host.rows().length;
+
+    for (const attempt of [2, 3]) {
+      const r = (await runSyncAll(host.ctx, {})).perAccount.find((x) => x.connectionId === "inv")!;
+      expect(calls.exports).toBe(exportsAfterFirst); // the card history is not exported again either
+      expect(r.error).toMatch(/refused/);
+      expect(refusedList(host, "inv")[0].attempts).toBe(attempt);
+      expect(host.rows()).toHaveLength(total);
+    }
+
+    host.policy = () => null;
+    const fixed = (await runSyncAll(host.ctx, {})).perAccount.find((x) => x.connectionId === "inv")!;
+    expect(fixed.error).toBeUndefined();
+    expect(refusedList(host, "inv")).toEqual([]);
+    // The 25 spends, and each of them funded exactly once (the retried unit's stored legs were not doubled).
+    expect(host.countsByType(cardAccount())).toMatchObject({ WITHDRAWAL: 25, TRANSFER_IN: 25 });
+    expect(host.countsByType("acc-inv").TRANSFER_OUT).toBe(25);
+    expect(host.rows()).toHaveLength(total + 1);
   });
 });
 

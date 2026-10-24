@@ -34,7 +34,7 @@ describe("importCashIsa when the host does not store every row", () => {
     const first = await importCashIsa(h.ctx, "isa", await rows());
     expect(first.imported).toBe(3);
     expect(first.unsaved.map((u) => u.reason)).toEqual(["Invalid date"]);
-    expect(first.error).toMatch(/1 row was not saved by Wealthfolio/);
+    expect(first.error).toMatch(/1 row is refused by Wealthfolio/);
     expect(Object.keys(ledgerOf(h))).toHaveLength(3);
     expect(Object.keys(ledgerOf(h))).not.toContain(first.unsaved[0].activity.id);
     expect(h.rows("isa")).toHaveLength(3);
@@ -68,11 +68,50 @@ describe("importCashIsa when the host does not store every row", () => {
     const first = await importCashIsa(h.ctx, "isa", await rows());
     expect(first.imported).toBe(0);
     expect(first.unsaved).toHaveLength(4);
-    expect(first.error).toMatch(/4 rows were not saved/);
+    expect(first.error).toMatch(/4 rows are refused by Wealthfolio/);
     expect(ledgerOf(h)).toEqual({});
 
     h.storeNothing = false;
     expect(await importCashIsa(h.ctx, "isa", await rows())).toMatchObject({ imported: 4, unsaved: [] });
     expect(h.rows("isa")).toHaveLength(4);
+  });
+});
+
+const REFUSED_KEY = "t212_cash_isa_refused";
+const refusedOf = (h: FakeWealthfolio) => JSON.parse(h.storage.get(REFUSED_KEY) ?? '{"entries":[]}') as { entries: { id: string; attempts: number }[] };
+
+describe("importCashIsa when the host refuses a row on every call", () => {
+  it("keeps the row in its own list, sends it again with every import (alone when the file has nothing new), keeps the error, and stores it once the host accepts it", async () => {
+    const h = host();
+    h.policy = (a) => (isWithdrawal(a) ? "Preparation failed" : null);
+    const all = await rows();
+    const refusedId = all.find(isWithdrawal)!.id;
+
+    const first = await importCashIsa(h.ctx, "isa", all);
+    expect(first.error).toMatch(/1 row is refused by Wealthfolio/);
+    expect(refusedOf(h).entries.map((e) => [e.id, e.attempts])).toEqual([[refusedId, 1]]);
+
+    // An export with other rows only: the refused row rides along.
+    const next = (await parseCashIsaCsv(
+      ["Action,Time (UTC),Notes,ID,Total,Currency (Total)", "Deposit,2026-02-01 09:00:00+00:00,Bank Transfer,9f1c2d3e-0000-4000-8000-000000000009,50.00,GBP"].join("\n"),
+      "",
+    )).activities;
+    const second = await importCashIsa(h.ctx, "isa", next);
+    expect(h.importCalls.at(-1)!.sentIds.sort()).toEqual([refusedId, next[0].id].sort());
+    expect(second.error).toMatch(/1 row is refused by Wealthfolio/);
+    expect(refusedOf(h).entries[0].attempts).toBe(2);
+
+    // The same export again: only the refused row is sent.
+    const third = await importCashIsa(h.ctx, "isa", next);
+    expect(h.importCalls.at(-1)!.sentIds).toEqual([refusedId]);
+    expect(third.error).toBeDefined();
+    expect(refusedOf(h).entries[0].attempts).toBe(3);
+
+    h.policy = () => null;
+    const fixed = await importCashIsa(h.ctx, "isa", next);
+    expect(fixed).toMatchObject({ imported: 1, unsaved: [] });
+    expect(fixed.error).toBeUndefined();
+    expect(h.storage.has(REFUSED_KEY)).toBe(false);
+    expect(h.rows("isa")).toHaveLength(5);
   });
 });

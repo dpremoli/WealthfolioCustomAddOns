@@ -35,6 +35,8 @@ export interface StoredActivity {
 
 export interface ImportCall {
   sent: number;
+  /** The ids (as the add-on sent them) of the rows of the call. */
+  sentIds: (string | undefined)[];
   stored: number;
   success: boolean;
   importRunId: string;
@@ -63,6 +65,8 @@ export class FakeWealthfolio {
   readonly accounts: FakeAccount[];
   readonly stored = new Map<string, StoredActivity[]>();
   readonly importCalls: ImportCall[] = [];
+  /** The ids (as the add-on sent them) of the rows of each `checkImport` call. */
+  readonly checkedIds: (string | undefined)[][] = [];
   /** Largest value written to storage so far. */
   maxStoredValueBytes = 0;
   /** Returns a reason to make the host's writer policy refuse a row (the rest of the call is stored). */
@@ -181,6 +185,7 @@ export class FakeWealthfolio {
   }
 
   private checkImport(rows: ActivityImport[]): ActivityImport[] {
+    this.checkedIds.push(rows.map((a) => a.id));
     return rows.map((a) => {
       const out: ActivityImport = { ...a, id: uuid(), isValid: true, errors: undefined, warnings: undefined };
       if (Number.isNaN(Date.parse(String(a.date)))) {
@@ -210,7 +215,7 @@ export class FakeWealthfolio {
   private importRows(rows: ActivityImport[]) {
     const total = rows.length;
     const result = (activities: ActivityImport[], stored: number, success: boolean, runId: string, error?: string) => {
-      this.importCalls.push({ sent: total, stored, success, importRunId: runId });
+      this.importCalls.push({ sent: total, sentIds: rows.map((a) => a.id), stored, success, importRunId: runId });
       return {
         activities,
         importRunId: runId,

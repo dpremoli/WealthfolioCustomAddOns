@@ -14,6 +14,7 @@ export {
   type LedgerReconcileResult,
   type ExistingActivityLike,
 } from "./reconcile";
+export { pendingRows, recordRefused } from "./refused-import";
 export {
   describeUnsaved,
   importStoredRows,
@@ -37,6 +38,22 @@ export {
   type BrokerOptions,
 } from "./network";
 export { jsonStore, migrateSecretsToStorage } from "./storage";
+export {
+  MAX_REFUSED_BYTES,
+  MAX_REFUSED_ENTRIES,
+  addRefused,
+  describeRefused,
+  describeRefusedEntry,
+  emptyRefused,
+  loadRefused,
+  refusedError,
+  refusedUnits,
+  saveRefused,
+  settleRefused,
+  type RefusedEntry,
+  type RefusedRows,
+  type RefusedUnit,
+} from "./refused-rows";
 export { relativeTime, maskKey } from "./format";
 export { registerPages, addonRoute, type AddonPage, type AddonPageProps } from "./pages";
 export { appendStep, markLastDone, type SyncProgress, type SyncStep } from "./sync-steps";

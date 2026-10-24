@@ -7,15 +7,20 @@ import {
   ledgerAccountId,
   importStoredRows,
   ledgerEntry,
+  loadRefused,
   moveLinkNote,
+  pendingRows,
   reconcileWithLedger,
+  recordRefused,
+  refusedError,
+  saveRefused,
   trading212Refs,
-  unsavedMessage,
   withoutUnsaved,
   type ImportLedger,
+  type RefusedRows,
   type UnsavedRow,
 } from "@wf-addons/kit";
-import { KEY_IMPORTED_IDS } from "../constants";
+import { KEY_IMPORTED_IDS, KEY_REFUSED } from "../constants";
 import type { RevolutTransaction } from "../types";
 import { exchangeLinkNote, linkExchanges } from "./exchanges";
 import { mapTransactionToActivity, openingBalanceActivity } from "./mapper";
@@ -28,10 +33,12 @@ export interface ImportOutcome {
   /** Already in the account (by id, or matched to an older row), so not imported again. */
   duplicates: number;
   /**
-   * Rows Wealthfolio did not store, with its reason. They are not in the ledger, so the next
-   * import sends them again.
+   * Rows Wealthfolio did not store in this call, with its reason. They are not in the ledger;
+   * they wait in `refused` and are sent again with every import.
    */
   unsaved: UnsavedRow[];
+  /** Every row Wealthfolio is refusing now (this call's and earlier ones), across accounts. */
+  refused: RefusedRows;
 }
 
 /**
@@ -55,7 +62,9 @@ export interface ImportOutcome {
  * knew it is taken for the same move instead of being imported again.
  *
  * Wealthfolio answers 200 even when it stored nothing, so a row is recorded in the ledger only
- * when the answer says it was stored (kit `importStoredRows`); the rest come back as `unsaved`.
+ * when the answer says it was stored (kit `importStoredRows`); the rest come back as `unsaved` and
+ * wait in a list of their own (`KEY_REFUSED`): the refused rows of this account are reconciled and
+ * sent again with every import, and leave the list once stored.
  */
 export async function importRows(
   ctx: AddonContext,
@@ -63,11 +72,14 @@ export async function importRows(
   desired: ActivityImport[],
   movesIds: ReadonlySet<string> = new Set(),
 ): Promise<ImportOutcome> {
-  if (desired.length === 0) return { imported: 0, updated: 0, duplicates: 0, unsaved: [] };
   const store = jsonStore(ctx.api.storage);
+  const refused = await loadRefused(ctx.api.storage, KEY_REFUSED);
+  // The rows refused earlier are reconciled and sent again with the new ones, once each.
+  const rows = pendingRows(refused, accountId, desired);
+  if (rows.length === 0) return { imported: 0, updated: 0, duplicates: 0, unsaved: [], refused };
   const existing = await ctx.api.activities.getAll(accountId);
   const reconciled = reconcileWithLedger(
-    desired,
+    rows,
     existing,
     await store.get<ImportLedger>(KEY_IMPORTED_IDS, {}),
     accountId,
@@ -81,14 +93,21 @@ export async function importRows(
   });
   let imported = 0;
   let unsaved: UnsavedRow[] = [];
+  let accounted = [...present, ...adopted];
   if (toImport.length > 0) {
-    const r = await importStoredRows((rows) => ctx.api.activities.import(rows), toImport);
+    const r = await importStoredRows((batch) => ctx.api.activities.import(batch), toImport);
     imported = r.stored.length;
     unsaved = r.unsaved;
+    accounted = [...accounted, ...r.stored, ...r.duplicates];
   }
-  // The ledger keeps entries only for rows Wealthfolio stored: an unsaved row is sent again.
+  // The ledger keeps entries only for rows Wealthfolio stored: an unsaved row is not recorded.
   const ledger = withoutUnsaved(reconciled.ledger, unsaved);
   await store.set(KEY_IMPORTED_IDS, ledger);
+  // Rows stored (or already there) leave the refused list; the ones refused now join it.
+  const refusedNow =
+    refused.entries.length > 0 || refused.dropped > 0 || unsaved.length > 0
+      ? await saveRefused(ctx.api.storage, KEY_REFUSED, recordRefused(refused, accounted, unsaved))
+      : refused;
 
   let updated = 0;
   if (stale.length > 0) {
@@ -107,7 +126,7 @@ export async function importRows(
         })),
       })
       .catch(() => null);
-    if (!res) return { imported, updated: 0, duplicates: present.length + adopted.length, unsaved };
+    if (!res) return { imported, updated: 0, duplicates: present.length + adopted.length, unsaved, refused: refusedNow };
     const failed = new Set((res.errors ?? []).map((e) => e.id));
     for (const { row, activity } of stale) {
       if (failed.has(row.id) || !activity.id) continue;
@@ -116,13 +135,13 @@ export async function importRows(
     }
     await store.set(KEY_IMPORTED_IDS, ledger);
   }
-  return { imported, updated, duplicates: present.length + adopted.length - updated, unsaved };
+  return { imported, updated, duplicates: present.length + adopted.length - updated, unsaved, refused: refusedNow };
 }
 
 export interface StatementImportOutcome extends ImportOutcome {
   /** One line per kind of linking (exchanges, Trading 212, savings). */
   notes: string[];
-  /** Set when Wealthfolio did not store some rows (`unsaved`): say so, and import again. */
+  /** Set while Wealthfolio refuses some rows (`refused`): say so; they are retried on every import. */
   error?: string;
 }
 
@@ -142,7 +161,8 @@ export async function importStatement(
 ): Promise<StatementImportOutcome> {
   const accounts = await ctx.api.accounts.getAll();
   const refs = trading212Refs(accounts);
-  const total: ImportOutcome = { imported: 0, updated: 0, duplicates: 0, unsaved: [] };
+  const total: ImportOutcome = { imported: 0, updated: 0, duplicates: 0, unsaved: [], refused: await loadRefused(ctx.api.storage, KEY_REFUSED) };
+  const visited = new Set<string>();
   for (const currency of new Set(transactions.map((tx) => tx.currency))) {
     const accountId = mapping[currency];
     if (!accountId) continue;
@@ -163,14 +183,24 @@ export async function importStatement(
     );
     // One currency at a time: each call reads and rewrites the shared ledger.
     const outcome = await importRows(ctx, accountId, desired, moves);
+    visited.add(accountId);
     total.imported += outcome.imported;
     total.updated += outcome.updated;
     total.duplicates += outcome.duplicates;
     total.unsaved.push(...outcome.unsaved);
+    total.refused = outcome.refused;
+  }
+  // Rows refused earlier in an account this statement has nothing for are retried too.
+  for (const accountId of new Set(total.refused.entries.flatMap((e) => e.unit.map((a) => a.accountId)))) {
+    if (visited.has(accountId)) continue;
+    const outcome = await importRows(ctx, accountId, []);
+    total.imported += outcome.imported;
+    total.unsaved.push(...outcome.unsaved);
+    total.refused = outcome.refused;
   }
 
   const notes = await linkOwnMoves(ctx, mapping, accounts, opts.savingsAccountId);
-  return { ...total, notes, error: unsavedMessage(total.unsaved) };
+  return { ...total, notes, error: refusedError(total.refused) };
 }
 
 /**

@@ -4,16 +4,22 @@ import {
   T212_CASH_ISA_PROVIDER_ID,
   adoptUntrackedRows,
   isTrading212Payee,
+  emptyRefused,
   importStoredRows,
   jsonStore,
   ledgerAccountId,
   linkMovesBetween,
+  loadRefused,
   moveLinkNote,
+  pendingRows,
   reconcileWithLedger,
+  recordRefused,
+  refusedError,
+  saveRefused,
   trading212Refs,
-  unsavedMessage,
   withoutUnsaved,
   type ImportLedger,
+  type RefusedRows,
   type UnsavedRow,
 } from "@wf-addons/kit";
 import { PROVIDER } from "../constants";
@@ -30,6 +36,8 @@ import type { SymbolResolver } from "./symbol-resolver";
 export const CASH_ISA_PROVIDER_ID = T212_CASH_ISA_PROVIDER_ID;
 /** Import ledger (kit `ImportLedger`) of Cash ISA rows already imported. */
 const LEDGER_KEY = "t212_cash_isa_ledger";
+/** Rows Wealthfolio refuses, retried on every import (kit `refused-rows`). */
+const REFUSED_KEY = "t212_cash_isa_refused";
 /** {@link CashIsaState}: which Wealthfolio account holds the Cash ISA. */
 const STATE_KEY = "t212_cash_isa";
 export const DEFAULT_CASH_ISA_NAME = "Trading 212 Cash ISA";
@@ -169,9 +177,11 @@ export interface CashIsaImportResult {
   linked: number;
   /** One line about the matching with other accounts, when there was anything to say. */
   moveNote?: string;
-  /** Rows Wealthfolio did not store, with its reason: not in the ledger, so a re-import sends them again. */
+  /** Rows Wealthfolio did not store in this call, with its reason: not in the ledger, kept in `refused`. */
   unsaved: UnsavedRow[];
-  /** Set when there are unsaved rows: tell the user, and have them import again. */
+  /** Every row Wealthfolio is refusing now (this call's and earlier ones); each import sends them again. */
+  refused: RefusedRows;
+  /** Set while Wealthfolio refuses some rows: tell the user; they are retried on every import. */
   error?: string;
 }
 
@@ -186,16 +196,24 @@ export interface CashIsaImportResult {
  * of the move: see {@link matchWithOtherAccounts}.
  *
  * Wealthfolio answers 200 even when it stored nothing, so a row is recorded in the ledger only
- * when the answer says it was stored (kit `importStoredRows`); the rest come back as `unsaved`.
+ * when the answer says it was stored (kit `importStoredRows`); the rest come back as `unsaved` and
+ * wait in a list of their own (`REFUSED_KEY`): they are reconciled and sent again with every
+ * import, and leave the list once stored.
  */
 export async function importCashIsa(
   ctx: AddonContext,
   accountId: string,
   activities: ActivityImport[],
 ): Promise<CashIsaImportResult> {
-  if (activities.length === 0) return { imported: 0, duplicates: 0, linked: 0, unsaved: [] };
   const store = jsonStore(ctx.api.storage);
-  const rows = activities.map((a) => ({ ...a, accountId }));
+  const refused = await loadRefused(ctx.api.storage, REFUSED_KEY);
+  // The rows refused earlier are reconciled and sent again with the new ones, once each.
+  const rows = pendingRows(
+    refused,
+    accountId,
+    activities.map((a) => ({ ...a, accountId })),
+  );
+  if (rows.length === 0) return { imported: 0, duplicates: 0, linked: 0, unsaved: [], refused: emptyRefused() };
   const existing = await ctx.api.activities.getAll(accountId);
   const reconciled = reconcileWithLedger(
     rows,
@@ -211,13 +229,20 @@ export async function importCashIsa(
   });
   let imported = 0;
   let unsaved: UnsavedRow[] = [];
+  let accounted = [...present, ...adopted];
   if (toImport.length > 0) {
-    const res = await importStoredRows((rows) => ctx.api.activities.import(rows), toImport);
+    const res = await importStoredRows((batch) => ctx.api.activities.import(batch), toImport);
     imported = res.stored.length;
     unsaved = res.unsaved;
+    accounted = [...accounted, ...res.stored, ...res.duplicates];
   }
-  // The ledger keeps entries only for rows Wealthfolio stored: an unsaved row is sent again.
+  // The ledger keeps entries only for rows Wealthfolio stored: an unsaved row is not recorded.
   await store.set(LEDGER_KEY, withoutUnsaved(reconciled.ledger, unsaved));
+  // Rows stored (or already there) leave the refused list; the ones refused now join it.
+  const refusedNow =
+    refused.entries.length > 0 || refused.dropped > 0 || unsaved.length > 0
+      ? await saveRefused(ctx.api.storage, REFUSED_KEY, recordRefused(refused, accounted, unsaved))
+      : refused;
   await store.set<CashIsaState>(STATE_KEY, { accountId, lastImport: new Date().toISOString() });
   const moves = await matchWithOtherAccounts(ctx, accountId);
   return {
@@ -226,7 +251,8 @@ export async function importCashIsa(
     linked: moves.linked,
     moveNote: moveLinkNote("your bank account", moves) ?? undefined,
     unsaved,
-    error: unsavedMessage(unsaved),
+    refused: refusedNow,
+    error: refusedError(refusedNow),
   };
 }
 

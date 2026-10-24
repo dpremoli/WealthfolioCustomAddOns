@@ -15,13 +15,14 @@ import {
   KEY_LAST_SYNC,
   KEY_MAPPING,
   KEY_RECHECKED_90_DAYS,
+  KEY_REFUSED,
   SECRET_ACCESS_TOKEN,
 } from "../constants";
 import { json, tx } from "../test-utils";
 import type { MonzoTransaction } from "../types";
 import { importCsvFiles } from "./csv-import";
 import { mapTransactionToActivity } from "./mapper";
-import { importNew, runSync } from "./sync";
+import { importNew, resetSyncHistory, runSync } from "./sync";
 
 const ACC = "wf-1";
 const host = () => new FakeWealthfolio([{ id: ACC, name: "Monzo Current", currency: "GBP" }]);
@@ -87,51 +88,110 @@ describe("importNew when the host does not store every row", () => {
   });
 });
 
-/** A connected add-on whose Monzo API serves `list` for the one mapped account. */
+/**
+ * A connected add-on whose Monzo API serves `list`, like the real one: only what was created
+ * since the `since` it is asked for. `asked` records every `since`.
+ */
 function connected(h: FakeWealthfolio, list: MonzoTransaction[]) {
+  const asked: (string | null)[] = [];
   (h.ctx.api.network as { request: unknown }).request = async (req: { url: string }) => {
-    const r = new URL(req.url).pathname === "/accounts" ? json(200, { accounts: [{ id: "acc_00001", type: "uk_retail" }] }) : json(200, { transactions: list });
+    const url = new URL(req.url);
+    if (url.pathname === "/accounts") {
+      const r = json(200, { accounts: [{ id: "acc_00001", type: "uk_retail" }] });
+      return { status: r.status, headers: {}, body: r.body ?? "" };
+    }
+    const since = url.searchParams.get("since");
+    asked.push(since);
+    const from = since ? Date.parse(since) : 0;
+    const r = json(200, { transactions: list.filter((t) => Number.isNaN(from) || Date.parse(t.created) >= from) });
     return { status: r.status, headers: {}, body: r.body ?? "" };
   };
   h.secrets.set(SECRET_ACCESS_TOKEN, "acc");
   h.storage.set(KEY_EXPIRES_AT, String(Date.now() + 3_600_000));
   h.storage.set(KEY_AUTHENTICATED_AT, "0");
   h.storage.set(KEY_MAPPING, JSON.stringify({ acc_00001: ACC }));
+  return asked;
 }
 
-describe("runSync when the host does not store every row", () => {
-  it("reports the unsaved row in the result and log, holds the watermark, and the next sync imports it", async () => {
+const recent = () => {
+  const day = (n: number) => new Date(Date.now() - n * 86_400_000).toISOString();
+  return [
+    tx({ amount: -350, description: "Coffee", created: day(3) }),
+    tx({ amount: -BAD, description: "Bad row", created: day(3) }),
+    tx({ amount: -1200, description: "Lunch", created: day(2) }),
+  ];
+};
+const refusedOf = (h: FakeWealthfolio) => JSON.parse(h.storage.get(KEY_REFUSED) ?? '{"entries":[]}') as { entries: { id: string; attempts: number; reason: string }[] };
+
+describe("runSync when the host refuses a row on every call", () => {
+  it("moves the watermark on, keeps the row in its own list and retries only it, keeps the error until the host accepts it, then imports it once", async () => {
     const h = host();
-    h.importValidation = (a) => (isBad(a) ? "Invalid date" : null);
-    const list = txs();
-    connected(h, list);
+    h.policy = (a) => (isBad(a) ? "Preparation failed" : null);
+    const list = recent();
+    const asked = connected(h, list);
 
     const first = await runSync(h.ctx);
     expect(first.imported).toBe(2);
-    expect(first.error).toMatch(/1 row was not saved by Wealthfolio/);
-    expect(first.error).toContain("Invalid date");
-    expect(first.log!.join("\n")).toContain("Invalid date");
-    // The watermark did not move, so what is missing is read again.
-    expect(h.storage.get(KEY_LAST_SYNC)).toBeUndefined();
-    expect(h.storage.get(KEY_RECHECKED_90_DAYS)).toBeUndefined();
+    expect(first.error).toMatch(/1 row is refused by Wealthfolio/);
+    expect(first.error).toContain("Preparation failed");
+    expect(first.log!.join("\n")).toContain("Preparation failed");
+    // The watermark and the 90-day re-check moved on: nothing holds them back.
+    const watermark = JSON.parse(h.storage.get(KEY_LAST_SYNC) ?? "null") as string | null;
+    expect(watermark).not.toBeNull();
+    expect(h.storage.get(KEY_RECHECKED_90_DAYS)).toBe("true");
+    expect(refusedOf(h).entries.map((e) => [e.id, e.attempts])).toEqual([[list[1].id, 1]]);
 
-    h.importValidation = () => null;
-    const second = await runSync(h.ctx);
-    expect(second.error).toBeUndefined();
-    expect(second.imported).toBe(1);
+    for (const attempts of [2, 3]) {
+      const calls = h.importCalls.length;
+      const again = await runSync(h.ctx);
+      // The history is not read again, and only the refused row is sent.
+      expect(Date.parse(asked.at(-1)!)).toBeGreaterThanOrEqual(Date.parse(watermark!));
+      expect(h.importCalls.slice(calls).map((c) => c.sentIds)).toEqual([[list[1].id]]);
+      expect(again.imported).toBe(0);
+      expect(again.error).toMatch(/1 row is refused by Wealthfolio/);
+      expect(refusedOf(h).entries[0].attempts).toBe(attempts);
+    }
+    expect(h.rows(ACC)).toHaveLength(2);
+
+    h.policy = () => null;
+    const fixed = await runSync(h.ctx);
+    expect(fixed.imported).toBe(1);
+    expect(fixed.error).toBeUndefined();
+    expect(h.storage.has(KEY_REFUSED)).toBe(false);
     expect(h.rows(ACC)).toHaveLength(3);
-    expect(h.storage.get(KEY_LAST_SYNC)).toBeDefined();
+
+    const calls = h.importCalls.length;
+    await runSync(h.ctx);
+    expect(h.importCalls).toHaveLength(calls); // nothing left to send
+    expect(h.rows(ACC)).toHaveLength(3);
   });
 
-  it("a host that answers 200 and stores nothing is an error, never a successful sync", async () => {
+  it("a host that answers 200 and stores nothing is an error, and every row waits in the list", async () => {
     const h = host();
     h.storeNothing = true;
-    connected(h, txs());
+    connected(h, recent());
 
     const result = await runSync(h.ctx);
     expect(result.imported).toBe(0);
-    expect(result.error).toMatch(/3 rows were not saved/);
-    expect(h.storage.get(KEY_LAST_SYNC)).toBeUndefined();
+    expect(result.error).toMatch(/3 rows are refused by Wealthfolio/);
+    expect(refusedOf(h).entries).toHaveLength(3);
+    expect(h.storage.get(KEY_LAST_SYNC)).toBeDefined();
+
+    h.storeNothing = false;
+    const next = await runSync(h.ctx);
+    expect(next.imported).toBe(3);
+    expect(next.error).toBeUndefined();
+    expect(h.storage.has(KEY_REFUSED)).toBe(false);
+  });
+
+  it("Reset forgets the list with the watermark", async () => {
+    const h = host();
+    h.storeNothing = true;
+    connected(h, recent());
+    await runSync(h.ctx);
+    expect(h.storage.has(KEY_REFUSED)).toBe(true);
+    await resetSyncHistory(h.ctx);
+    expect(h.storage.has(KEY_REFUSED)).toBe(false);
   });
 });
 

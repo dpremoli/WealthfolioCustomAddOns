@@ -40,6 +40,11 @@ Sandbox rules that bite:
 - Cash activities use `cashSymbol(ccy)` (`$CASH-GBP`), never a bare currency code.
 - Wealthfolio dedupes imports by content hash; for cash importers use the kit's
   `selectNewActivities` (reconcile + `forceImport`) so identical same-day rows survive.
+- `checkImport` marks duplicates (`duplicateOfId` stored, `duplicateOfLineNumber` in the call);
+  `import` stores a forced row but returns it still marked. Judge a row by `forceImport`, never by
+  the marker, and force only a row your own count proves new (never one the account already has).
+- Wealthfolio divides price, amount and fee of a minor-unit row (GBX/GBp, ZAc, ILA…) by 100 on
+  import, whatever its type: send a `SPLIT` (ratio in `amount`) in `majorCurrency(ccy)`.
 
 Releasing: `pnpm bump <addon> <patch|minor|major>` and merge to main — `release.yml` publishes
 every add-on whose `<addon>-v<version>` tag is missing (see `tooling/release-plan.mjs`). Bump in

@@ -1,5 +1,5 @@
 export { parseCsv, parseCsvRecords, headerIndex } from "./csv";
-export { round2, cashSymbol, fnv1a } from "./money";
+export { round2, cashSymbol, fnv1a, majorCurrency } from "./money";
 export {
   adoptUntrackedRows,
   selectNewActivities,

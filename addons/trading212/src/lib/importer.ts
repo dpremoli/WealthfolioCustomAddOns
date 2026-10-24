@@ -108,6 +108,15 @@ export class ActivityImporter {
     return rows;
   }
 
+  /**
+   * Reads the account again: what Wealthfolio holds, not what this importer believes it stored.
+   * For a check that must not trust the in-memory view (the split repair).
+   */
+  async reload(accountId: string): Promise<ExistingActivityLike[]> {
+    this.existing.delete(accountId);
+    return this.existingIn(accountId);
+  }
+
   /** Drops rows that were deleted from the in-memory view of an account. */
   forget(accountId: string, ids: string[]): void {
     const gone = new Set(ids);

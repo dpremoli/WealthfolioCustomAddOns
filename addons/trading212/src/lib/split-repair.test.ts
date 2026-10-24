@@ -1,16 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ActivityImport, AddonContext } from "@wealthfolio/addon-sdk";
+import { FakeWealthfolio } from "@wf-addons/kit/testing";
 import { ActivityImporter } from "./importer";
 import type { KnownSplit } from "./known-splits";
 import { KNOWN_SPLITS } from "./known-splits";
 import {
   cleanRatio,
   describeRatio,
+  healSplitRatios,
   inferSplit,
+  minorUnitSplits,
   proposeSplits,
   quantityEvents,
   repairSplits,
   simulateQuantity,
+  statedRatio,
   type DividendShares,
   type PositionGap,
   type QtyEvent,
@@ -129,7 +133,8 @@ describe("repairSplits", () => {
     const ctx = {
       api: {
         activities: {
-          getAll: async () => rows,
+          // What the account holds: the rows given, and what was imported since.
+          getAll: async () => [...rows, ...imported.flat().map((a) => ({ ...a, assetSymbol: a.symbol }))],
           checkImport: async (r: ActivityImport[]) => r,
           import: vi.fn(async (r: ActivityImport[]) => {
             imported.push(r);
@@ -245,7 +250,8 @@ describe("Pennon's 2-for-3 consolidation (numbers from a real Invest export)", (
       symbol: "PNN",
       exchangeMic: "XLON",
       amount: 2 / 3,
-      currency: "GBX",
+      // In pounds: Wealthfolio would store a GBX ratio as a hundredth of itself.
+      currency: "GBP",
     });
   });
 });
@@ -483,7 +489,10 @@ describe("repairSplits — from the dividend rows, with Pennon out of the table"
     const ctx = {
       api: {
         activities: {
-          getAll: async () => trades.map(([d, q]) => ({ activityType: "BUY", date: new Date(`${d}T10:00:00Z`), quantity: q, assetSymbol: "PNN" })),
+          getAll: async () => [
+            ...trades.map(([d, q]) => ({ activityType: "BUY", date: new Date(`${d}T10:00:00Z`), quantity: q, assetSymbol: "PNN" })),
+            ...imported.flat().map((a) => ({ ...a, assetSymbol: a.symbol })),
+          ],
           checkImport: async (r: ActivityImport[]) => r,
           import: async (r: ActivityImport[]) => {
             imported.push(r);
@@ -515,7 +524,7 @@ describe("repairSplits — from the dividend rows, with Pennon out of the table"
     const log: string[] = [];
     expect(await repairSplits(t.importer, t.resolver, "inv", [gap], log, dividends)).toBe(1);
     const split = t.imported[0][0];
-    expect(split).toMatchObject({ activityType: "SPLIT", symbol: "PNN", exchangeMic: "XLON", amount: 2 / 3, currency: "GBX" });
+    expect(split).toMatchObject({ activityType: "SPLIT", symbol: "PNN", exchangeMic: "XLON", amount: 2 / 3, currency: "GBP" });
     const day = String(split.date).slice(0, 10);
     expect(day >= "2021-07-22" && day <= "2021-07-29").toBe(true);
     expect(split.id).toBe(`t212-split-GB00BNNTLN49-${day.replace(/-/g, "")}`);
@@ -545,5 +554,51 @@ describe("repairSplits — from the dividend rows, with Pennon out of the table"
     } finally {
       KNOWN_SPLITS.splice(entry, 1);
     }
+  });
+});
+
+describe("splits stored at a hundredth of their ratio (sent in pence before 2.6.4)", () => {
+  it("reads the ratio the add-on's comments state", () => {
+    expect(statedRatio("Stock split: 1.2 → 1.152 shares")).toBeCloseTo(0.96, 10);
+    expect(statedRatio("Stock split 2:3 (not in the Trading 212 export; found from the position difference)")).toBeCloseTo(2 / 3, 10);
+    expect(statedRatio("Stock split ×0.805 (not in the Trading 212 export; …)")).toBe(0.805);
+    expect(statedRatio("A split I added by hand")).toBeNull();
+  });
+
+  it("finds only the rows whose ratio is a hundredth (or thousandth) of what the comment says", () => {
+    const rows = [
+      { id: "a", activityType: "SPLIT", date: "2024-02-01", amount: "0.0096", comment: "Stock split: 1.2 → 1.152 shares" },
+      { id: "b", activityType: "SPLIT", date: "2022-06-06", amount: "20", comment: "Stock split 20:1 (not in the Trading 212 export; x)" },
+      // Off by a factor that is not a minor unit's: not this mistake, left alone.
+      { id: "c", activityType: "SPLIT", date: "2022-06-06", amount: "2", comment: "Stock split 20:1 (not in the Trading 212 export; x)" },
+      { id: "d", activityType: "BUY", date: "2022-06-06", amount: "0.0096", comment: "Stock split: 1.2 → 1.152 shares" },
+    ];
+    expect(minorUnitSplits(rows).map((b) => [b.row.id, b.ratio])).toEqual([["a", 0.96]]);
+  });
+
+  it("imports the right ratio in pounds, deletes the wrong row, and Reckitt's quantity comes back", async () => {
+    const wf = new FakeWealthfolio([{ id: "inv", name: "Invest", currency: "GBP" }]);
+    const rkt = () => Number(wf.holdings("inv").find((h) => h.instrument?.symbol === "RKT")?.quantity ?? 0);
+    const importer = new ActivityImporter(wf.ctx);
+    // As 2.6.2 sent it: a buy, then the consolidation pair as a SPLIT in GBX.
+    const buy: ActivityImport = {
+      id: "t212-order-1", accountId: "inv", activityType: "BUY" as ActivityImport["activityType"], date: "2023-01-10T10:00:00.000Z",
+      symbol: "RKT", exchangeMic: "XLON", instrumentType: "EQUITY", quantity: 0.99155313, unitPrice: 5400, currency: "GBX", isValid: true, isDraft: false,
+    };
+    const split: ActivityImport = {
+      id: "t212-split-GB00B24CGK77-202402010700", accountId: "inv", activityType: "SPLIT" as ActivityImport["activityType"], date: "2024-02-01T07:00:00.000Z",
+      symbol: "RKT", exchangeMic: "XLON", instrumentType: "EQUITY", amount: 0.96, currency: "GBX", isValid: true, isDraft: false,
+      comment: "Stock split: 0.99155313 → 0.951891 shares",
+    };
+    await importer.importRows([[buy], [split]]);
+    expect(rkt()).toBeCloseTo(0.00951891, 8);
+
+    const log: string[] = [];
+    expect(await healSplitRatios(wf.ctx, new ActivityImporter(wf.ctx), "inv", log)).toBe(1);
+    expect(rkt()).toBeCloseTo(0.951891, 6);
+    expect(wf.rows("inv").filter((r) => r.activityType === "SPLIT")).toMatchObject([{ amount: 0.96, currency: "GBP" }]);
+    expect(log.join("\n")).toContain("Fixed the RKT split of 2024-02-01");
+    // Nothing left to fix.
+    expect(await healSplitRatios(wf.ctx, new ActivityImporter(wf.ctx), "inv", [])).toBe(0);
   });
 });

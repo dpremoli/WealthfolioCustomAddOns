@@ -49,7 +49,7 @@ import { ActivityImporter, describeRejected, type ImportUnit, type RejectedRow }
 import { RefusedRowsStore } from "../lib/refused";
 import { CARD_FUNDING_COMMENT, fundingForExisting, isFundingId, orphanFundingLegs, withCardFunding } from "../lib/card-funding";
 import { foldMonthlyInterest } from "../lib/interest";
-import { repairSplits, type DividendShares, type PositionGap } from "../lib/split-repair";
+import { healSplitRatios, repairSplits, type DividendShares, type PositionGap } from "../lib/split-repair";
 import {
   describeRow,
   mapCurrencyConversion,
@@ -754,6 +754,8 @@ async function syncOne(
     // A ledger that remembers rows the account does not hold (an earlier version recorded rows it
     // had only sent) would skip them for good: forget it and read everything again.
     await healLedger(ctx, conn.id, accountId, importer, log);
+    // Splits sent in pence before 2.6.4 were stored at a hundredth of their ratio: put them right.
+    await healSplitRatios(ctx, importer, accountId, log);
     const { lastSync: since, backfillCheckpoint, backfillStartedAt } = await getSyncState(ctx, conn.id);
     const syncStartedAt = new Date().toISOString();
     const importedRefs = await getImportedRefs(ctx, conn.id);

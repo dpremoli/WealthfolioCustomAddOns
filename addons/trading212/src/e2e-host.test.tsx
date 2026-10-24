@@ -449,3 +449,131 @@ describe("the log survives a refresh", () => {
     expect([...host.storage.keys()].some((k) => k.startsWith("t212_refs_inv_"))).toBe(false);
   });
 });
+
+describe("a full switch on an account that already holds an older card import", () => {
+  // As on a real switch: an older add-on version imported the card spends with other merchant text,
+  // and a Holdings-mode connection since removed funded each from an Invest account that is gone,
+  // leaving the card side of every funding pair behind.
+  const coffee = (id: string, ago: number) =>
+    row({ Action: "Card debit", Time: `${day(ago)}T09:00:00Z`, Total: -2.8, "Currency (Total)": "GBP", "Merchant name": "PRET A MANGER", "Merchant category": "RESTAURANTS", ID: id });
+
+  function withOlderCardImport() {
+    const host = new FakeWealthfolio([
+      ...ACCOUNTS,
+      { id: "acc-card", name: "Trading 212 (Invest) Card", currency: "GBP", trackingMode: "TRANSACTIONS", provider: "trading212-addon", providerAccountId: "11-card", accountType: "CASH" },
+    ]);
+    connect(host, CONNS);
+    const d = realisticDataset();
+    // Two identical deposits on one day: the host flags the second as a duplicate within the call.
+    d.inv.csv.push(deposit("DEP-D", 50, 20), deposit("DEP-E", 50, 20));
+    // Two identical coffees on one day, of which the older import holds one.
+    d.inv.csv.push(coffee("COF-1", 45), coffee("COF-2", 45));
+    let n = 0;
+    const older: Parameters<typeof host.stored.set>[1] = [];
+    const add = (r: { activityType: string; date: Date; amount: number; comment: string }) =>
+      older.push({ id: `old-${++n}`, accountId: "acc-card", assetSymbol: null, exchangeMic: null, quantity: null, unitPrice: null, fee: null, currency: "GBP", ...r });
+    for (let i = 0; i < 25; i++) {
+      const date = new Date(`${day(60 - i)}T12:00:00Z`);
+      add({ activityType: "WITHDRAWAL", date, amount: 5 + i, comment: "Sainsbury's · Groceries" });
+      add({ activityType: "TRANSFER_IN", date, amount: 5 + i, comment: "Card funding" });
+    }
+    add({ activityType: "WITHDRAWAL", date: new Date(`${day(45)}T09:00:00Z`), amount: 2.8, comment: "Pret · Eating out" });
+    host.stored.set("acc-card", older);
+    installTrading212(host, { t212_auth_inv: d.inv, t212_auth_isa: d.isa }, (s) => host.cash(s === "t212_auth_inv" ? "acc-inv" : "acc-isa"));
+    return host;
+  }
+
+  /** Each card-funding leg in the card account has its partner in the Invest account, and the reverse. */
+  function fundingLegs(host: FakeWealthfolio) {
+    const key = (r: { date: Date; amount: number | null }) => `${r.date.toISOString().slice(0, 10)}|${r.amount}`;
+    const legs = (acc: string, type: string) =>
+      host.rows(acc).filter((r) => r.activityType === type && r.comment === "Card funding").map(key).sort();
+    return { cardIn: legs("acc-card", "TRANSFER_IN"), invOut: legs("acc-inv", "TRANSFER_OUT") };
+  }
+
+  function expectClean(host: FakeWealthfolio, results: Awaited<ReturnType<typeof runSyncAll>>) {
+    for (const r of results.perAccount) expect(r.error, r.log.join("\n")).toBeUndefined();
+    // No duplicates: the 25 spends and the 2 coffees, once each, whatever the merchant text.
+    expect(host.rows("acc-card").filter((r) => r.activityType === "WITHDRAWAL")).toHaveLength(27);
+    // No orphan transfers: one funding pair per spend, both legs present.
+    const { cardIn, invOut } = fundingLegs(host);
+    expect(cardIn).toHaveLength(27);
+    expect(invOut).toEqual(cardIn);
+    // Nothing listed as refused, and every call stored what it said it stored.
+    expect(refusedList(host, "inv")).toEqual([]);
+    expect(refusedList(host, "isa")).toEqual([]);
+    for (const r of results.perAccount) expect(r.log.join("\n")).not.toMatch(/refuses|not imported: /i);
+    // Both identical deposits are there.
+    expect(host.countsByType("acc-inv").DEPOSIT).toBe(5);
+    for (const r of results.perAccount) expect(r.verification?.ok ?? true, r.log.join("\n")).toBe(true);
+  }
+
+  it("imports no spend twice, re-funds the orphaned spends, and lists nothing as refused; a second sync changes nothing", async () => {
+    const host = withOlderCardImport();
+    const first = await runSyncAll(host.ctx, {});
+    expectClean(host, first);
+    // The forced in-batch duplicate came back marked by the host, and was still counted as stored.
+    expect(host.importCalls.every((c) => c.success)).toBe(true);
+    // The older rows are the ones kept (matched by day, amount and type, not merchant text), and
+    // each orphaned card leg found its Invest partner in the new funding pair.
+    expect(host.rows("acc-card").filter((r) => r.comment === "Sainsbury's · Groceries")).toHaveLength(25);
+    expect(host.rows("acc-card").filter((r) => r.comment === "Card funding" && r.id.startsWith("old-"))).toHaveLength(25);
+
+    const before = host.rows().length;
+    const second = await runSyncAll(host.ctx, {});
+    expectClean(host, second);
+    expect(host.rows().length).toBe(before);
+  });
+
+  it("a later sync deletes the card legs whose Invest partner is gone and funds those spends again", async () => {
+    const host = withOlderCardImport();
+    await runSyncAll(host.ctx, {});
+    // The Invest legs go (as when the account that held them is deleted): 27 card legs are orphans.
+    const invLegs = host.rows("acc-inv").filter((r) => r.activityType === "TRANSFER_OUT" && r.comment === "Card funding");
+    await host.ctx.api.activities.saveMany({ deleteIds: invLegs.map((r) => r.id) } as never);
+    expect(fundingLegs(host).invOut).toEqual([]);
+
+    const again = await runSyncAll(host.ctx, {});
+    expectClean(host, again);
+    const inv = again.perAccount.find((r) => r.connectionId === "inv")!;
+    expect(inv.log.join("\n")).toMatch(/deleted 27 funding transfers whose other half was gone/);
+  });
+});
+
+describe("splits Trading 212 does not export, against the fake host", () => {
+  it("adds a known split even while another row is refused, and the account then matches", async () => {
+    const host = new FakeWealthfolio(ACCOUNTS, {
+      search: (q) => (q.startsWith("AMZN") || q === "US0231351067" ? [{ symbol: "AMZN", exchangeMic: "XNAS", currency: "USD", score: 1, quoteType: "EQUITY" }] : [{ symbol: q.split("_")[0], exchangeMic: "XLON", currency: "GBP", score: 1, quoteType: "EQUITY" }]),
+    });
+    connect(host, CONNS);
+    const d = realisticDataset();
+    // One Amazon buy before its 20:1 split of 2022-06-06; Trading 212 holds 20 times as many now.
+    d.inv.csv.push(
+      row({
+        Action: "Market buy", Time: "2021-09-01T10:00:00Z", ISIN: "US0231351067", Ticker: "AMZN", Name: "Amazon",
+        "No. of shares": 0.108245, "Price / share": 3400, "Currency (Price / share)": "USD", "Exchange rate": 1.37, Total: 268.5, "Currency (Total)": "GBP", ID: "AMZN-1",
+      }),
+    );
+    installTrading212(host, { t212_auth_inv: d.inv, t212_auth_isa: d.isa }, (s) => host.cash(s === "t212_auth_inv" ? "acc-inv" : "acc-isa"));
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const api = host.ctx.api as any;
+    const t212 = api.network.request;
+    api.network.request = async (req: { url: string; auth?: { secretKey: string } }) => {
+      if (req.url.includes("/positions") && req.auth?.secretKey === "t212_auth_inv") {
+        const base = JSON.parse((await t212(req)).body);
+        return json([...base, { instrument: { ticker: "AMZN_US_EQ", isin: "US0231351067", name: "Amazon", currency: "USD" }, quantity: 2.1649 }]);
+      }
+      return t212(req);
+    };
+    // A row Wealthfolio refuses on every call: it waits in the refused list.
+    host.importValidation = (a) => (a.comment === "BBB" && a.activityType === "BUY" && Number(a.unitPrice) === 52 ? "Symbol cannot be resolved" : null);
+
+    const results = await runSyncAll(host.ctx, {});
+    const inv = results.perAccount.find((r) => r.connectionId === "inv")!;
+    expect(refusedList(host, "inv").map((e) => e.id)).toEqual(["t212-order-BUY-BBB-2"]);
+    const split = host.rows("acc-inv").find((r) => r.activityType === "SPLIT");
+    expect(split, inv.log.join("\n")).toMatchObject({ assetSymbol: "AMZN", amount: 20 });
+    expect(Number(host.holdings("acc-inv").find((h) => h.instrument?.symbol === "AMZN")?.quantity)).toBeCloseTo(2.1649, 6);
+    expect(inv.log.join("\n")).toMatch(/adding the 20:1 split of 2022-06-06/);
+  });
+});

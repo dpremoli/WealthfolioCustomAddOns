@@ -20,6 +20,8 @@
  *   same call `duplicateOfLineNumber` (with a `_duplicate` warning). `import` skips such a row
  *   unless it is sent with `forceImport`, and returns it marked; a forced row is stored even if it
  *   still carries a marker, and the marker it was sent with comes back on the returned row.
+ * - A row in a minor-unit currency (GBX) is stored in its major unit: its price, amount and fee
+ *   divided by 100, a SPLIT's ratio included (`activities_service.rs`, `fx/currency.rs`).
  * - Holdings apply `SPLIT` rows (ratio in `amount`) to the lots held before the split day, and
  *   `saveMany({ deleteIds })` deletes activities.
  */
@@ -66,6 +68,8 @@ const ASSET_TYPES = new Set(["BUY", "SELL", "DIVIDEND", "SPLIT"]);
 
 let counter = 0;
 const uuid = () => `00000000-0000-4000-8000-${(++counter).toString(16).padStart(12, "0")}`;
+// Minor-unit currencies the host stores in their major unit: [major, units per major].
+const MINOR_UNITS: Record<string, [string, number]> = { GBX: ["GBP", 100], ZAC: ["ZAR", 100], ILA: ["ILS", 100], KWF: ["KWD", 1000], USX: ["USD", 100] };
 const num = (v: unknown): number | null => (v === null || v === undefined || v === "" ? null : Number(v));
 const bytes = (s: string) => new TextEncoder().encode(s).length;
 
@@ -169,7 +173,7 @@ export class FakeWealthfolio {
       cash += this.cashEffect(r);
     }
     const securities = [...qty].filter(([, q]) => Math.abs(q) > 1e-9).map(([symbol, quantity]) => ({ holdingType: "security", instrument: { symbol }, quantity, localCurrency: "GBP" }));
-    return [...securities, { holdingType: "cash", quantity: cash, localCurrency: "GBP" }];
+    return [...securities, { holdingType: "cash", instrument: undefined as { symbol: string } | undefined, quantity: cash, localCurrency: "GBP" }];
   }
 
   cash(accountId: string): number {
@@ -204,10 +208,14 @@ export class FakeWealthfolio {
 
   /** The host's idempotency key for a row as sent (the fields its key hashes). */
   private keyOf(a: ActivityImport): string {
-    const n = (v: unknown) => (v === null || v === undefined || v === "" ? "" : String(Math.abs(Number(v))));
+    // In major units, as the host's key is (a GBX row matches the GBP row it was stored as).
+    const minor = MINOR_UNITS[a.currency === "GBp" ? "GBX" : (a.currency ?? "").toUpperCase()];
+    const n = (v: unknown) => (v === null || v === undefined || v === "" ? "" : String(Math.abs(Number(v)) / (minor?.[1] ?? 1)));
+    const q = (v: unknown) => (v === null || v === undefined || v === "" ? "" : String(Math.abs(Number(v))));
     const asset = this.isAssetRow(a) ? `${a.symbol ?? ""}@${a.exchangeMic ?? ""}` : "";
     const comment = (a.comment ?? "").split(/\s+/).filter(Boolean).join(" ");
-    return [a.accountId, a.activityType, String(a.date ?? "").slice(0, 10), asset, n(a.quantity), n(a.unitPrice), n(a.amount), a.currency ?? "", comment, n(a.fee)].join("|");
+    const currency = minor ? minor[0] : (a.currency ?? "");
+    return [a.accountId, a.activityType, String(a.date ?? "").slice(0, 10), asset, q(a.quantity), n(a.unitPrice), n(a.amount), currency, comment, n(a.fee)].join("|");
   }
 
   private keyOfStored(r: StoredActivity): string {
@@ -347,6 +355,10 @@ export class FakeWealthfolio {
     const runId = toStore.length > 0 ? uuid() : "";
     for (const a of toStore) {
       const list = this.stored.get(a.accountId) ?? [];
+      // Like Wealthfolio, a minor-unit row (GBX) is stored in its major unit: price, amount and fee
+      // divided by 100, whatever the row is (a SPLIT's ratio included).
+      const minor = MINOR_UNITS[a.currency === "GBp" ? "GBX" : (a.currency ?? "").toUpperCase()];
+      const unit = (v: unknown) => (minor && num(v) !== null ? num(v)! / minor[1] : num(v));
       list.push({
         id: uuid(), // the host keeps no id of ours
         accountId: a.accountId,
@@ -355,10 +367,10 @@ export class FakeWealthfolio {
         assetSymbol: this.isAssetRow(a) ? (a.symbol ?? null) : null,
         exchangeMic: this.isAssetRow(a) ? (a.exchangeMic ?? null) : null,
         quantity: num(a.quantity),
-        unitPrice: num(a.unitPrice),
-        amount: num(a.amount),
-        fee: num(a.fee),
-        currency: a.currency ?? "GBP",
+        unitPrice: unit(a.unitPrice),
+        amount: unit(a.amount),
+        fee: unit(a.fee),
+        currency: minor ? minor[0] : (a.currency ?? "GBP"),
         comment: a.comment ?? null,
       });
       this.stored.set(a.accountId, list);

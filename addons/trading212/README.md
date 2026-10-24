@@ -229,7 +229,9 @@ it stays a deposit, which is what Wealthfolio's ISA allowance counts.
 
 Each Trading 212 ticker (e.g. `AAPL_US_EQ`) is matched to a Wealthfolio symbol
 using Wealthfolio's own market-data search (`searchTicker`), trying the instrument
-ISIN, then the base ticker, then the name, and preferring symbols you already hold.
+ISIN, then the base ticker, then the name, and preferring symbols you already hold. The export
+names an instrument by its plain ticker (`VUAA`) and the API by its own (`VUAAm_EQ`); both share
+one resolution through the ISIN and currency, so an instrument always lands on one listing.
 Crypto pairs, currencies and indices are never picked. Resolutions are cached and shared by
 both sync modes, and every imported trade and dividend carries the listing's exchange (MIC),
 like Holdings snapshots do, so both modes land on the same asset (without it Wealthfolio picks
@@ -335,7 +337,41 @@ never a separate fee.
 
 ---
 
-## Upgrading to 2.6.3
+## Upgrading to 2.6.4
+
+Fixes from a real Transactions switch on Wealthfolio 3.11.0:
+
+- **Rows Wealthfolio stored are no longer listed as refused.** Wealthfolio returns a row it was
+  told to store despite looking like a duplicate (two identical deposits on one day) still marked
+  as a duplicate, and 2.6.2 took the whole call for refused although every row was saved. A row is
+  now judged by what the call says it stored; when the counts still disagree, the account is read
+  again to see which rows are there, and no call is refused wholesale. The next sync clears the
+  rows 2.6.2 listed by mistake (they are found in the account).
+- **Card spending is no longer imported twice.** Card rows already in the card account are
+  matched by day, amount and type, whatever the merchant text an older version wrote ("Lidl GB" or
+  "Lidl"). A row Wealthfolio already has is never forced in again; only a second identical row
+  (two coffees on one day) is.
+- **Card funding with half missing is repaired.** A funding transfer whose other half is gone
+  (its account was deleted, say) is deleted, and its card row is funded again. Removing a
+  connection in Settings also deletes the card-side halves left without a partner (after you
+  deleted its Wealthfolio account).
+- **Splits and consolidations of London shares are no longer off by 100.** Wealthfolio divides
+  the amount of a row in pence by 100, a split's ratio included (Reckitt showed a hundredth of
+  its shares). Splits are now sent in pounds, and the next sync puts right the splits an earlier
+  version stored that way.
+- **The split repair reads the account itself**, so it sees every stored row (2.6.2 missed the
+  rows it had wrongly listed as refused and added no split).
+- **One listing per instrument.** The export's rows and Trading 212's positions name an instrument
+  differently (`VUAA` and `VUAAm_EQ`), and could land on two listings (VUAA on Milan, VUAAM on
+  Cboe). Both now share one resolution through the ISIN, and the European tickers' exchange letter
+  (`m` Milan, `l` London, `d` Xetra, `p` Paris, `a` Amsterdam, `e` Madrid) picks the listing. The
+  check after a backfill notes a position held under another listing's symbol with the same number
+  of shares instead of reporting a difference. Assets an earlier version created on another
+  listing stay as they are: switch the account again (or **Reset** and sync) to rebuild it.
+- **Shares a corporate action takes away for nothing** (a "Market sell" with no price and no
+  proceeds, such as the old line of a spin-off) are booked as a transfer out at zero value instead
+  of being left out.
+
 
 - **The Cash ISA CSV import no longer records rows Wealthfolio did not store.** Wealthfolio
   answers "OK" even when it saves nothing, and the import used to remember every row as imported

@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
 import {
   addConnection,
+  addDividendShares,
+  getDividendShares,
   clearAccountData,
   connectionConfig,
   encodeCredentials,
@@ -13,6 +15,7 @@ import {
   getSyncState,
   migrateV1ToV2,
   removeConnection,
+  resetSyncState,
   saveCredentials,
   setLastSync,
   updateConnection,
@@ -452,5 +455,28 @@ describe("migrateV1ToV2 (v1 keyring layout → storage + per-connection auth sec
     expect(a).toBe(b);
     expect(a.migrated).toBe(true);
     expect(secrets.has("t212_connections")).toBe(false);
+  });
+});
+
+describe("dividend share counts", () => {
+  it("keeps each pair once, by ISIN, next to the rest of the sync state, and Reset forgets them", async () => {
+    const { ctx, storage } = makeCtx({
+      storage: [["t212_sync_c1", JSON.stringify({ lastSync: "2026-01-01", importedRefs: ["r"] })]],
+    });
+    expect(await getDividendShares(ctx, "c1")).toEqual({});
+    await addDividendShares(ctx, "c1", [
+      { isin: "GB00BNNTLN49", day: "2021-07-21", shares: 0.23384732 },
+      { isin: "GB00BNNTLN49", day: "2021-09-06", shares: 0.15589821 },
+      { isin: "US0231351067", day: "2021-03-01", shares: 1 },
+    ]);
+    await addDividendShares(ctx, "c1", [{ isin: "GB00BNNTLN49", day: "2021-07-21", shares: 0.23384732 }]);
+    expect(await getDividendShares(ctx, "c1")).toEqual({
+      GB00BNNTLN49: [["2021-07-21", 0.23384732], ["2021-09-06", 0.15589821]],
+      US0231351067: [["2021-03-01", 1]],
+    });
+    expect((await getSyncState(ctx, "c1")).importedRefs).toEqual(["r"]);
+    await resetSyncState(ctx, "c1");
+    expect(storage.has("t212_sync_c1")).toBe(false);
+    expect(await getDividendShares(ctx, "c1")).toEqual({});
   });
 });

@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 // Zips a built add-on into dist/<id>-<version>.zip: manifest.json, dist/addon.js
 // (+ any emitted CSS), README.md and packaged assets/ when present. Refuses to
-// package when manifest.json and package.json disagree on the version.
+// package when manifest.json and package.json disagree on the version, or when the bundle would
+// not load under the host's module rewriter (see check-bundle.mjs).
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
+import { checkBundleFile } from "./check-bundle.mjs";
 
 const cwd = process.cwd();
 const manifest = JSON.parse(readFileSync(path.join(cwd, "manifest.json"), "utf8"));
@@ -18,6 +20,12 @@ if (manifest.version !== pkg.version) {
 }
 if (!existsSync(path.join(cwd, "dist", "addon.js"))) {
   console.error("dist/addon.js missing — run the build first");
+  process.exit(1);
+}
+
+const problems = await checkBundleFile(path.join(cwd, "dist", "addon.js"));
+if (problems.length > 0) {
+  for (const p of problems) console.error(p);
   process.exit(1);
 }
 

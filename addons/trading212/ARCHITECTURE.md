@@ -58,7 +58,7 @@ can no longer be expressed, so a key ID **and** secret are required.
 | `src/lib/symbol-resolver.ts` | Maps a Trading 212 ticker to a Wealthfolio symbol via `market.searchTicker`, with in-memory + persisted caching. Shared across all connections (mapping is account-independent). |
 | `src/lib/mapper.ts` / `csv.ts` | Pure functions: Trading 212 order/dividend/transaction (JSON) and export CSV rows → `ActivityImport` (take `accountId` as a param). Final-cash and FX rules live here. |
 | `src/lib/auto-sync.ts` | Background scheduler (startup, hourly, `onUpdateComplete`). |
-| `src/lib/importer.ts` | `ActivityImporter`: reconcile (kit `selectNewActivities`, each account read once per sync) → `checkImport` → `import` in 1000-row calls, halving a refused call, keeping an `ImportUnit` (rows that must land in one call) together, and returning every row it could not import with Wealthfolio's reason. |
+| `src/lib/importer.ts` | `ActivityImporter`: reconcile (kit `selectNewActivities`, each account read once per sync) → `checkImport` → `activities.import` in 1000-row calls (the method is `importRows`: es-module-lexer reports a class method named `import` as a dynamic import, which the host rewrites into a syntax error), halving a refused call, keeping an `ImportUnit` (rows that must land in one call) together, and returning every row it could not import with Wealthfolio's reason. |
 | `src/lib/card-funding.ts` | The transfer pair that funds each card row from the investing account (and the pairs for card rows imported before). |
 | `src/lib/verify.ts` | The backfill check: Wealthfolio's holdings/cash vs `/positions` + `/account/summary`, and `PortfolioUpdates`, which waits for the recalculation an import queued. |
 | `src/lib/interest.ts` | Optional folding of daily interest on cash into monthly totals during a backfill. |
@@ -199,8 +199,30 @@ the `SPLIT` activities only if the quantity then equals Trading 212's to within 
 (`proposeSplits`; the smallest set that fits, never a tie). The date has to come from the table:
 Wealthfolio's stored quotes are split-adjusted (Yahoo's `close`), and the host never fetches split
 events (`events=div` only), so there is no price jump to find. Positions no known split explains
-are described in the log with the ratio they imply. The repair compares activities, not
-Wealthfolio's holdings, so it does not wait for the recalculation.
+are tried against the position's dividend rows (`inferSplit`, below), and else described in the
+log with the ratio they imply. The repair compares activities, not Wealthfolio's holdings, so it
+does not wait for the recalculation.
+
+**Splits inferred from dividend rows.** A dividend row's `No. of shares` is the holding it was paid
+on. The sync keeps `[day, shares]` per ISIN in `t212_sync_{id}.dividendShares` (CSV rows via
+`dividendShareOf`, JSON items from `quantity`; recorded even for rows already imported, merged,
+dropped by Reset). `inferSplit` replays the position's activities without the split. A dividend is
+*unchanged* when its count equals one of the replayed holdings in the 100 days before it (the
+record date precedes the pay date, so trades in between are not in the count); the first
+*changed* one and the last unchanged one before it bound the split (every later dividend must be
+changed). The last unchanged one must match the replay's holding on its own pay date: if a trade
+came between its record and pay dates the split could hide before that trade, so nothing is
+inferred. For each candidate day in the window, the holding at a later time is linear in the ratio
+(`f0 + ratio·a`, a split scales the lots held before it), so each changed dividend gives the
+ratios `(count − f0)/a` that would produce it; those that are usual (`cleanRatio`: whole,
+reciprocal, 3:2, 2:3, 5:2, 2:5) and shared by all changed dividends are tried against Trading 212's
+quantity, at `proposeSplits`' tolerance, and the winner is re-checked with `simulateQuantity`. The
+SPLIT goes in only when exactly one ratio reproduces it; it is dated in the middle of the days that
+do. Without splits among the activities the holding is a prefix sum (lookups), otherwise each query
+replays them within a work budget (it gives up beyond it). A split and a trade missing from the
+account are indistinguishable here, so `use-sync` withholds the counts from any sync that left out
+a trade or corporate action, and `cleanRatio` leaves out fractions a missing trade could fake.
+It runs only when the known-splits table proposed nothing (and did not tie).
 
 ### Background auto-sync (`auto-sync.ts`)
 
@@ -482,8 +504,9 @@ versions must match or packaging refuses. The bundle imports only host-provided 
 
 - **Corporate actions**: explicit split pairs, distributions and conversions are mapped; splits
   with no row in the export need the known-splits table for their date (it holds fractional
-  ratios too: Pennon's 2-for-3 consolidation is 2/3), and a split that is not in it is only
-  described, with the overall ratio it implies. An incremental (JSON) sync does not see a
+  ratios too: Pennon's 2-for-3 consolidation is 2/3). A split that is not in it is inferred from
+  the position's dividend rows when they are clear (see above), and otherwise only described,
+  with the overall ratio it implies. An incremental (JSON) sync does not see a
   new split's row; the check reports the position and a re-sync after **Reset** brings it in. A
   swap into a different ticker or ISIN is reported, not mapped. Wealthfolio's `SPLIT` takes the
   ratio in `amount`, needs the asset, and applies to lots bought strictly before the split day.

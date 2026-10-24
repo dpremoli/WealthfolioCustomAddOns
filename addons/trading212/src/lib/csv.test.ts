@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseCsv, mapCsvRow } from "./csv";
+import { parseCsv, mapCsvRow, dividendShareOf } from "./csv";
 import type { SymbolResolver } from "./symbol-resolver";
 
 // Minimal stub: resolves only known tickers, returns null for unknown ones. A value "SYM|MIC"
@@ -635,5 +635,30 @@ describe("mapCsvRow — rows seen in real exports", () => {
       RESOLVER,
     );
     expect(act!.fee).toBeCloseTo(1.0, 6);
+  });
+});
+
+describe("dividendShareOf", () => {
+  const div = (extra: Record<string, string> = {}) => ({
+    Action: "Dividend (Ordinary)",
+    Time: "2021-07-21 08:00:00",
+    ISIN: "GB00BNNTLN49",
+    Ticker: "PNN",
+    "No. of shares": "0.2338473200",
+    ...extra,
+  });
+
+  it("reads the holding, the day and the ISIN from a dividend row", () => {
+    expect(dividendShareOf(div())).toEqual({ isin: "GB00BNNTLN49", day: "2021-07-21", shares: 0.23384732 });
+    expect(dividendShareOf(div({ Action: "Dividend (Return of capital)", Time: "2022-01-03T06:00:00Z" }))).toMatchObject({ day: "2022-01-03" });
+    expect(dividendShareOf(div({ Time: "", "Time (UTC)": "2021-07-21 08:00:00+00:00" }))).toMatchObject({ day: "2021-07-21" });
+  });
+
+  it("ignores anything that is not a dividend on a held position", () => {
+    expect(dividendShareOf(div({ Action: "Market buy" }))).toBeNull();
+    expect(dividendShareOf(div({ Action: "Dividend adjustment" }))).toBeNull();
+    expect(dividendShareOf(div({ ISIN: "" }))).toBeNull();
+    expect(dividendShareOf(div({ "No. of shares": "" }))).toBeNull();
+    expect(dividendShareOf(div({ Time: "yesterday" }))).toBeNull();
   });
 });

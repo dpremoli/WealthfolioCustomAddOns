@@ -41,8 +41,8 @@ describe("ActivityImporter", () => {
     const t = setup();
     const imp = new ActivityImporter(t.ctx, 1000);
     const rows = Array.from({ length: 1500 }, (_, i) => [cash(`r${i}`, i + 1)]);
-    const a = await imp.import(rows.slice(0, 1200));
-    const b = await imp.import(rows.slice(1200));
+    const a = await imp.importRows(rows.slice(0, 1200));
+    const b = await imp.importRows(rows.slice(1200));
     expect(a.imported + b.imported).toBe(1500);
     expect(t.calls.map((c) => c.length)).toEqual([1000, 200, 300]);
     expect(t.calls[0].every((r) => r.forceImport)).toBe(true);
@@ -52,16 +52,16 @@ describe("ActivityImporter", () => {
   it("leaves out rows the account already holds, including ones it imported earlier in the sync", async () => {
     const t = setup({ existing: { inv: [{ ...cash("old", 5), date: new Date("2026-03-01T10:00:00Z") }] } });
     const imp = new ActivityImporter(t.ctx);
-    const first = await imp.import([[cash("old", 5)], [cash("new", 6)]]);
+    const first = await imp.importRows([[cash("old", 5)], [cash("new", 6)]]);
     expect(first).toMatchObject({ imported: 1, duplicates: 1 });
     expect(first.accounted.sort()).toEqual(["new", "old"]);
     // A second window repeating the same row (an overlap) adds nothing.
-    expect(await imp.import([[cash("new", 6)]])).toMatchObject({ imported: 0, duplicates: 1 });
+    expect(await imp.importRows([[cash("new", 6)]])).toMatchObject({ imported: 0, duplicates: 1 });
   });
 
   it("halves a call the host refuses and reports the one bad row instead of failing", async () => {
     const t = setup({ refuse: ["r3"] });
-    const out = await new ActivityImporter(t.ctx).import(Array.from({ length: 8 }, (_, i) => [cash(`r${i}`, i + 1)]));
+    const out = await new ActivityImporter(t.ctx).importRows(Array.from({ length: 8 }, (_, i) => [cash(`r${i}`, i + 1)]));
     expect(out.imported).toBe(7);
     expect(out.rejected.map((r) => r.activity.id)).toEqual(["r3"]);
     expect(out.rejected[0].reason).toMatch(/import refused it: bad row/);
@@ -76,7 +76,7 @@ describe("ActivityImporter", () => {
             : r,
         ),
     });
-    const out = await new ActivityImporter(t.ctx).import([
+    const out = await new ActivityImporter(t.ctx).importRows([
       [cash("buy", 1, { activityType: "BUY", symbol: "XYZ" })],
       [cash("leg-out", 9, { activityType: "TRANSFER_OUT" }), cash("leg-in", 9, { activityType: "TRANSFER_IN", accountId: "card" })],
       [cash("fine", 2)],
@@ -93,7 +93,7 @@ describe("ActivityImporter", () => {
   it("never splits a unit across import calls", async () => {
     const t = setup();
     const pair = [cash("a", 1, { activityType: "TRANSFER_OUT" }), cash("b", 1, { activityType: "TRANSFER_IN", accountId: "card" })];
-    await new ActivityImporter(t.ctx, 3).import([[cash("x", 5)], [cash("y", 6)], pair]);
+    await new ActivityImporter(t.ctx, 3).importRows([[cash("x", 5)], [cash("y", 6)], pair]);
     expect(t.calls.map((c) => c.map((r) => r.id))).toEqual([["x", "y"], ["a", "b"]]);
   });
 });

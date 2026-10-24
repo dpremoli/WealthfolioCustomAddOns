@@ -1,6 +1,7 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
 import type { ActivityImport } from "@wealthfolio/addon-sdk";
+import { KNOWN_SPLITS } from "../lib/known-splits";
 import { useSync, runSyncAll } from "./use-sync";
 
 // --- helpers -------------------------------------------------------------
@@ -1054,6 +1055,160 @@ describe("useSync — a split Trading 212 never listed", () => {
     expect(r.verification).toMatchObject({ ok: false, settled: false });
     expect(r.verification!.mismatches[0]).toContain("Trading 212 holds 0.5, Wealthfolio 0.108245");
     expect(r.log.join("\n")).toContain("do not reproduce it");
+  });
+});
+
+describe("useSync — a split found from the dividend rows", () => {
+  // Pennon's real numbers, with its entry out of the known splits: the dividend of 2021-07-21 was
+  // paid on 0.23384732 shares, the one of 2021-09-06 on 0.15589821 (= ×2/3), and Trading 212
+  // holds 0.321687 where the trades add up to 0.3996357.
+  const row = (cells: Record<string, string>) =>
+    CSV_HDR.split(",")
+      .map((h) => cells[h] ?? "")
+      .join(",");
+  const trade = (time: string, shares: string, id: string) =>
+    row({
+      Action: "Market buy", Time: time, ISIN: "GB00BNNTLN49", Ticker: "PNN_EQ", Name: "Pennon",
+      "No. of shares": shares, "Price / share": "1100", "Currency (Price / share)": "GBX", Total: "3", "Currency (Total)": "GBP", ID: id,
+    });
+  const dividend = (time: string, shares: string) =>
+    row({
+      Action: "Dividend (Ordinary)", Time: time, ISIN: "GB00BNNTLN49", Ticker: "PNN_EQ", Name: "Pennon",
+      "No. of shares": shares, "Price / share": "0.2", "Currency (Price / share)": "GBP", Total: "0.05", "Currency (Total)": "GBP",
+    });
+  const csv = [
+    CSV_HDR,
+    trade("2021-03-10 09:00:00", "0.15", "B1"),
+    trade("2021-06-15 09:00:00", "0.08384732", "B2"),
+    dividend("2021-07-21 08:00:00", "0.2338473200"),
+    trade("2021-07-29 09:00:00", "0.0942962800", "B3"),
+    dividend("2021-09-06 08:00:00", "0.1558982100"),
+    trade("2021-11-04 09:00:00", "0.0714921000", "B4"),
+  ].join("\n");
+  const pnn = (qty: number) => ({ holdingType: "security", instrument: { symbol: "PNN" }, quantity: qty, localCurrency: "GBP" });
+  let downloads = 0;
+  const route = (u: string) => {
+    if (u.includes("amazonaws.com")) return textResponse(downloads++ === 0 ? csv : CSV_HDR);
+    if (u.includes("/exports")) return jsonResponse([FINISHED_REPORT]);
+    if (u.includes("account/summary")) return jsonResponse({ id: 1, currency: "GBP", cash: { availableToTrade: 0 } });
+    if (u.includes("/positions"))
+      return jsonResponse([{ instrument: { ticker: "PNN_EQ", isin: "GB00BNNTLN49", name: "Pennon", currency: "GBX" }, quantity: 0.321687 }]);
+    return routeFetch(u);
+  };
+  const entry = KNOWN_SPLITS.findIndex((k) => k.isin === "GB00BNNTLN49");
+  let removed: typeof KNOWN_SPLITS = [];
+  beforeEach(() => {
+    removed = KNOWN_SPLITS.splice(entry, 1);
+  });
+  afterEach(() => {
+    KNOWN_SPLITS.splice(entry, 0, ...removed);
+  });
+
+  it("keeps the dividends' share counts, infers the 2:3 split from them and finds the account matches", async () => {
+    downloads = 0;
+    net(async (url: string) => route(String(url)));
+    let imports: { mock: { calls: unknown[][] } } | undefined;
+    const { ctx, importFn, storage } = makeCtx({
+      syncStates: { c1: { lastSync: null, importedRefs: [] } },
+      searchTicker: async () => [{ symbol: "PNN", exchangeMic: "XLON", currency: "GBX", score: 1, quoteType: "EQUITY" }],
+      holdings: () => {
+        const split = (imports!.mock.calls.flatMap((c) => c[0]) as { activityType: string }[]).some((a) => a.activityType === "SPLIT");
+        return [pnn(split ? 0.321687 : 0.3996357)];
+      },
+    });
+    imports = importFn;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { result } = renderHook(() => useSync(ctx as any));
+    await act(async () => {
+      await result.current.syncAll();
+    });
+
+    expect(JSON.parse(storage.get("t212_sync_c1")!).dividendShares).toEqual({
+      GB00BNNTLN49: [["2021-07-21", 0.23384732], ["2021-09-06", 0.15589821]],
+    });
+    const split = importFn.mock.calls.flatMap((c) => c[0] as ActivityImport[]).find((a) => a.activityType === "SPLIT");
+    expect(split).toMatchObject({ amount: 2 / 3, symbol: "PNN", currency: "GBX" });
+    const day = String(split!.date).slice(0, 10);
+    expect(day >= "2021-07-22" && day <= "2021-07-29").toBe(true);
+    const r = result.current.results!.perAccount[0];
+    expect(r.error).toBeUndefined();
+    expect(r.verification?.ok).toBe(true);
+    const log = r.log.join("\n");
+    expect(log).toContain("adding the 2:3 split of");
+    expect(log).toContain("Dividend share counts put a 2:3 split between 2021-07-21 and 2021-09-06");
+    expect(log).toContain("Matches Trading 212");
+  });
+});
+
+describe("useSync — no split is inferred while rows were left out", () => {
+  it("says so and adds nothing when a trade was not imported (it would look like a split)", async () => {
+    const row = (cells: Record<string, string>) => CSV_HDR.split(",").map((h) => cells[h] ?? "").join(",");
+    const trade = (time: string, shares: string, id: string) =>
+      row({ Action: "Market buy", Time: time, ISIN: "GB00BNNTLN49", Ticker: "PNN_EQ", Name: "Pennon", "No. of shares": shares, "Price / share": "1100", "Currency (Price / share)": "GBX", Total: "3", "Currency (Total)": "GBP", ID: id });
+    const dividend = (time: string, shares: string) =>
+      row({ Action: "Dividend (Ordinary)", Time: time, ISIN: "GB00BNNTLN49", Ticker: "PNN_EQ", Name: "Pennon", "No. of shares": shares, "Currency (Price / share)": "GBP", Total: "0.05", "Currency (Total)": "GBP" });
+    // One share bought, then a buy of 2 whose row has no usable quantity; Trading 212 holds 3 and
+    // its dividend counts go 1 → 3. That reads exactly like a 3:1 split, so it must not be used.
+    const csv = [
+      CSV_HDR,
+      trade("2020-01-10 09:00:00", "1", "B1"),
+      dividend("2020-03-15 08:00:00", "1"),
+      trade("2020-04-10 09:00:00", "0", "B2"), // not importable: a missing trade
+      dividend("2020-06-15 08:00:00", "3"),
+    ].join("\n");
+    let downloads = 0;
+    net(async (url: string) => {
+      const u = String(url);
+      if (u.includes("amazonaws.com")) return textResponse(downloads++ === 0 ? csv : CSV_HDR);
+      if (u.includes("/exports")) return jsonResponse([FINISHED_REPORT]);
+      if (u.includes("account/summary")) return jsonResponse({ id: 1, currency: "GBP", cash: { availableToTrade: 0 } });
+      if (u.includes("/positions"))
+        return jsonResponse([{ instrument: { ticker: "PNN_EQ", isin: "GB00BNNTLN49", name: "Pennon", currency: "GBX" }, quantity: 3 }]);
+      return routeFetch(u);
+    });
+    const { ctx, importFn } = makeCtx({
+      syncStates: { c1: { lastSync: null, importedRefs: [] } },
+      searchTicker: async () => [{ symbol: "PNN", exchangeMic: "XLON", currency: "GBX", score: 1, quoteType: "EQUITY" }],
+      holdings: () => [{ holdingType: "security", instrument: { symbol: "PNN" }, quantity: 1, localCurrency: "GBP" }],
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { result } = renderHook(() => useSync(ctx as any));
+    await act(async () => {
+      await result.current.syncAll();
+    });
+    expect(importFn.mock.calls.flatMap((c) => c[0] as ActivityImport[]).some((a) => a.activityType === "SPLIT")).toBe(false);
+    const r = result.current.results!.perAccount[0];
+    expect(r.error).toContain("not imported");
+    expect(r.log.join("\n")).toContain("Not looking for splits in the dividend rows: 1 trade or corporate-action row was not imported");
+  });
+});
+
+describe("useSync — dividend share counts from the JSON feed", () => {
+  it("keeps the quantity of each dividend, by ISIN, even for a dividend already imported", async () => {
+    net(async (url: string) => {
+      const u = String(url);
+      if (u.includes("/dividends"))
+        return jsonResponse({
+          items: [
+            { ticker: "PNN_EQ", reference: "d1", type: "ORDINARY", amount: 0.05, currency: "GBP", quantity: 0.23384732, paidOn: "2021-07-21T08:00:00Z", instrument: { ticker: "PNN_EQ", isin: "GB00BNNTLN49" } },
+            { ticker: "PNN_EQ", reference: "d2", type: "INTEREST", amount: 0.01, currency: "GBP", quantity: 5, paidOn: "2021-08-01T08:00:00Z", instrument: { ticker: "PNN_EQ", isin: "GB00BNNTLN49" } },
+            { ticker: "PNN_EQ", reference: "d4", type: "DIVIDEND_ADJUSTMENT", amount: 0.01, currency: "GBP", quantity: 9, paidOn: "2021-08-02T08:00:00Z", instrument: { ticker: "PNN_EQ", isin: "GB00BNNTLN49" } },
+            { ticker: "NOQ_EQ", reference: "d3", type: "ORDINARY", amount: 0.01, currency: "GBP", paidOn: "2021-08-01T08:00:00Z", instrument: { ticker: "NOQ_EQ", isin: "GB0000000000" } },
+          ],
+          nextPagePath: null,
+        });
+      return routeFetch(u);
+    });
+    const { ctx, storage } = makeCtx({
+      syncStates: { c1: { lastSync: "2020-01-01T00:00:00.000Z", importedRefs: ["t212-div-d1"] } },
+      searchTicker: async () => [{ symbol: "PNN", exchangeMic: "XLON", currency: "GBX", score: 1, quoteType: "EQUITY" }],
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { result } = renderHook(() => useSync(ctx as any));
+    await act(async () => {
+      await result.current.syncAll();
+    });
+    expect(JSON.parse(storage.get("t212_sync_c1")!).dividendShares).toEqual({ GB00BNNTLN49: [["2021-07-21", 0.23384732]] });
   });
 });
 

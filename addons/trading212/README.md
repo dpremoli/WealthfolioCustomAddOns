@@ -178,10 +178,30 @@ the check below (Trading 212 holds 2.1649, the trades add up to 0.108245) and, f
 its built-in list of known splits (`src/lib/known-splits.ts`, keyed by ISIN), adds the `SPLIT`
 **only if applying it reproduces Trading 212's quantity exactly**. Wealthfolio's stored prices are
 split-adjusted, so the date cannot be found from them; that is why the list supplies it. It also
-holds consolidations, such as Pennon's 2-for-3 of July 2021 (ratio 2/3). A split or consolidation
-that is not on the list is described in the log with the overall ratio it implies (a position of
-which only part predates the event changes by less than the event's own ratio), so you can add a
-`SPLIT` in Wealthfolio's Activities by hand, or add the ISIN and date to the list.
+holds consolidations, such as Pennon's 2-for-3 of July 2021 (ratio 2/3).
+
+**A split that is not on the list** can still be found when the position paid dividends. Each
+dividend row in the export says how many shares you held when it was paid ("No. of shares"), and
+the add-on keeps those counts. It replays your trades without the split: the last dividend whose
+count the replay agrees with and the first whose count it does not bracket the split, and the ratio
+is the count Trading 212 quotes divided by the holding the replay gives (it must be one of the
+usual ratios: a whole ratio such as 3:1 or 20:1, a reverse split such as 1:10, or 3:2, 2:3, 5:2 or
+2:5, and the same for every dividend after it). The `SPLIT` is added, dated inside that window,
+**only if it makes the trades add up to Trading 212's quantity exactly**; the log gives the window
+and the ratio. Nothing is added when the evidence is unclear: no dividend on one side of the
+window, a last matching dividend whose count a later trade had already moved, ratios that are
+unusual or differ, or a dividend that contradicts the order.
+
+**What this cannot tell apart is a split and a trade missing from the account**: either changes
+every later count by the same factor. So it is not used in a sync that left out any trade (the log
+says so; add the rows, then sync again), and fractions such as 6:5 are never read as splits. If you
+add a missing trade by hand after a `SPLIT` was inferred for the same position, delete that
+`SPLIT`. The counts are read from a full backfill (and from the dividends of later syncs), so a
+position whose dividends predate an upgrade needs **Reset** and a sync to have them. Counts are
+kept per ISIN, so two listings of one security share them. Otherwise
+the position is described in the log with the overall ratio it implies (a position of which only
+part predates the event changes by less than the event's own ratio), so you can add a `SPLIT` in
+Wealthfolio's Activities by hand, or add the ISIN and date to the list.
 
 ### Checking a backfill against Trading 212
 
@@ -314,6 +334,17 @@ never a separate fee.
 - Requests can only reach the hosts declared in the manifest, over HTTPS.
 
 ---
+
+## Upgrading to 2.6.1
+
+- **2.6.0 does not load in Wealthfolio 3.11** ("Addon 'trading212-addon' failed to load:
+  Unexpected token '.'"). Install 2.6.1. Nothing else changes for the fix: your connections,
+  imported activities and settings are untouched.
+
+- **Splits that are not on the known list can be inferred from dividend rows** (see "A split that
+  is not on the list" above). It starts with the next full backfill, which keeps the dividends'
+  share counts; **Reset** an account and sync once to have them for an account backfilled earlier.
+  No new permissions.
 
 ## Upgrading to 2.6.0
 

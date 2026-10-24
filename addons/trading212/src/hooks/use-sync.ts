@@ -40,13 +40,13 @@ import {
   mapTransactionToActivity,
   mergeHoldingsBySymbol,
 } from "../lib/mapper";
-import { parseCsv, mapCsvRow } from "../lib/csv";
+import { parseCsv, mapCsvRow, dividendShareOf } from "../lib/csv";
 import { cardSpendingRules } from "../lib/spending-category";
 import { SymbolResolver, importAssetFields, type ResolveDiag } from "../lib/symbol-resolver";
 import { ActivityImporter, describeRejected, type ImportUnit, type RejectedRow } from "../lib/importer";
 import { CARD_FUNDING_COMMENT, fundingForExisting, isFundingId, withCardFunding } from "../lib/card-funding";
 import { foldMonthlyInterest } from "../lib/interest";
-import { repairSplits, type PositionGap } from "../lib/split-repair";
+import { repairSplits, type DividendShares, type PositionGap } from "../lib/split-repair";
 import {
   describeRow,
   mapCurrencyConversion,
@@ -63,6 +63,7 @@ import {
   type Verification,
 } from "../lib/verify";
 import {
+  addDividendShares,
   addImportedRefs,
   clearAccountData,
   connectionKind,
@@ -71,6 +72,7 @@ import {
   ensureCardAccount,
   ensureProviderAccount,
   getConnections,
+  getDividendShares,
   getImportedRefs,
   getSettings,
   getSymbolMap,
@@ -82,6 +84,7 @@ import {
   setSymbolMap,
   setVerification,
   updateConnection,
+  type DividendShare,
 } from "./use-config";
 
 /** Effective tracking mode of a connection (absent ⇒ TRANSACTIONS). */
@@ -177,6 +180,8 @@ async function collectJsonActivities(
   unresolved: number;
   unresolvedRows: string[];
   nonTrade: Record<string, number>;
+  /** The holding each dividend was paid on, as evidence for a split Trading 212 did not list. */
+  dividendShares: DividendShare[];
 }> {
   const orders = await collectSince<HistoricalOrder>(
     (c) => client.pageOrders(c),
@@ -223,7 +228,13 @@ async function collectJsonActivities(
     activities.push({ ...activity, ...importAssetFields(resolved) });
   }
 
+  const dividendShares: DividendShare[] = [];
   for (const d of dividends) {
+    const isin = d.instrument?.isin;
+    // Interest and adjustments carry no holding of their own (the CSV path leaves them out too).
+    if (d.type !== "INTEREST" && !/adjust/i.test(d.type ?? "") && isin && d.quantity && d.quantity > 0 && d.paidOn) {
+      dividendShares.push({ isin, day: d.paidOn.slice(0, 10), shares: d.quantity });
+    }
     if (importedRefs.has(`t212-div-${d.reference}`)) continue;
     if (d.type === "INTEREST") {
       activities.push(mapDividendToActivity(d, accountId, null));
@@ -242,7 +253,7 @@ async function collectJsonActivities(
     activities.push(mapTransactionToActivity(t, accountId));
   }
 
-  return { activities, unresolved, unresolvedRows, nonTrade };
+  return { activities, unresolved, unresolvedRows, nonTrade, dividendShares };
 }
 
 /** Log line for non-trade fills left out of the import, if any. */
@@ -398,7 +409,7 @@ async function syncCardAccount(
   );
 
   if (acts.length > 0) onProgress({ phase: "import", message: `Importing ${acts.length} card activities…` });
-  const out = await importer.import(acts.map((a) => withCardFunding(a, mainAccountId)));
+  const out = await importer.importRows(acts.map((a) => withCardFunding(a, mainAccountId)));
   if (out.accounted.length > 0) await addImportedRefs(ctx, conn.id, out.accounted);
   // Count card rows, not the funding transfers that travel with them.
   const imported = out.importedIds.filter((id) => !isFundingId(id)).length;
@@ -433,7 +444,7 @@ async function fundExistingCardRows(
     cardAccountId,
     mainAccountId,
   );
-  const out = await importer.import(units);
+  const out = await importer.importRows(units);
   if (out.imported > 0) log.push(`Card funding: added ${out.imported / 2} transfer pairs for earlier card rows.`);
   // Funding pairs for earlier rows are not new activity; keep them out of the sync's counts.
   return out.rejected;
@@ -713,7 +724,7 @@ async function syncOne(
         const k = String(a.activityType);
         tally[k] = (tally[k] ?? 0) + 1;
       }
-      const out = await importer.import(units, (done, total) =>
+      const out = await importer.importRows(units, (done, total) =>
         onProgress({ phase: "import", message: `Importing activities… ${done}/${total}`, current: done, total }),
       );
       // Funding transfers are bookkeeping for their card row; count activities only.
@@ -814,6 +825,8 @@ async function syncOne(
           continue;
         }
         emptyStreak = 0;
+        // What each dividend row says Trading 212 held, kept whether or not the row is new.
+        await addDividendShares(ctx, conn.id, rows.flatMap((r) => dividendShareOf(r) ?? []));
 
         const windowUnits: ImportUnit[] = [];
         const take = (unit: ImportUnit) => {
@@ -908,7 +921,7 @@ async function syncOne(
       if (exportFailed) {
         // CSV unavailable — use JSON paging for the initial full sync.
         log.push("CSV export unavailable → falling back to JSON paging.");
-        const { activities: jsonActs, unresolved: u, unresolvedRows, nonTrade } = await collectJsonActivities(
+        const { activities: jsonActs, unresolved: u, unresolvedRows, nonTrade, dividendShares } = await collectJsonActivities(
           client,
           null,
           importedRefs,
@@ -920,6 +933,7 @@ async function syncOne(
         droppedTrades.push(...unresolvedRows);
         const note = nonTradeNote(nonTrade);
         if (note) log.push(note);
+        await addDividendShares(ctx, conn.id, dividendShares);
         await importActivities(jsonActs.map(unitOf));
         backfillComplete = true;
       }
@@ -943,7 +957,7 @@ async function syncOne(
       // ── JSON incremental (since last watermark) ──────────────────────────
       log.push(`Incremental sync since ${since}.`);
       onProgress({ phase: "export", message: "Fetching recent activity…" });
-      const { activities: jsonActs, unresolved: u, unresolvedRows, nonTrade } = await collectJsonActivities(
+      const { activities: jsonActs, unresolved: u, unresolvedRows, nonTrade, dividendShares } = await collectJsonActivities(
         client,
         since,
         importedRefs,
@@ -955,6 +969,7 @@ async function syncOne(
       droppedTrades.push(...unresolvedRows);
       const note = nonTradeNote(nonTrade);
       if (note) log.push(note);
+      await addDividendShares(ctx, conn.id, dividendShares);
       await importActivities(jsonActs.map(unitOf));
       // Pages are read newest-first from when this run started; anything newer is for
       // the next run, so the watermark is the start time, not the finish time.
@@ -991,7 +1006,17 @@ async function syncOne(
     const previous = (await getSyncState(ctx, conn.id)).verification;
     if (backfillFinished || (previous && !previous.ok)) {
       try {
-        verification = await verifyAndRepair(ctx, client, accountId, resolver, importer, updates, onProgress, log);
+        // A trade left out of the account looks, in the dividend counts, just like a split. With
+        // rows missing the counts are not used: add the rows (the log lists them) and sync again.
+        let dividends = await getDividendShares(ctx, conn.id);
+        if (droppedTrades.length > 0 && Object.keys(dividends).length > 0) {
+          log.push(
+            `Not looking for splits in the dividend rows: ${droppedTrades.length} trade or corporate-action row` +
+              `${droppedTrades.length === 1 ? " was" : "s were"} not imported, which could be what the position is short of.`,
+          );
+          dividends = {};
+        }
+        verification = await verifyAndRepair(ctx, client, accountId, resolver, importer, updates, onProgress, log, dividends);
         await setVerification(ctx, conn.id, verification);
         log.push(...verificationLines(verification));
       } catch (e) {
@@ -1079,7 +1104,8 @@ async function verifyAccount(
 /**
  * Checks the account against Trading 212 and, for a position that is short by a split Trading 212
  * never listed in its history, adds that split ({@link repairSplits}) and checks again. Only
- * splits whose date and ratio reproduce Trading 212's quantity exactly are added.
+ * splits whose date and ratio reproduce Trading 212's quantity exactly are added, from the known
+ * splits table or, failing that, from the share counts of the position's dividend rows.
  */
 async function verifyAndRepair(
   ctx: AddonContext,
@@ -1090,13 +1116,14 @@ async function verifyAndRepair(
   updates: PortfolioUpdates,
   onProgress: ProgressFn,
   log: string[],
+  dividends: Record<string, DividendShares[]> = {},
 ): Promise<Verification> {
   let { verification, gaps } = await verifyAccount(ctx, client, accountId, resolver, importer, updates, onProgress);
   // The repair compares the account's activities with Trading 212's quantity, not Wealthfolio's
   // holdings, so it does not wait for the recalculation: if that was merely not finished, the
   // activities agree with Trading 212 and nothing is added.
   if (!verification.ok && gaps.length > 0) {
-    const added = await repairSplits(importer, resolver, accountId, gaps, log);
+    const added = await repairSplits(importer, resolver, accountId, gaps, log, dividends);
     if (added > 0) {
       log.push(`Added ${added} missing split${added === 1 ? "" : "s"}; checking again.`);
       ({ verification } = await verifyAccount(ctx, client, accountId, resolver, importer, updates, onProgress));

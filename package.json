@@ -20,6 +20,7 @@
     "release:plan": "node tooling/release-plan.mjs"
   },
   "devDependencies": {
+    "es-module-lexer": "catalog:",
     "prettier": "^3.6.2"
   }
 }

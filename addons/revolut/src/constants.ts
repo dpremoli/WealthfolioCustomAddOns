@@ -10,6 +10,8 @@ export const ACCOUNTS_KEY = "revolut_accounts";
  * after it was converted to a transfer, linked or edited, instead of matching it by content.
  */
 export const KEY_IMPORTED_IDS = "revolut_imported_ids";
+/** Rows Wealthfolio refuses, retried on every import (kit `refused-rows`). */
+export const KEY_REFUSED = "revolut_refused";
 
 /** JSON: id of the Wealthfolio account the user keeps their Revolut savings in, or "" for none. */
 export const KEY_SAVINGS_ACCOUNT = "revolut_savings_account";

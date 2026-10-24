@@ -1,5 +1,5 @@
 import type { ActivityImport, AddonContext } from "@wealthfolio/addon-sdk";
-import { moveLinkNote } from "@wf-addons/kit";
+import { moveLinkNote, unsavedMessage } from "@wf-addons/kit";
 import type { MonzoTransaction } from "../types";
 import { runExclusive } from "./busy";
 import {
@@ -119,6 +119,7 @@ async function importFiles(
         imported: outcome.imported,
         updated: outcome.updated,
         duplicates: outcome.duplicates,
+        error: unsavedMessage(outcome.unsaved),
       });
     } catch (err) {
       outcomes.push({
@@ -133,8 +134,10 @@ async function importFiles(
   if (credits.size > 0 && flexAccountId) {
     // The Flex side of each repayment. Safe to repeat: the ledger knows the ids.
     try {
-      await importNew(ctx, flexAccountId, [...credits.values()]);
+      const credited = await importNew(ctx, flexAccountId, [...credits.values()]);
       imported.push(...credits.values());
+      const unsaved = unsavedMessage(credited.unsaved);
+      if (unsaved) onNote(`Could not credit the Flex account with all the repayments: ${unsaved}`);
     } catch (err) {
       onNote(`Could not credit the Flex account with the repayments: ${(err as Error).message}`);
     }

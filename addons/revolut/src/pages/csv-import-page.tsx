@@ -9,7 +9,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@wealthfolio/ui";
-import { addonRoute, jsonStore, type AddonPageProps } from "@wf-addons/kit";
+import { addonRoute, describeRefused, jsonStore, type AddonPageProps } from "@wf-addons/kit";
 import { ACCOUNTS_KEY, ADDON_ID, KEY_SAVINGS_ACCOUNT } from "../constants";
 import { parseRevolutCsv } from "../lib/csv-parser";
 import { importStatement, type StatementImportOutcome } from "../lib/import";
@@ -258,6 +258,16 @@ export default function CsvImportPage({ ctx }: AddonPageProps) {
                   <Badge variant="outline">{result.duplicates} duplicates skipped</Badge>
                   {result.updated > 0 && <Badge variant="outline">{result.updated} updated</Badge>}
                 </div>
+                {result.error && (
+                  <div className="space-y-1 text-sm text-destructive" role="alert">
+                    <p>{result.error}</p>
+                    <ul className="list-disc pl-5 text-xs">
+                      {describeRefused(result.refused, 20).map((line) => (
+                        <li key={line}>{line.trim()}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
                 {result.notes.map((note) => (
                   <p key={note} className="text-sm text-muted-foreground">
                     {note}

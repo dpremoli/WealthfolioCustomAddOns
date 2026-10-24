@@ -144,12 +144,12 @@ describe("importStatement", () => {
     );
 
     const out = await importRows(t.ctx, "wf-gbp", [want, uberWant]);
-    expect(out).toEqual({ imported: 0, updated: 1, duplicates: 1 });
+    expect(out).toEqual({ imported: 0, updated: 1, duplicates: 1, unsaved: [], refused: { entries: [], dropped: 0 } });
     expect(oldRow.comment).toBe("Tesco");
     expect(edited.comment).toBe("Taxi home");
     expect(ledgerOf(t)[tesco.id]).toBe(ledgerEntry("wf-gbp", want));
     // Rewritten once; the next import has nothing to do.
-    expect(await importRows(t.ctx, "wf-gbp", [want, uberWant])).toEqual({ imported: 0, updated: 0, duplicates: 2 });
+    expect(await importRows(t.ctx, "wf-gbp", [want, uberWant])).toEqual({ imported: 0, updated: 0, duplicates: 2, unsaved: [], refused: { entries: [], dropped: 0 } });
   });
 
   it("skips currencies without an account", async () => {

@@ -14,6 +14,18 @@ export {
   type LedgerReconcileResult,
   type ExistingActivityLike,
 } from "./reconcile";
+export { pendingRows, recordRefused } from "./refused-import";
+export {
+  describeUnsaved,
+  importStoredRows,
+  readImportResult,
+  reasonOf,
+  unsavedMessage,
+  withoutUnsaved,
+  type HostImport,
+  type ImportRead,
+  type UnsavedRow,
+} from "./host-import";
 export {
   brokeredRequest,
   brokeredJson,

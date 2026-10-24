@@ -107,7 +107,7 @@ describe("importCsvFiles", () => {
       { name: "good.csv", accountId: "wf-2", transactions: [tx()] },
     ]);
     expect(outcomes).toEqual([
-      { name: "bad.csv", imported: 0, updated: 0, duplicates: 0, error: "boom" },
+      { name: "bad.csv", imported: 0, updated: 0, duplicates: 0, error: expect.stringContaining("import refused it: boom") },
       { name: "good.csv", imported: 1, updated: 0, duplicates: 0 },
     ]);
   });
@@ -163,7 +163,7 @@ describe("importCsvFiles", () => {
     t.ctx.api.activities.import = async () => {
       throw new Error("boom");
     };
-    expect((await importCsvFiles(t.ctx, [{ name: "b.csv", accountId: "wf-2", transactions: [tx()] }]))[0].error).toBe("boom");
+    expect((await importCsvFiles(t.ctx, [{ name: "b.csv", accountId: "wf-2", transactions: [tx()] }]))[0].error).toContain("boom");
     expect(isBusy()).toBe(false);
   });
 });

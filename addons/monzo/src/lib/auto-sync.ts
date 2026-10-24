@@ -102,6 +102,15 @@ export function startAutoSync(ctx: AddonContext): AutoSyncHandle {
           await saveLastSyncView(ctx, { result: r, steps });
         },
       );
+      if (result.error) {
+        // Wealthfolio did not store some rows: back off, and tell the dashboard.
+        notBefore = Date.now() + MIN_SYNC_GAP_MS;
+        ctx.api.logger.error(`[auto-sync] ${trigger}: ${result.error}`);
+        await store
+          .set(KEY_AUTO_SYNC_ERROR, { at: new Date().toISOString(), message: result.error })
+          .catch(() => {});
+        return;
+      }
       await store.delete(KEY_AUTO_SYNC_ERROR).catch(() => {});
       ctx.api.logger.info(`[auto-sync] ${trigger}: ${result.imported} imported.`);
     } catch (err) {

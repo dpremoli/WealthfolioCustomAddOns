@@ -90,9 +90,9 @@ describe("importCashIsa", () => {
   it("imports everything once, keeps two identical same-day deposits, and adds nothing on a re-import", async () => {
     const { ctx, rows } = fakeCtx();
     const { activities } = await parseCashIsaCsv(EXPORT, "");
-    expect(await importCashIsa(ctx, "wf-1", activities)).toEqual({ imported: 4, duplicates: 0, linked: 0 });
+    expect(await importCashIsa(ctx, "wf-1", activities)).toEqual({ imported: 4, duplicates: 0, linked: 0, unsaved: [], refused: { entries: [], dropped: 0 } });
     expect(rows).toHaveLength(4);
-    expect(await importCashIsa(ctx, "wf-1", activities)).toEqual({ imported: 0, duplicates: 4, linked: 0 });
+    expect(await importCashIsa(ctx, "wf-1", activities)).toEqual({ imported: 0, duplicates: 4, linked: 0, unsaved: [], refused: { entries: [], dropped: 0 } });
     expect(rows).toHaveLength(4);
   });
 });

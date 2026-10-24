@@ -1,12 +1,14 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { Account, ActivityImport, AddonContext, SnapshotHoldingInput } from "@wealthfolio/addon-sdk";
 import {
   T212_PROVIDER,
   appendStep,
+  describeRefused,
   isTrading212Payee,
   linkMovesBetween,
   markLastDone,
   moveLinkNote,
+  refusedError,
   round2,
   trading212Refs,
   type ExistingActivityLike,
@@ -44,6 +46,7 @@ import { parseCsv, mapCsvRow, dividendShareOf } from "../lib/csv";
 import { cardSpendingRules } from "../lib/spending-category";
 import { SymbolResolver, importAssetFields, type ResolveDiag } from "../lib/symbol-resolver";
 import { ActivityImporter, describeRejected, type ImportUnit, type RejectedRow } from "../lib/importer";
+import { RefusedRowsStore } from "../lib/refused";
 import { CARD_FUNDING_COMMENT, fundingForExisting, isFundingId, withCardFunding } from "../lib/card-funding";
 import { foldMonthlyInterest } from "../lib/interest";
 import { repairSplits, type DividendShares, type PositionGap } from "../lib/split-repair";
@@ -66,6 +69,7 @@ import {
   addDividendShares,
   addImportedRefs,
   clearAccountData,
+  clearImportedRefs,
   connectionKind,
   setBackfillStartedAt,
   connectionConfig,
@@ -77,7 +81,11 @@ import {
   getSettings,
   getSymbolMap,
   getSyncState,
+  loadLastResults,
+  loadLastSteps,
   resetSyncState,
+  saveLastResult,
+  saveLastSteps,
   setBackfillCheckpoint,
   setCardLastSync,
   setLastSync,
@@ -382,6 +390,7 @@ async function syncCardAccount(
   importer: ActivityImporter,
   log: string[],
   onProgress: ProgressFn,
+  refused: RefusedRowsStore,
 ): Promise<{ imported: number; duplicates: number; rejected: RejectedRow[] }> {
   // The card windows end "now", so the watermark is when this run started, not finished.
   const startedAt = new Date().toISOString();
@@ -411,6 +420,8 @@ async function syncCardAccount(
   if (acts.length > 0) onProgress({ phase: "import", message: `Importing ${acts.length} card activities…` });
   const out = await importer.importRows(acts.map((a) => withCardFunding(a, mainAccountId)));
   if (out.accounted.length > 0) await addImportedRefs(ctx, conn.id, out.accounted);
+  // Card rows Wealthfolio refuses wait in the refused list instead of holding the card watermark.
+  await refused.record(out);
   // Count card rows, not the funding transfers that travel with them.
   const imported = out.importedIds.filter((id) => !isFundingId(id)).length;
   const duplicates = out.accounted.filter((id) => !isFundingId(id)).length - imported;
@@ -438,6 +449,7 @@ async function fundExistingCardRows(
   mainAccountId: string,
   cardAccountId: string,
   log: string[],
+  refused: RefusedRowsStore,
 ): Promise<RejectedRow[]> {
   const units = fundingForExisting(
     (await importer.existingIn(cardAccountId)) as (ExistingActivityLike & { id?: string })[],
@@ -445,6 +457,7 @@ async function fundExistingCardRows(
     mainAccountId,
   );
   const out = await importer.importRows(units);
+  await refused.record(out);
   if (out.imported > 0) log.push(`Card funding: added ${out.imported / 2} transfer pairs for earlier card rows.`);
   // Funding pairs for earlier rows are not new activity; keep them out of the sync's counts.
   return out.rejected;
@@ -673,13 +686,17 @@ async function syncOne(
 
     // One importer per connection: it reads each account's activities once for the whole sync.
     const importer = new ActivityImporter(ctx);
+    // Rows Wealthfolio refuses wait in their own list, retried at the start of every sync, so one
+    // never holds a watermark back (and a sync never re-reads history for it).
+    const refused = new RefusedRowsStore(ctx, conn.id);
 
     if (mode === "HOLDINGS") {
       const res = await syncHoldings(ctx, client, conn, accountId, resolver, onProgress, log, base);
       const out: SyncResult = { ...res, finishedAt: new Date().toISOString() };
       if (cardAccountId) {
-        const card = await syncCardAccount(ctx, client, conn, accountId, cardAccountId, resolver, importer, log, onProgress);
-        const rejected = [...card.rejected, ...(await fundExistingCardRows(importer, accountId, cardAccountId, log))];
+        const retried = await retryRefused(ctx, conn.id, importer, refused, log);
+        const card = await syncCardAccount(ctx, client, conn, accountId, cardAccountId, resolver, importer, log, onProgress, refused);
+        const rejected = [...(retried?.rejected ?? []), ...card.rejected, ...(await fundExistingCardRows(importer, accountId, cardAccountId, log, refused))];
         logRejected(log, rejected);
         out.imported += card.imported;
         out.duplicates += card.duplicates;
@@ -690,9 +707,15 @@ async function syncOne(
           out.breakdown = { ...(out.breakdown ?? {}), Card: card.imported };
         }
       }
+      log.push(...describeRefused(refused.current));
+      const refusedMessage = refusedError(refused.current);
+      if (refusedMessage && !out.error) out.error = refusedMessage;
       return out;
     }
 
+    // A ledger that remembers rows the account does not hold (an earlier version recorded rows it
+    // had only sent) would skip them for good: forget it and read everything again.
+    await healLedger(ctx, conn.id, accountId, importer, log);
     const { lastSync: since, backfillCheckpoint, backfillStartedAt } = await getSyncState(ctx, conn.id);
     const syncStartedAt = new Date().toISOString();
     const importedRefs = await getImportedRefs(ctx, conn.id);
@@ -732,15 +755,24 @@ async function syncOne(
       imported += importedNow;
       duplicates += out.accounted.filter((id) => !isFundingId(id)).length - importedNow;
       rejected.push(...out.rejected);
-      for (const r of out.rejected) {
-        if (TRADE_TYPES.includes(String(r.activity.activityType))) droppedTrades.push(describeRejected(r));
-      }
       if (out.accounted.length > 0) await addImportedRefs(ctx, conn.id, out.accounted);
+      // A unit that was stored or is already there leaves the refused list; a refused one joins it.
+      await refused.record(out);
     };
 
     // A card row goes with its funding transfer pair; every other row on its own.
     const unitOf = (a: ActivityImport): ImportUnit =>
       cardAccountId && a.accountId === cardAccountId ? withCardFunding(a, accountId) : [a];
+
+    // Rows refused by earlier syncs are sent again first; each leaves the list once Wealthfolio has it.
+    const pending = await refused.pending();
+    if (pending.length > 0) {
+      const before = refused.current.entries.length;
+      log.push(`Retrying ${before} row${before === 1 ? "" : "s"} Wealthfolio refused in earlier syncs.`);
+      await importActivities(pending);
+      const left = refused.current.entries.length;
+      log.push(`Refused rows: ${before - left} saved now, ${left} still refused.`);
+    }
 
     if (since === null) {
       log.push("Full backfill (no previous sync) via CSV export.");
@@ -972,14 +1004,15 @@ async function syncOne(
       await addDividendShares(ctx, conn.id, dividendShares);
       await importActivities(jsonActs.map(unitOf));
       // Pages are read newest-first from when this run started; anything newer is for
-      // the next run, so the watermark is the start time, not the finish time.
+      // the next run, so the watermark is the start time, not the finish time. Rows Wealthfolio
+      // refused do not hold it back: they wait in the refused list and are retried each sync.
       await setLastSync(ctx, conn.id, syncStartedAt);
 
       // Card data is CSV-only (the JSON feed has no card type), so refresh it separately
       // via its own watermark: a one-time backfill the first time extraction is on, then a
       // recent top-up window thereafter.
       if (cardAccountId) {
-        const card = await syncCardAccount(ctx, client, conn, accountId, cardAccountId, resolver, importer, log, onProgress);
+        const card = await syncCardAccount(ctx, client, conn, accountId, cardAccountId, resolver, importer, log, onProgress, refused);
         cardResult = { imported: card.imported, duplicates: card.duplicates };
         rejected.push(...card.rejected);
         imported += card.imported;
@@ -987,7 +1020,7 @@ async function syncOne(
       }
     }
 
-    if (cardAccountId) rejected.push(...(await fundExistingCardRows(importer, accountId, cardAccountId, log)));
+    if (cardAccountId) rejected.push(...(await fundExistingCardRows(importer, accountId, cardAccountId, log, refused)));
     if (cardResult) tally.Card = (tally.Card ?? 0) + cardResult.imported;
     if (cardAccountId) await categoriseCardSpending(ctx, log);
 
@@ -1009,10 +1042,11 @@ async function syncOne(
         // A trade left out of the account looks, in the dividend counts, just like a split. With
         // rows missing the counts are not used: add the rows (the log lists them) and sync again.
         let dividends = await getDividendShares(ctx, conn.id);
-        if (droppedTrades.length > 0 && Object.keys(dividends).length > 0) {
+        const missing = droppedTrades.length + refused.current.entries.length + refused.current.dropped;
+        if (missing > 0 && Object.keys(dividends).length > 0) {
           log.push(
-            `Not looking for splits in the dividend rows: ${droppedTrades.length} trade or corporate-action row` +
-              `${droppedTrades.length === 1 ? " was" : "s were"} not imported, which could be what the position is short of.`,
+            `Not looking for splits in the dividend rows: ${missing} row${missing === 1 ? " was" : "s were"} not imported ` +
+              "or refused by Wealthfolio, which could be what the position is short of.",
           );
           dividends = {};
         }
@@ -1035,18 +1069,26 @@ async function syncOne(
       finishedAt,
       verification,
     };
+    // Rows Wealthfolio refuses stay listed (and the error stays) until a sync stores them.
+    log.push(...describeRefused(refused.current));
+    result.log = log;
+    const errors: string[] = [];
+    const refusedMessage = refusedError(refused.current);
+    if (refusedMessage) errors.push(refusedMessage);
     // A trade that never reached the account leaves its position wrong: say so loudly.
     if (droppedTrades.length > 0) {
-      result.error =
+      errors.push(
         `${droppedTrades.length} trade or corporate-action row${droppedTrades.length === 1 ? " was" : "s were"} not imported, so ` +
-        `holdings will not match Trading 212 (see the log). First: ${droppedTrades[0]}`;
-    } else if (verification && !verification.ok && verification.settled) {
-      result.error =
-        `Does not match Trading 212: ${verification.mismatches.length} difference` +
-        `${verification.mismatches.length === 1 ? "" : "s"} (see the log). First: ${verification.mismatches[0]}`;
-    } else if (imported === 0 && rejected.length > 0) {
-      result.error = `${rejected.length} rows not imported: ${describeRejected(rejected[0])}`;
+          `holdings will not match Trading 212 (see the log). First: ${droppedTrades[0]}`,
+      );
     }
+    if (errors.length === 0 && verification && !verification.ok && verification.settled) {
+      errors.push(
+        `Does not match Trading 212: ${verification.mismatches.length} difference` +
+          `${verification.mismatches.length === 1 ? "" : "s"} (see the log). First: ${verification.mismatches[0]}`,
+      );
+    }
+    if (errors.length > 0) result.error = errors.join(" ");
     return result;
   } catch (err) {
     const message = isUnauthorized(err)
@@ -1132,8 +1174,57 @@ async function verifyAndRepair(
   return verification;
 }
 
-/** Activity types whose loss leaves a position wrong. */
-const TRADE_TYPES = ["BUY", "SELL", "SPLIT"];
+/**
+ * Whether a connection's ledger of imported ids is ahead of what its account holds: ids recorded
+ * but no trade or no row at all in the account. Versions 2.6.0/2.6.1 recorded the ids of rows
+ * they had only sent, and Wealthfolio had stored none of them. Only the clear cases count (a
+ * few trades the user deleted by hand must stay deleted).
+ */
+export function ledgerAhead(refs: Set<string>, existing: { activityType?: string }[]): string | null {
+  if (refs.size === 0) return null;
+  if (existing.length === 0) return `${refs.size} rows are recorded as imported but the account holds none`;
+  const orders = [...refs].filter((r) => r.startsWith("t212-order-")).length;
+  const trades = existing.filter((a) => a.activityType === "BUY" || a.activityType === "SELL").length;
+  if (orders > 0 && trades === 0) return `${orders} trades are recorded as imported but the account holds none`;
+  return null;
+}
+
+/** Forgets the ledger and the watermarks when it is ahead of the account (see {@link ledgerAhead}). */
+async function healLedger(
+  ctx: AddonContext,
+  connectionId: string,
+  accountId: string,
+  importer: ActivityImporter,
+  log: string[],
+): Promise<void> {
+  const why = ledgerAhead(await getImportedRefs(ctx, connectionId), await importer.existingIn(accountId));
+  if (!why) return;
+  log.push(`The import ledger is ahead of the account (${why}): forgetting it and reading the whole history again.`);
+  await clearImportedRefs(ctx, connectionId);
+  await setLastSync(ctx, connectionId, null);
+  await setBackfillCheckpoint(ctx, connectionId, null);
+  await setBackfillStartedAt(ctx, connectionId, null);
+}
+
+/** Sends the rows refused by earlier syncs again; each leaves the list once Wealthfolio has it. */
+async function retryRefused(
+  ctx: AddonContext,
+  connectionId: string,
+  importer: ActivityImporter,
+  refused: RefusedRowsStore,
+  log: string[],
+) {
+  const pending = await refused.pending();
+  if (pending.length === 0) return null;
+  const before = refused.current.entries.length;
+  log.push(`Retrying ${before} row${before === 1 ? "" : "s"} Wealthfolio refused in earlier syncs.`);
+  const out = await importer.importRows(pending);
+  if (out.accounted.length > 0) await addImportedRefs(ctx, connectionId, out.accounted);
+  await refused.record(out);
+  const left = refused.current.entries.length;
+  log.push(`Refused rows: ${before - left} saved now, ${left} still refused.`);
+  return out;
+}
 
 /** Logs each row Wealthfolio did not import (capped, so a systematic failure stays readable). */
 function logRejected(log: string[], rejected: RejectedRow[]): void {
@@ -1246,19 +1337,13 @@ export async function runSyncAll(
 
   if (resolver.isDirty) await setSymbolMap(ctx, resolver.snapshot());
 
-  const totals = perAccount.reduce(
-    (acc, r) => ({
-      imported: acc.imported + r.imported,
-      duplicates: acc.duplicates + r.duplicates,
-      unresolved: acc.unresolved + r.unresolved,
-    }),
-    { imported: 0, duplicates: 0, unresolved: 0 },
-  );
+  // Keep each account's result and log, so the dashboard shows them again after a reload.
+  for (const r of perAccount) await saveLastResult(ctx, r.connectionId, r);
 
-  return { perAccount, totals };
+  return { perAccount, totals: sumTotals(perAccount) };
 }
 
-export function useSync(ctx: AddonContext) {
+export function useSync(ctx: AddonContext, opts: { restore?: boolean } = {}) {
   const [state, setState] = useState<SyncState>({
     isSyncing: false,
     results: null,
@@ -1267,14 +1352,37 @@ export function useSync(ctx: AddonContext) {
     steps: [],
   });
 
+  // With `restore`, the last sync's results, logs and activity feed come back after a reload (or
+  // when the dashboard is opened again), unless a sync of this page's own is already showing.
+  useEffect(() => {
+    if (!opts.restore) return;
+    let unmounted = false;
+    (async () => {
+      const ids = (await getConnections(ctx)).map((c) => c.id);
+      const perAccount = await loadLastResults(ctx, ids);
+      if (perAccount.length === 0) return;
+      const steps = (await loadLastSteps(ctx)) as KitSyncStep<SyncPhaseId>[];
+      if (unmounted) return;
+      const results: MultiSyncResult = { perAccount, totals: sumTotals(perAccount) };
+      setState((s) => (s.isSyncing || s.results || s.error ? s : { ...s, results, steps: s.steps.length > 0 ? s.steps : steps }));
+    })().catch(() => {});
+    return () => {
+      unmounted = true;
+    };
+    // Once, on mount.
+  }, []);
+
   async function syncAll(confirmedModeSwitches: Set<string> = new Set()) {
     setState((s) => ({ ...s, isSyncing: true, error: null, progress: null, steps: [] }));
+    // The same step list the state holds, kept here too so it can be saved when done.
+    let steps: KitSyncStep<SyncPhaseId>[] = [];
     try {
       const results = await runSyncAll(ctx, {
         confirmedModeSwitches,
         onProgress: ({ accountName, ...p }) => {
           // The shared activity feed shows messages only, so carry the account in the text.
           const progress = { ...p, message: `${accountName}: ${p.message}` };
+          steps = appendStep(steps, progress);
           setState((s) => ({
             ...s,
             progress,
@@ -1282,6 +1390,8 @@ export function useSync(ctx: AddonContext) {
           }));
         },
       });
+      steps = markLastDone(steps);
+      await saveLastSteps(ctx, steps);
       // Mark the last step as done so the timeline shows a final check on every node.
       setState((s) => ({
         ...s,
@@ -1297,4 +1407,16 @@ export function useSync(ctx: AddonContext) {
   }
 
   return { ...state, syncAll };
+}
+
+/** The totals a multi-account result shows. */
+function sumTotals(perAccount: SyncResult[]): MultiSyncResult["totals"] {
+  return perAccount.reduce(
+    (acc, r) => ({
+      imported: acc.imported + r.imported,
+      duplicates: acc.duplicates + r.duplicates,
+      unresolved: acc.unresolved + r.unresolved,
+    }),
+    { imported: 0, duplicates: 0, unresolved: 0 },
+  );
 }

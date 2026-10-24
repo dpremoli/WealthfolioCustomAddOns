@@ -20,10 +20,37 @@ export const KEYS = {
   // venue (VUAAM/DXE) got stranded and dropped as unresolved. v6 drops ISIN-
   // shaped symbols first, so MTF-only listings still resolve.
   symbolMap: "t212_symbol_map_v6",
+  // The last sync's activity feed (the timeline under the dashboard's Sync button).
+  lastSteps: "t212_last_steps",
 } as const;
 
-/** Per-connection sync state (watermark + imported refs), in storage. */
+/** Per-connection sync state (watermarks, check result), in storage. Small and bounded. */
 export const syncKey = (connectionId: string) => `t212_sync_${connectionId}`;
+
+/**
+ * Wealthfolio refuses a stored value above ~244 KB ("too large to sync across devices"), and a
+ * connection with years of history has thousands of imported-row ids, so the ids are spread over
+ * REF_SHARDS keys by a hash of the id: a key holds a small share, and a sync rewrites only the
+ * shards it changed.
+ */
+export const REF_SHARDS = 32;
+export const refsKey = (connectionId: string, shard: number) =>
+  `t212_refs_${connectionId}_${shard.toString(16).padStart(2, "0")}`;
+
+/** The share counts of a connection's dividend rows (evidence for inferring a split), own key. */
+export const dividendsKey = (connectionId: string) => `t212_divs_${connectionId}`;
+
+/**
+ * Rows Wealthfolio refuses (an unresolvable or delisted symbol, say): kept apart from the
+ * watermark and retried at the start of every sync, so one never makes a sync re-read the history.
+ */
+export const refusedKey = (connectionId: string) => `t212_refused_${connectionId}`;
+
+/** What the dashboard keeps showing of a connection's last sync (result and log), across reloads. */
+export const lastResultKey = (connectionId: string) => `t212_last_result_${connectionId}`;
+
+/** Largest value written to one storage key (the host's cap is ~244 KB); bigger fails loudly here. */
+export const MAX_STORED_BYTES = 200_000;
 
 /**
  * Per-connection credentials, in secrets: base64(`keyId:secret`). Only ever used via

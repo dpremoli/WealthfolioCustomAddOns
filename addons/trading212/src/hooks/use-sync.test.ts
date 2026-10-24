@@ -45,6 +45,14 @@ function routeFetch(url: string): Res {
   return jsonResponse({ items: [], nextPagePath: null }); // dividends + transactions empty
 }
 
+/** The ids a connection recorded as imported: its shard keys (plus any left in the legacy state). */
+function refsOf(storage: Map<string, string>, id: string): string[] {
+  const out: string[] = JSON.parse(storage.get(`t212_sync_${id}`) ?? "{}").importedRefs ?? [];
+  for (const [k, v] of storage) if (k.startsWith(`t212_refs_${id}_`)) out.push(...(JSON.parse(v) as string[]));
+  return out;
+}
+const dividendsOf = (storage: Map<string, string>, id: string) => JSON.parse(storage.get(`t212_divs_${id}`) ?? "{}");
+
 interface Conn {
   id: string;
   name: string;
@@ -184,7 +192,7 @@ describe("useSync — JSON incremental path", () => {
 
     const state = JSON.parse(storage.get("t212_sync_c1")!);
     expect(state.lastSync).toBeTruthy();
-    expect(state.importedRefs).toContain("t212-order-1");
+    expect(refsOf(storage, "c1")).toContain("t212-order-1");
 
     // Verbose log is captured for the UI.
     const lg = result.current.results!.perAccount[0].log.join("\n");
@@ -283,7 +291,8 @@ describe("useSync — JSON incremental path", () => {
     });
 
     const r = result.current.results!.perAccount[0];
-    expect(r.error).toMatch(/^5 trade or corporate-action rows were not imported, so holdings will not match Trading 212/);
+    // The host refuses all five: they wait in the refused list (retried every sync) and the error stays.
+    expect(r.error).toMatch(/^5 rows are refused by Wealthfolio and retried on every sync \(see the log\)/);
     const notImported = r.log.filter((l) => l.startsWith("Not imported: BUY 2026-04-01 AAPL"));
     expect(notImported).toHaveLength(5);
     expect(notImported[0]).toMatch(/\(t212-order-1\): checkImport refused it: Unprocessable Entity/);
@@ -365,8 +374,8 @@ describe("useSync — JSON incremental path", () => {
     expect(acctIds).toContain("acc-1");
     expect(acctIds).toContain("acc-2");
 
-    expect(JSON.parse(storage.get("t212_sync_c1")!).importedRefs).toContain("t212-order-1");
-    expect(JSON.parse(storage.get("t212_sync_c2")!).importedRefs).toContain("t212-order-1");
+    expect(refsOf(storage, "c1")).toContain("t212-order-1");
+    expect(refsOf(storage, "c2")).toContain("t212-order-1");
 
     // Shared symbol map is resolved once (cache hit on the 2nd account).
     expect(searchTicker).toHaveBeenCalledTimes(1);
@@ -465,7 +474,7 @@ describe("useSync — CSV export / hybrid path", () => {
     const state = JSON.parse(storage.get("t212_sync_c1")!);
     expect(state.lastSync).toBeTruthy();
     expect(state.backfillStartedAt).toBeNull();
-    expect(state.importedRefs).toContain("t212-txn-DEP1");
+    expect(refsOf(storage, "c1")).toContain("t212-txn-DEP1");
   });
 
   it("routes card spending to a dedicated CASH card account when extraction is on", async () => {
@@ -554,7 +563,7 @@ describe("useSync — CSV export / hybrid path", () => {
     const state = JSON.parse(storage.get("t212_sync_c1")!);
     expect(state.lastSync).toBeNull(); // backfill incomplete → not finalized
     expect(state.backfillCheckpoint).toBeTruthy(); // resume point saved
-    expect(state.importedRefs).toContain("t212-txn-DEP1");
+    expect(refsOf(storage, "c1")).toContain("t212-txn-DEP1");
   });
 
   it("a resumed backfill sets the watermark to when the backfill first started", async () => {
@@ -1123,7 +1132,7 @@ describe("useSync — a split found from the dividend rows", () => {
       await result.current.syncAll();
     });
 
-    expect(JSON.parse(storage.get("t212_sync_c1")!).dividendShares).toEqual({
+    expect(dividendsOf(storage, "c1")).toEqual({
       GB00BNNTLN49: [["2021-07-21", 0.23384732], ["2021-09-06", 0.15589821]],
     });
     const split = importFn.mock.calls.flatMap((c) => c[0] as ActivityImport[]).find((a) => a.activityType === "SPLIT");
@@ -1179,7 +1188,7 @@ describe("useSync — no split is inferred while rows were left out", () => {
     expect(importFn.mock.calls.flatMap((c) => c[0] as ActivityImport[]).some((a) => a.activityType === "SPLIT")).toBe(false);
     const r = result.current.results!.perAccount[0];
     expect(r.error).toContain("not imported");
-    expect(r.log.join("\n")).toContain("Not looking for splits in the dividend rows: 1 trade or corporate-action row was not imported");
+    expect(r.log.join("\n")).toContain("Not looking for splits in the dividend rows: 1 row was not imported or refused by Wealthfolio");
   });
 });
 
@@ -1208,7 +1217,7 @@ describe("useSync — dividend share counts from the JSON feed", () => {
     await act(async () => {
       await result.current.syncAll();
     });
-    expect(JSON.parse(storage.get("t212_sync_c1")!).dividendShares).toEqual({ GB00BNNTLN49: [["2021-07-21", 0.23384732]] });
+    expect(dividendsOf(storage, "c1")).toEqual({ GB00BNNTLN49: [["2021-07-21", 0.23384732]] });
   });
 });
 

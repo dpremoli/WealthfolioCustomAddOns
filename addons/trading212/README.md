@@ -335,6 +335,27 @@ never a separate fee.
 
 ---
 
+## Upgrading to 2.6.2
+
+- **2.6.0 and 2.6.1 saved no trades, dividends or deposits to Transactions accounts** (only card
+  spending went in) while recording them as imported. 2.6.2 fixes the import, and an account in
+  that state repairs itself: when the add-on has ids recorded as imported but the account holds no
+  trades (or nothing at all), the next sync forgets those ids and reads the whole history again.
+  Nothing is deleted. If you only have some trades missing, **Reset** the connection in Settings
+  and sync.
+- **A sync now fails loudly** when Wealthfolio does not store rows that were sent: the error names
+  the first row and why, the log lists them, and the ids of unsaved rows are not recorded.
+- **Rows Wealthfolio refuses keep being retried, without slowing the sync.** A row it refuses on
+  every call (a symbol it cannot find, a delisted instrument) is kept in a short list of its own
+  (with Wealthfolio's reason and how often it was refused). The history is still marked as read, so
+  no sync re-downloads it; only the listed rows are sent again at the start of every sync, and a row
+  leaves the list once Wealthfolio has stored it. The error stays while the list is not empty. Card
+  rows are treated the same way.
+- **Long histories no longer hit Wealthfolio's storage limit** ("too large to sync across
+  devices"): the imported-row ids are kept in 32 small keys instead of one value.
+- **The sync log stays after a refresh**: each account's last result (summary, symbols, Log
+  tab) and the activity feed come back when you open the dashboard again. **Reset** clears it.
+
 ## Upgrading to 2.6.1
 
 - **2.6.0 does not load in Wealthfolio 3.11** ("Addon 'trading212-addon' failed to load:

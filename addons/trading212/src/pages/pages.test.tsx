@@ -197,6 +197,33 @@ describe("pages (smoke)", () => {
     expect(ctx.api.navigation.navigate).toHaveBeenCalledWith("/addons/trading212-addon/settings?add=cash-isa");
   });
 
+  it("dashboard: after a reload the last sync's result and Log tab are still there", async () => {
+    const saved = {
+      connectionId: "c1", accountId: "acc-1", accountName: "T212 Invest", imported: 42, duplicates: 3, unresolved: 0,
+      breakdown: { BUY: 40, DEPOSIT: 2 },
+      log: ["Full backfill (no previous sync) via CSV export.", "Import: 42 imported, 3 duplicates, 0 not imported.", "Matches Trading 212: 2 positions and the cash balance."],
+      finishedAt: "2026-10-24T00:00:00.000Z",
+    };
+    const { ctx } = makeCtx({
+      storage: [
+        ["t212_connections", JSON.stringify([{ id: "c1", name: "T212 Invest", keyIdLast4: "1234", accountId: "acc-1", kind: "invest" }])],
+        ["t212_settings", JSON.stringify({ env: "live" })],
+        ["t212_last_result_c1", JSON.stringify(saved)],
+      ],
+    });
+    renderPage(DashboardPage, ctx);
+
+    // No sync was run on this page; the saved one is shown, its Log tab enabled, its lines readable.
+    const logTab = await waitFor(() => {
+      const tab = screen.getByRole("tab", { name: "Log" });
+      expect(tab.hasAttribute("disabled") || tab.getAttribute("aria-disabled") === "true").toBe(false);
+      return tab;
+    });
+    fireEvent.click(logTab);
+    await waitFor(() => expect(screen.getByText(/Matches Trading 212: 2 positions and the cash balance\./)).toBeTruthy());
+    expect(screen.getByText(/Full backfill \(no previous sync\)/)).toBeTruthy();
+  });
+
   it("dashboard: no card account card while card extraction is off", async () => {
     const { ctx } = dashboardCtx(false);
     renderPage(DashboardPage, ctx);

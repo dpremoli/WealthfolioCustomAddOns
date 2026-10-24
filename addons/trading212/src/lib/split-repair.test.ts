@@ -443,16 +443,22 @@ describe("inferSplit — what the dividend counts cannot show, and what it refus
     expect(r.split).toMatchObject({ date: split, ratio: 2, after: "2020-12-31", before: "2021-12-31" });
   });
 
-  it("gives up within its work budget on a long history that also holds a split", () => {
+  it("gives up, and says so, on a long history that also holds a split (each query would replay it)", () => {
     const events: QtyEvent[] = [{ day: "2019-01-01", kind: "split", value: 1 }];
     for (let i = 0; i < 1800; i++) events.push(buy(new Date(Date.UTC(2020, 0, 1) + i * 86_400_000).toISOString().slice(0, 10), 1));
     const split = "2021-06-10";
     const shares = (day: string) => events.filter((e) => e.kind === "add" && e.day <= day).reduce((n, e) => n + (e.day < split ? 2 : 1), 0);
     const dividends: DividendShares[] = [["2020-12-31", 366], ["2021-12-31", shares("2021-12-31")], ["2022-12-31", shares("2022-12-31")]];
-    const t = Date.now();
     const r = inferSplit({ held: shares("9999-12-31"), events, dividends });
-    expect(Date.now() - t).toBeLessThan(10_000);
-    expect(r.split === undefined ? r.reason : "").toMatch(/too many activities|^$/);
+    expect(r.split).toBeUndefined();
+    expect(r.reason).toContain("too many activities to search");
+  }, 30_000);
+
+  it("still searches a short history that holds a split (within the budget)", () => {
+    const events: QtyEvent[] = [{ day: "2019-01-01", kind: "split", value: 1 }, buy("2020-01-10", 10), buy("2020-09-01", 1)];
+    // 10 shares, 3:1 in the spring (not listed), 1 more bought in September: 31.
+    const r = inferSplit({ held: 31, events, dividends: [["2020-02-14", 10], ["2020-05-15", 10], ["2020-08-14", 30]] });
+    expect(r.split).toMatchObject({ ratio: 3, after: "2020-05-15", before: "2020-08-14" });
   });
 });
 

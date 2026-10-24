@@ -209,7 +209,7 @@ export function cleanRatio(ratio: number, tolerance = 1e-5): number | null {
 }
 
 /** Work (events visited) the search may spend before it gives up, so a long history cannot stall a sync. */
-const WORK_BUDGET = 40_000_000;
+const WORK_BUDGET = 10_000_000;
 
 /**
  * Finds a split Trading 212 never listed from the dividend rows of the position. A row says how

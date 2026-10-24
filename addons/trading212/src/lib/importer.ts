@@ -62,7 +62,10 @@ export class ActivityImporter {
     return rows;
   }
 
-  async import(units: ImportUnit[], onProgress?: Progress): Promise<ImportOutcome> {
+  // Not named `import`: the host rewrites every dynamic `import(` its lexer reports in the
+  // bundle, and es-module-lexer reports a class method of that name as one (see
+  // tooling/check-bundle.mjs).
+  async importRows(units: ImportUnit[], onProgress?: Progress): Promise<ImportOutcome> {
     const out: ImportOutcome = { imported: 0, importedIds: [], duplicates: 0, accounted: [], rejected: [] };
     const fresh = await this.leaveOutPresent(units, out);
     const total = fresh.reduce((n, u) => n + u.length, 0);

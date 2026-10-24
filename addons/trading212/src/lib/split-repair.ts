@@ -446,7 +446,7 @@ export async function repairSplits(
     }
   }
   if (units.length === 0) return 0;
-  const out = await importer.import(units);
+  const out = await importer.importRows(units);
   for (const r of out.rejected) log.push(`Split not imported: ${r.reason}`);
   return out.imported;
 }

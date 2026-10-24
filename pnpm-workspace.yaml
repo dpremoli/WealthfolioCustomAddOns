@@ -21,6 +21,8 @@ catalog:
   typescript: ^5.9.3
   vite: ^7.3.2
   vitest: ^3.2.4
+  # The host's module rewriter runs this over every add-on bundle (see tooling/check-bundle.mjs).
+  es-module-lexer: 2.1.0
 
 onlyBuiltDependencies:
   - esbuild

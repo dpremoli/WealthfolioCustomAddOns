@@ -16,6 +16,10 @@ Sandbox rules that bite:
   (needs the `secrets` → `use` permission).
 - Settings/sync state → `ctx.api.storage`; credentials → `ctx.api.secrets`.
 - Routes: kit `registerPages` (host-managed `component`), ids must match `contributes.routes`.
+- Never name a class method `import` (`async import(…) {}`): the host's loader runs es-module-lexer
+  (pinned in the catalog to the host's version) over the bundle and rewrites what it reports as a
+  dynamic `import(`, which turns that method into a syntax error and the add-on fails to load.
+  `tooling/check-bundle.mjs` runs in every `bundle` and fails on any dynamic import.
 - Manifest `permissions` must cover every `ctx.api.<category>.<fn>` the bundle calls.
 - Cash activities use `cashSymbol(ccy)` (`$CASH-GBP`), never a bare currency code.
 - Wealthfolio dedupes imports by content hash; for cash importers use the kit's

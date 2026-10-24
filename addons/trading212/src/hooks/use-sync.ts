@@ -409,7 +409,7 @@ async function syncCardAccount(
   );
 
   if (acts.length > 0) onProgress({ phase: "import", message: `Importing ${acts.length} card activities…` });
-  const out = await importer.import(acts.map((a) => withCardFunding(a, mainAccountId)));
+  const out = await importer.importRows(acts.map((a) => withCardFunding(a, mainAccountId)));
   if (out.accounted.length > 0) await addImportedRefs(ctx, conn.id, out.accounted);
   // Count card rows, not the funding transfers that travel with them.
   const imported = out.importedIds.filter((id) => !isFundingId(id)).length;
@@ -444,7 +444,7 @@ async function fundExistingCardRows(
     cardAccountId,
     mainAccountId,
   );
-  const out = await importer.import(units);
+  const out = await importer.importRows(units);
   if (out.imported > 0) log.push(`Card funding: added ${out.imported / 2} transfer pairs for earlier card rows.`);
   // Funding pairs for earlier rows are not new activity; keep them out of the sync's counts.
   return out.rejected;
@@ -724,7 +724,7 @@ async function syncOne(
         const k = String(a.activityType);
         tally[k] = (tally[k] ?? 0) + 1;
       }
-      const out = await importer.import(units, (done, total) =>
+      const out = await importer.importRows(units, (done, total) =>
         onProgress({ phase: "import", message: `Importing activities… ${done}/${total}`, current: done, total }),
       );
       // Funding transfers are bookkeeping for their card row; count activities only.

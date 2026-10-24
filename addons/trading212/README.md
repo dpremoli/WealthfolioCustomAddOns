@@ -337,6 +337,10 @@ never a separate fee.
 
 ## Upgrading to 2.6.1
 
+- **2.6.0 does not load in Wealthfolio 3.11** ("Addon 'trading212-addon' failed to load:
+  Unexpected token '.'"). Install 2.6.1. Nothing else changes for the fix: your connections,
+  imported activities and settings are untouched.
+
 - **Splits that are not on the known list can be inferred from dividend rows** (see "A split that
   is not on the list" above). It starts with the next full backfill, which keeps the dividends'
   share counts; **Reset** an account and sync once to have them for an account backfilled earlier.

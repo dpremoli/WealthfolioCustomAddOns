@@ -2,16 +2,22 @@ import type { AddonContext } from "@wealthfolio/addon-sdk";
 import { jsonStore, migrateSecretsToStorage } from "@wf-addons/kit";
 import {
   KEYS,
+  MAX_STORED_BYTES,
   PROVIDER,
+  REF_SHARDS,
   V1_KEYS,
   authSecretKey,
+  dividendsKey,
+  lastResultKey,
   pendingAuthSecretKey,
+  refsKey,
   syncKey,
 } from "../constants";
 import { Trading212Client } from "../lib/t212-client";
 import type {
   AccountSummary,
   ConnectionSyncState,
+  SyncResult,
   T212Config,
   T212Connection,
   T212Env,
@@ -82,7 +88,7 @@ export async function updateConnection(
 export async function removeConnection(ctx: AddonContext, id: string): Promise<void> {
   const conns = await getConnections(ctx);
   await saveConnections(ctx, conns.filter((c) => c.id !== id));
-  await store(ctx).delete(syncKey(id));
+  await resetSyncState(ctx, id);
   await ctx.api.secrets.delete(authSecretKey(id));
   await ctx.api.secrets.delete(pendingAuthSecretKey(id));
 }
@@ -297,7 +303,7 @@ async function patchSyncState(
   await store(ctx).set(syncKey(id), { ...state, ...patch });
 }
 
-export function setLastSync(ctx: AddonContext, id: string, iso: string): Promise<void> {
+export function setLastSync(ctx: AddonContext, id: string, iso: string | null): Promise<void> {
   return patchSyncState(ctx, id, { lastSync: iso });
 }
 
@@ -329,21 +335,81 @@ export function setVerification(
   return patchSyncState(ctx, id, { verification });
 }
 
-export async function getImportedRefs(ctx: AddonContext, id: string): Promise<Set<string>> {
-  const state = await getSyncState(ctx, id);
-  return new Set(state.importedRefs);
+/** A value's size in storage (UTF-8 bytes of its JSON). */
+function storedBytes(raw: string): number {
+  return typeof TextEncoder === "undefined" ? raw.length : new TextEncoder().encode(raw).length;
 }
 
-export async function addImportedRefs(
-  ctx: AddonContext,
-  id: string,
-  refs: string[],
-): Promise<void> {
-  if (refs.length === 0) return;
+/**
+ * Writes JSON to storage, refusing a value over the cap here with a message naming the key: the
+ * host's own refusal ("too large to sync across devices") says nothing about which value it was.
+ */
+async function setSized<T>(ctx: AddonContext, key: string, value: T): Promise<void> {
+  const raw = JSON.stringify(value);
+  const bytes = storedBytes(raw);
+  if (bytes > MAX_STORED_BYTES) {
+    throw new Error(`Cannot store ${key}: ${bytes} bytes is over the ${MAX_STORED_BYTES}-byte limit for one value.`);
+  }
+  await ctx.api.storage.set(key, raw);
+}
+
+/**
+ * A 32-bit hash that spreads ids over the shards the same way every time: FNV-1a, then murmur3's
+ * finalizer. FNV-1a alone leaves the low bits (the ones a modulo reads) poorly mixed for ids that
+ * differ only in a few digits, which put a fifth of 20,000 sequential ids into one shard.
+ */
+function hash32(s: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  h ^= h >>> 16;
+  h = Math.imul(h, 0x85ebca6b) >>> 0;
+  h ^= h >>> 13;
+  h = Math.imul(h, 0xc2b2ae35) >>> 0;
+  h ^= h >>> 16;
+  return h >>> 0;
+}
+const shardOf = (ref: string) => hash32(ref) % REF_SHARDS;
+const allShards = () => Array.from({ length: REF_SHARDS }, (_, i) => i);
+
+/**
+ * The ids of the rows this connection has imported, read from their shards. Ids an older version
+ * kept inside the sync state (one value that outgrew the host's cap) are moved into the shards
+ * the first time they are read.
+ */
+export async function getImportedRefs(ctx: AddonContext, id: string): Promise<Set<string>> {
+  const out = new Set<string>();
+  const shards = await Promise.all(allShards().map((i) => store(ctx).get<string[]>(refsKey(id, i), [])));
+  for (const shard of shards) for (const r of shard) out.add(r);
   const state = await getSyncState(ctx, id);
-  const set = new Set(state.importedRefs);
-  for (const r of refs) set.add(r);
-  await store(ctx).set(syncKey(id), { ...state, importedRefs: [...set] });
+  if (state.importedRefs?.length) {
+    for (const r of state.importedRefs) out.add(r);
+    await addImportedRefs(ctx, id, state.importedRefs);
+    await patchSyncState(ctx, id, { importedRefs: [] });
+  }
+  return out;
+}
+
+/** Records ids as imported. Only the shards that gain an id are rewritten. */
+export async function addImportedRefs(ctx: AddonContext, id: string, refs: string[]): Promise<void> {
+  if (refs.length === 0) return;
+  const byShard = new Map<number, string[]>();
+  for (const r of refs) byShard.set(shardOf(r), [...(byShard.get(shardOf(r)) ?? []), r]);
+  for (const [shard, add] of byShard) {
+    const have = await store(ctx).get<string[]>(refsKey(id, shard), []);
+    const set = new Set(have);
+    for (const r of add) set.add(r);
+    if (set.size > have.length) await setSized(ctx, refsKey(id, shard), [...set]);
+  }
+}
+
+/** Forgets every imported id, so the next sync reads the rows again (the account's own rows are deduped by content). */
+export async function clearImportedRefs(ctx: AddonContext, id: string): Promise<void> {
+  for (const i of allShards()) await store(ctx).delete(refsKey(id, i));
+  const state = await getSyncState(ctx, id);
+  if (state.importedRefs?.length) await patchSyncState(ctx, id, { importedRefs: [] });
 }
 
 /** What a dividend row says about a position: it was paid on `shares` on `day`. */
@@ -353,28 +419,118 @@ export interface DividendShare {
   shares: number;
 }
 
-/** The dividend share counts kept for a connection, by ISIN. */
+/**
+ * The dividend share counts kept for a connection, by ISIN, from their own key. Counts 2.6.1 kept
+ * in the sync state are moved there the first time they are read.
+ */
 export async function getDividendShares(ctx: AddonContext, id: string): Promise<Record<string, [string, number][]>> {
-  return (await getSyncState(ctx, id)).dividendShares ?? {};
+  const own = await store(ctx).get<Record<string, [string, number][]>>(dividendsKey(id), {});
+  const state = await getSyncState(ctx, id);
+  if (!state.dividendShares) return own;
+  const merged = mergeDividends(own, state.dividendShares);
+  await setSized(ctx, dividendsKey(id), merged);
+  const { dividendShares: _moved, ...rest } = state;
+  await store(ctx).set(syncKey(id), rest);
+  return merged;
+}
+
+function mergeDividends(
+  into: Record<string, [string, number][]>,
+  more: Record<string, [string, number][]>,
+): Record<string, [string, number][]> {
+  const out: Record<string, [string, number][]> = { ...into };
+  for (const [isin, rows] of Object.entries(more)) {
+    const list = (out[isin] = [...(out[isin] ?? [])]);
+    for (const [d, n] of rows) if (!list.some(([d2, n2]) => d2 === d && n2 === n)) list.push([d, n]);
+  }
+  return out;
 }
 
 /** Adds dividend share counts to what is kept for a connection (a pair already held is not repeated). */
 export async function addDividendShares(ctx: AddonContext, id: string, entries: DividendShare[]): Promise<void> {
   if (entries.length === 0) return;
-  const state = await getSyncState(ctx, id);
-  const all: Record<string, [string, number][]> = { ...(state.dividendShares ?? {}) };
-  let changed = false;
-  for (const e of entries) {
-    const list = (all[e.isin] = [...(all[e.isin] ?? [])]);
-    if (list.some(([d, n]) => d === e.day && n === e.shares)) continue;
-    list.push([e.day, e.shares]);
-    changed = true;
-  }
-  if (changed) await store(ctx).set(syncKey(id), { ...state, dividendShares: all });
+  const have = await getDividendShares(ctx, id);
+  const more: Record<string, [string, number][]> = {};
+  for (const e of entries) (more[e.isin] ??= []).push([e.day, e.shares]);
+  const merged = mergeDividends(have, more);
+  const count = (r: Record<string, unknown[]>) => Object.values(r).reduce((n, l) => n + l.length, 0);
+  if (count(merged) > count(have)) await setSized(ctx, dividendsKey(id), merged);
 }
 
 export async function resetSyncState(ctx: AddonContext, id: string): Promise<void> {
   await store(ctx).delete(syncKey(id));
+  for (const i of allShards()) await store(ctx).delete(refsKey(id, i));
+  await store(ctx).delete(dividendsKey(id));
+  // Its log would describe a watermark that no longer exists.
+  await store(ctx).delete(lastResultKey(id));
+}
+
+// --- the last sync's result, kept so the dashboard still shows it after a reload ------------
+
+/** Most of a saved result's size: the log is cut to fit well inside one storage value. */
+const MAX_RESULT_BYTES = 120_000;
+const MAX_LOG_LINE = 600;
+
+/** A copy of `result` small enough to store: long lines cut, and the middle of a long log dropped. */
+export function fitResult(result: SyncResult): SyncResult {
+  const cut = (l: string) => (l.length > MAX_LOG_LINE ? `${l.slice(0, MAX_LOG_LINE)}…` : l);
+  let log = result.log.map(cut);
+  let out: SyncResult = { ...result, log };
+  const size = () => storedBytes(JSON.stringify(out));
+  // Keep the start (what the sync set out to do) and the end (how it finished).
+  let keep = 600;
+  while (size() > MAX_RESULT_BYTES && keep > 20) {
+    if (log.length > keep) {
+      const head = Math.floor(keep / 4);
+      const tail = keep - head;
+      log = [...log.slice(0, head), `… ${log.length - keep} log lines left out to fit the saved copy …`, ...log.slice(-tail)];
+      out = { ...result, log };
+    }
+    keep = Math.floor(keep / 2);
+  }
+  if (out.verification && out.verification.mismatches.length > 50) {
+    out = { ...out, verification: { ...out.verification, mismatches: out.verification.mismatches.slice(0, 50) } };
+  }
+  return out;
+}
+
+/** Most steps of the activity feed kept (each is one short line), so the saved value stays small. */
+const MAX_SAVED_STEPS = 200;
+
+/** Remembers the last sync's activity feed. Best effort. */
+export async function saveLastSteps(ctx: AddonContext, steps: SyncStepLike[]): Promise<void> {
+  try {
+    await setSized(ctx, KEYS.lastSteps, steps.slice(-MAX_SAVED_STEPS));
+  } catch {
+    /* best effort */
+  }
+}
+
+/** The saved activity feed, or none. */
+export async function loadLastSteps(ctx: AddonContext): Promise<SyncStepLike[]> {
+  const v = await store(ctx).get<unknown>(KEYS.lastSteps, []);
+  return Array.isArray(v) ? (v.filter((x) => x && typeof x === "object" && typeof (x as SyncStepLike).message === "string") as SyncStepLike[]) : [];
+}
+
+export type SyncStepLike = { phase: string; message: string; ts: string; status: "active" | "done"; current?: number; total?: number };
+
+/** Remembers a connection's last sync result. Best effort: a storage failure must not fail the sync. */
+export async function saveLastResult(ctx: AddonContext, id: string, result: SyncResult): Promise<void> {
+  try {
+    await setSized(ctx, lastResultKey(id), fitResult(result));
+  } catch {
+    /* best effort */
+  }
+}
+
+/** The saved results of these connections (the ones that have one), or none. */
+export async function loadLastResults(ctx: AddonContext, ids: string[]): Promise<SyncResult[]> {
+  const out: SyncResult[] = [];
+  for (const id of ids) {
+    const r = await store(ctx).get<Partial<SyncResult> | null>(lastResultKey(id), null);
+    if (r && typeof r === "object" && Array.isArray(r.log) && typeof r.imported === "number") out.push(r as SyncResult);
+  }
+  return out;
 }
 
 // --- shared symbol map (account-independent) -----------------------------

@@ -63,7 +63,9 @@ export interface T212Connection {
 // Per-connection sync state (stored under t212_sync_{id}).
 export interface ConnectionSyncState {
   lastSync: string | null;
-  importedRefs: string[]; // loaded into a Set at runtime
+  // Legacy: ids used to live here until the value outgrew the host's storage cap. They are kept
+  // in sharded keys now (see `refsKey`); anything found here is moved over when first read.
+  importedRefs: string[];
   // Oldest window boundary (ISO) a full backfill has imported so far. Set after
   // each window so an interrupted backfill resumes there instead of restarting;
   // cleared once the backfill completes.
@@ -77,8 +79,7 @@ export interface ConnectionSyncState {
   // synced independently of the JSON activity watermark). Absent ⇒ card history not yet
   // backfilled; set to the sync time after the first card backfill completes.
   cardLastSync?: string | null;
-  // The share count each dividend row reported ("No. of shares": the holding it was paid on),
-  // by ISIN, as [YYYY-MM-DD, shares]. Evidence for finding a split Trading 212 never listed.
+  // Legacy (2.6.1): the dividend share counts now live in their own key (`dividendsKey`).
   dividendShares?: Record<string, [string, number][]>;
   // Last comparison of the account with Trading 212's positions and cash (Transactions mode),
   // made after a full backfill and again on each sync until it matches. Absent ⇒ never checked.

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { Account, ActivityImport, AddonContext, SnapshotHoldingInput } from "@wealthfolio/addon-sdk";
 import {
   T212_PROVIDER,
@@ -66,6 +66,7 @@ import {
   addDividendShares,
   addImportedRefs,
   clearAccountData,
+  clearImportedRefs,
   connectionKind,
   setBackfillStartedAt,
   connectionConfig,
@@ -77,7 +78,11 @@ import {
   getSettings,
   getSymbolMap,
   getSyncState,
+  loadLastResults,
+  loadLastSteps,
   resetSyncState,
+  saveLastResult,
+  saveLastSteps,
   setBackfillCheckpoint,
   setCardLastSync,
   setLastSync,
@@ -693,6 +698,9 @@ async function syncOne(
       return out;
     }
 
+    // A ledger that remembers rows the account does not hold (an earlier version recorded rows it
+    // had only sent) would skip them for good: forget it and read everything again.
+    await healLedger(ctx, conn.id, accountId, importer, log);
     const { lastSync: since, backfillCheckpoint, backfillStartedAt } = await getSyncState(ctx, conn.id);
     const syncStartedAt = new Date().toISOString();
     const importedRefs = await getImportedRefs(ctx, conn.id);
@@ -940,7 +948,17 @@ async function syncOne(
 
       // Only mark the full sync complete when the backfill actually finished;
       // otherwise keep the checkpoint so the next run resumes where this left off.
-      if (backfillComplete) {
+      if (backfillComplete && rejected.length > 0) {
+        // Rows Wealthfolio did not save would be lost for good once the watermark moves past them.
+        // Start over next time: what was saved is recognised (the ledger and the account's own
+        // rows), so only the missing rows are imported then.
+        log.push(
+          `${rejected.length} row${rejected.length === 1 ? " was" : "s were"} not saved, so the history is not marked as read: ` +
+            "the next sync reads it again and imports what is still missing.",
+        );
+        await setBackfillCheckpoint(ctx, conn.id, null);
+        await setBackfillStartedAt(ctx, conn.id, null);
+      } else if (backfillComplete) {
         // The JSON fallback fetched everything up to this run's start.
         const watermark = exportFailed ? syncStartedAt : backfillStart;
         await setLastSync(ctx, conn.id, watermark);
@@ -972,8 +990,10 @@ async function syncOne(
       await addDividendShares(ctx, conn.id, dividendShares);
       await importActivities(jsonActs.map(unitOf));
       // Pages are read newest-first from when this run started; anything newer is for
-      // the next run, so the watermark is the start time, not the finish time.
-      await setLastSync(ctx, conn.id, syncStartedAt);
+      // the next run, so the watermark is the start time, not the finish time. Not moved past
+      // rows Wealthfolio did not save: the next sync reads them again.
+      if (rejected.length === 0) await setLastSync(ctx, conn.id, syncStartedAt);
+      else log.push(`${rejected.length} row${rejected.length === 1 ? " was" : "s were"} not saved, so the next sync starts from the same point.`);
 
       // Card data is CSV-only (the JSON feed has no card type), so refresh it separately
       // via its own watermark: a one-time backfill the first time extraction is on, then a
@@ -1040,12 +1060,15 @@ async function syncOne(
       result.error =
         `${droppedTrades.length} trade or corporate-action row${droppedTrades.length === 1 ? " was" : "s were"} not imported, so ` +
         `holdings will not match Trading 212 (see the log). First: ${droppedTrades[0]}`;
+    } else if (rejected.length > 0) {
+      // Any row Wealthfolio did not save is a failure, whatever its kind: cash and dividends too.
+      result.error =
+        `${rejected.length} row${rejected.length === 1 ? " was" : "s were"} not saved by Wealthfolio (see the log). ` +
+        `First: ${describeRejected(rejected[0])}`;
     } else if (verification && !verification.ok && verification.settled) {
       result.error =
         `Does not match Trading 212: ${verification.mismatches.length} difference` +
         `${verification.mismatches.length === 1 ? "" : "s"} (see the log). First: ${verification.mismatches[0]}`;
-    } else if (imported === 0 && rejected.length > 0) {
-      result.error = `${rejected.length} rows not imported: ${describeRejected(rejected[0])}`;
     }
     return result;
   } catch (err) {
@@ -1130,6 +1153,38 @@ async function verifyAndRepair(
     }
   }
   return verification;
+}
+
+/**
+ * Whether a connection's ledger of imported ids is ahead of what its account holds: ids recorded
+ * but no trade or no row at all in the account. Versions 2.6.0/2.6.1 recorded the ids of rows
+ * they had only sent, and Wealthfolio had stored none of them. Only the clear cases count (a
+ * few trades the user deleted by hand must stay deleted).
+ */
+export function ledgerAhead(refs: Set<string>, existing: { activityType?: string }[]): string | null {
+  if (refs.size === 0) return null;
+  if (existing.length === 0) return `${refs.size} rows are recorded as imported but the account holds none`;
+  const orders = [...refs].filter((r) => r.startsWith("t212-order-")).length;
+  const trades = existing.filter((a) => a.activityType === "BUY" || a.activityType === "SELL").length;
+  if (orders > 0 && trades === 0) return `${orders} trades are recorded as imported but the account holds none`;
+  return null;
+}
+
+/** Forgets the ledger and the watermarks when it is ahead of the account (see {@link ledgerAhead}). */
+async function healLedger(
+  ctx: AddonContext,
+  connectionId: string,
+  accountId: string,
+  importer: ActivityImporter,
+  log: string[],
+): Promise<void> {
+  const why = ledgerAhead(await getImportedRefs(ctx, connectionId), await importer.existingIn(accountId));
+  if (!why) return;
+  log.push(`The import ledger is ahead of the account (${why}): forgetting it and reading the whole history again.`);
+  await clearImportedRefs(ctx, connectionId);
+  await setLastSync(ctx, connectionId, null);
+  await setBackfillCheckpoint(ctx, connectionId, null);
+  await setBackfillStartedAt(ctx, connectionId, null);
 }
 
 /** Activity types whose loss leaves a position wrong. */
@@ -1246,19 +1301,13 @@ export async function runSyncAll(
 
   if (resolver.isDirty) await setSymbolMap(ctx, resolver.snapshot());
 
-  const totals = perAccount.reduce(
-    (acc, r) => ({
-      imported: acc.imported + r.imported,
-      duplicates: acc.duplicates + r.duplicates,
-      unresolved: acc.unresolved + r.unresolved,
-    }),
-    { imported: 0, duplicates: 0, unresolved: 0 },
-  );
+  // Keep each account's result and log, so the dashboard shows them again after a reload.
+  for (const r of perAccount) await saveLastResult(ctx, r.connectionId, r);
 
-  return { perAccount, totals };
+  return { perAccount, totals: sumTotals(perAccount) };
 }
 
-export function useSync(ctx: AddonContext) {
+export function useSync(ctx: AddonContext, opts: { restore?: boolean } = {}) {
   const [state, setState] = useState<SyncState>({
     isSyncing: false,
     results: null,
@@ -1267,14 +1316,37 @@ export function useSync(ctx: AddonContext) {
     steps: [],
   });
 
+  // With `restore`, the last sync's results, logs and activity feed come back after a reload (or
+  // when the dashboard is opened again), unless a sync of this page's own is already showing.
+  useEffect(() => {
+    if (!opts.restore) return;
+    let unmounted = false;
+    (async () => {
+      const ids = (await getConnections(ctx)).map((c) => c.id);
+      const perAccount = await loadLastResults(ctx, ids);
+      if (perAccount.length === 0) return;
+      const steps = (await loadLastSteps(ctx)) as KitSyncStep<SyncPhaseId>[];
+      if (unmounted) return;
+      const results: MultiSyncResult = { perAccount, totals: sumTotals(perAccount) };
+      setState((s) => (s.isSyncing || s.results || s.error ? s : { ...s, results, steps: s.steps.length > 0 ? s.steps : steps }));
+    })().catch(() => {});
+    return () => {
+      unmounted = true;
+    };
+    // Once, on mount.
+  }, []);
+
   async function syncAll(confirmedModeSwitches: Set<string> = new Set()) {
     setState((s) => ({ ...s, isSyncing: true, error: null, progress: null, steps: [] }));
+    // The same step list the state holds, kept here too so it can be saved when done.
+    let steps: KitSyncStep<SyncPhaseId>[] = [];
     try {
       const results = await runSyncAll(ctx, {
         confirmedModeSwitches,
         onProgress: ({ accountName, ...p }) => {
           // The shared activity feed shows messages only, so carry the account in the text.
           const progress = { ...p, message: `${accountName}: ${p.message}` };
+          steps = appendStep(steps, progress);
           setState((s) => ({
             ...s,
             progress,
@@ -1282,6 +1354,8 @@ export function useSync(ctx: AddonContext) {
           }));
         },
       });
+      steps = markLastDone(steps);
+      await saveLastSteps(ctx, steps);
       // Mark the last step as done so the timeline shows a final check on every node.
       setState((s) => ({
         ...s,
@@ -1297,4 +1371,16 @@ export function useSync(ctx: AddonContext) {
   }
 
   return { ...state, syncAll };
+}
+
+/** The totals a multi-account result shows. */
+function sumTotals(perAccount: SyncResult[]): MultiSyncResult["totals"] {
+  return perAccount.reduce(
+    (acc, r) => ({
+      imported: acc.imported + r.imported,
+      duplicates: acc.duplicates + r.duplicates,
+      unresolved: acc.unresolved + r.unresolved,
+    }),
+    { imported: 0, duplicates: 0, unresolved: 0 },
+  );
 }

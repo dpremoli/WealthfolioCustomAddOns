@@ -20,6 +20,14 @@ Sandbox rules that bite:
   (pinned in the catalog to the host's version) over the bundle and rewrites what it reports as a
   dynamic `import(`, which turns that method into a syntax error and the add-on fails to load.
   `tooling/check-bundle.mjs` runs in every `bundle` and fails on any dynamic import.
+- Host calls answer 200 when they save nothing, and 3.11 changes what you send them: `checkImport`
+  gives every row a **new id** (match rows by position) and fills in the resolved asset, which
+  `import` then requires; `import` stores **none** of a call's rows if any row fails validation
+  (`summary.success: false`, `imported: 0`, reasons on the returned rows). Read the result row by
+  row; record an id as imported only for a row the host stored. Test against `src/test-host.ts`
+  (it behaves that way), not a mock that accepts whatever is sent.
+- One storage value is capped at ~244 KB ("too large to sync across devices"): never keep a list
+  that grows with the user's history (imported ids, logs) in a single key. Shard it, or cap it.
 - Manifest `permissions` must cover every `ctx.api.<category>.<fn>` the bundle calls.
 - Cash activities use `cashSymbol(ccy)` (`$CASH-GBP`), never a bare currency code.
 - Wealthfolio dedupes imports by content hash; for cash importers use the kit's

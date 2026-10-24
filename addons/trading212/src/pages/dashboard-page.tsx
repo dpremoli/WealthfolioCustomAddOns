@@ -44,7 +44,7 @@ const modeLabel = (m: T212TrackingMode) => (m === "HOLDINGS" ? "Holdings" : "Tra
 
 export default function DashboardPage({ ctx }: AddonPageProps) {
   const queryClient = useQueryClient();
-  const { isSyncing, results, error, progress, steps, syncAll } = useSync(ctx);
+  const { isSyncing, results, error, progress, steps, syncAll } = useSync(ctx, { restore: true });
   const [migrated, setMigrated] = useState(false);
   const [pendingDrifts, setPendingDrifts] = useState<ModeDrift[]>([]);
 

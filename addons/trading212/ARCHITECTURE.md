@@ -147,9 +147,20 @@ a time, and the symbol cache is written **once**.
    `isValid === false` rows (reported with Wealthfolio's reason), and `import` with
    `forceImport` in calls of up to 1000 rows. checkImport's own `duplicateOfId` is ignored: it is
    a content hash, so it would drop the second of two genuinely identical same-day rows (two
-   equal deposits). A refused call is halved until the offending row is isolated and reported;
-   the sync carries on, and ends with an error if a trade was left out.
-5. Record the ids of imported + already-present rows into this connection's imported-ref
+   equal deposits). **What 3.11's two calls really do** (2.6.0/2.6.1 got both wrong and saved no
+   trade at all): `checkImport` returns the rows in order **with a new random id on every row**
+   and the resolved asset filled in (quote currency, MIC, instrument type), so the checked rows
+   are matched by *position* and are what gets imported (an equity row without its quote
+   currency fails validation); and `import` answers **200 with `success: false`, `imported: 0`
+   and no import run when any one row fails validation, storing none of the call's rows**, with
+   the reasons on the returned rows (a row its writer policy refuses is marked invalid on the
+   returned row while the rest are stored). So the answer is read row by row: a call that stored
+   nothing has its failing rows rejected and the rest retried; a row counts as imported only if
+   the host stored it; and every row ends up stored, already there, or rejected (the importer
+   throws if the counts do not add up). A call refused as a whole is halved until the offending
+   row is isolated. The sync carries on, and ends with an error if *any* row was not saved; a
+   sync with unsaved rows does not move its watermark, so the next one reads them again.
+5. Record the ids of stored + already-present rows (never rows that were only sent) into this connection's imported-ref
    set, and set its `lastSync` watermark to when this run **started** (pages are read
    newest-first from that instant; a full backfill uses the instant it first started,
    persisted as `backfillStartedAt` so a resumed backfill leaves no gap). Return a `SyncResult` tagged with the
@@ -204,9 +215,9 @@ log with the ratio they imply. The repair compares activities, not Wealthfolio's
 does not wait for the recalculation.
 
 **Splits inferred from dividend rows.** A dividend row's `No. of shares` is the holding it was paid
-on. The sync keeps `[day, shares]` per ISIN in `t212_sync_{id}.dividendShares` (CSV rows via
+on. The sync keeps `[day, shares]` per ISIN in `t212_divs_{id}` (CSV rows via
 `dividendShareOf`, JSON items from `quantity`; recorded even for rows already imported, merged,
-dropped by Reset). `inferSplit` replays the position's activities without the split. A dividend is
+dropped by Reset); stored in `t212_divs_{id}`. `inferSplit` replays the position's activities without the split. A dividend is
 *unchanged* when its count equals one of the replayed holdings in the 100 days before it (the
 record date precedes the pay date, so trades in between are not in the count); the first
 *changed* one and the last unchanged one before it bound the split (every later dividend must be
@@ -459,7 +470,11 @@ Add-on **storage** (`ctx.api.storage`, non-secret):
 |-----|----------|
 | `t212_settings` | `{ env, autoSync?, extractCard?, cardAccountType? }` — shared by all connections |
 | `t212_connections` | `T212Connection[]` = `{ id, name, accountId, keyIdLast4?, needsCredentials?, trackingMode?, kind?, cardAccountId? }` — **no key/secret** |
-| `t212_sync_{id}` | Per-connection `{ lastSync, importedRefs[], backfillCheckpoint?, cardLastSync? }` |
+| `t212_sync_{id}` | Per-connection `{ lastSync, backfillCheckpoint?, backfillStartedAt?, cardLastSync?, verification? }` — small and bounded (`importedRefs` here is legacy, moved out on first read) |
+| `t212_refs_{id}_{00..1f}` | The ids of the rows imported for connection `{id}`, spread over 32 keys by a hash of the id, so no key approaches the host's ~244 KB cap (one value of 235 KB broke a real Invest account); only the shards that gain an id are rewritten |
+| `t212_divs_{id}` | `{ ISIN: [[day, shares], …] }` — the dividend share counts used to infer splits |
+| `t212_last_result_{id}` | The connection's last `SyncResult` (counts, breakdown, **log**, check), log cut to fit, so the dashboard shows it again after a reload; deleted by Reset |
+| `t212_last_steps` | The last sync's activity feed (last 200 steps) |
 | `t212_symbol_map_v6` | Shared `{ ticker: "SYMBOL\|MIC" }` cache (`""` = known miss; bare `"SYMBOL"` = MIC unknown). Older v1–v5 caches are deleted. |
 
 **Secrets** (`ctx.api.secrets`, keyring):

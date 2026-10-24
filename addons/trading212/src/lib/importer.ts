@@ -1,5 +1,5 @@
 import type { ActivityImport, AddonContext, ImportActivitiesResult } from "@wealthfolio/addon-sdk";
-import { selectNewActivities, type ExistingActivityLike } from "@wf-addons/kit";
+import { reasonOf, selectNewActivities, type ExistingActivityLike } from "@wf-addons/kit";
 
 /**
  * Rows per checkImport/import call. Wealthfolio has no row cap for add-on imports (the web
@@ -257,11 +257,6 @@ function halves<T>(xs: T[]): [T[], T[]] {
 }
 
 /** The reason Wealthfolio gave for an invalid row (its errors, else its warnings). */
-function reasonOf(a: ActivityImport): string {
-  const msgs = [...Object.values(a.errors ?? {}), ...Object.values(a.warnings ?? {})].flat();
-  return msgs.length > 0 ? [...new Set(msgs)].join("; ") : "invalid (no reason given)";
-}
-
 function errText(e: unknown): string {
   if (e instanceof Error) return e.message;
   if (typeof e === "string") return e;

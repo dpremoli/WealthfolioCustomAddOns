@@ -335,6 +335,14 @@ never a separate fee.
 
 ---
 
+## Upgrading to 2.6.3
+
+- **The Cash ISA CSV import no longer records rows Wealthfolio did not store.** Wealthfolio
+  answers "OK" even when it saves nothing, and the import used to remember every row as imported
+  regardless, so such a row was skipped on every later import. Now only stored rows are
+  remembered; the others are listed with Wealthfolio's reason and an error is shown, and importing
+  the same file again stores just those.
+
 ## Upgrading to 2.6.2
 
 - **2.6.0 and 2.6.1 saved no trades, dividends or deposits to Transactions accounts** (only card

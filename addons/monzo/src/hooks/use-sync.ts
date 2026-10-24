@@ -63,7 +63,7 @@ export function useSync(ctx: AddonContext, opts: { restore?: boolean } = {}) {
         setState((s) =>
           s.isSyncing || s.lastResult || s.steps.length > 0 || s.error
             ? s
-            : { ...s, lastResult: view.result, steps: view.steps }
+            : { ...s, lastResult: view.result, steps: view.steps, error: view.result.error ?? null }
         );
       })
       .catch(() => {});
@@ -87,10 +87,11 @@ export function useSync(ctx: AddonContext, opts: { restore?: boolean } = {}) {
         steps = markLastDone(steps);
         await saveLastSyncView(ctx, { result: r, steps });
       });
+      // A sync with rows Wealthfolio did not store finishes, but is reported as an error.
       setState((s) => ({
         isSyncing: false,
         lastResult: result,
-        error: null,
+        error: result.error ?? null,
         progress: null,
         steps: markLastDone(s.steps),
       }));

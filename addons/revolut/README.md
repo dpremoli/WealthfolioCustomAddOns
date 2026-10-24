@@ -128,6 +128,10 @@ row is already linked) and `activities.linkTransfer` (to link the pair).
    same or an overlapping statement is safe (it adds nothing). The result shows what was
    imported and one line per kind of linking.
 
+If Wealthfolio refuses some rows (it answers "OK" even then), the import ends with an error that
+names the first row and Wealthfolio's reason and lists them. Refused rows are not remembered as
+imported: fix the cause and import the same statement again, and only those rows are added.
+
 ## Permissions
 
 | Category | Functions | Why |

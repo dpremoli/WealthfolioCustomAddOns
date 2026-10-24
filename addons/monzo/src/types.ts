@@ -87,6 +87,9 @@ export interface SyncResult {
   log?: string[];
   // ISO timestamp the sync finished at.
   finishedAt?: string;
+  // Set when Wealthfolio did not store some rows (it answers 200 even then): the rows are
+  // listed in `log`, left out of the import ledger, and the sync is not marked as done.
+  error?: string;
 }
 
 /** Phases of a live sync, as rendered by the kit's `<SyncActivity>`. */

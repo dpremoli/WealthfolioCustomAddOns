@@ -5,11 +5,15 @@ import {
   isTrading212Payee,
   jsonStore,
   ledgerAccountId,
+  importStoredRows,
   ledgerEntry,
   moveLinkNote,
   reconcileWithLedger,
   trading212Refs,
+  unsavedMessage,
+  withoutUnsaved,
   type ImportLedger,
+  type UnsavedRow,
 } from "@wf-addons/kit";
 import { KEY_IMPORTED_IDS } from "../constants";
 import type { RevolutTransaction } from "../types";
@@ -23,6 +27,11 @@ export interface ImportOutcome {
   updated: number;
   /** Already in the account (by id, or matched to an older row), so not imported again. */
   duplicates: number;
+  /**
+   * Rows Wealthfolio did not store, with its reason. They are not in the ledger, so the next
+   * import sends them again.
+   */
+  unsaved: UnsavedRow[];
 }
 
 /**
@@ -44,6 +53,9 @@ export interface ImportOutcome {
  * `movesIds` are rows that may be a move between the user's own accounts (Trading 212, a savings
  * pot, a top-up): one the user (or the linking) already turned into a transfer before the ledger
  * knew it is taken for the same move instead of being imported again.
+ *
+ * Wealthfolio answers 200 even when it stored nothing, so a row is recorded in the ledger only
+ * when the answer says it was stored (kit `importStoredRows`); the rest come back as `unsaved`.
  */
 export async function importRows(
   ctx: AddonContext,
@@ -51,7 +63,7 @@ export async function importRows(
   desired: ActivityImport[],
   movesIds: ReadonlySet<string> = new Set(),
 ): Promise<ImportOutcome> {
-  if (desired.length === 0) return { imported: 0, updated: 0, duplicates: 0 };
+  if (desired.length === 0) return { imported: 0, updated: 0, duplicates: 0, unsaved: [] };
   const store = jsonStore(ctx.api.storage);
   const existing = await ctx.api.activities.getAll(accountId);
   const reconciled = reconcileWithLedger(
@@ -60,18 +72,22 @@ export async function importRows(
     await store.get<ImportLedger>(KEY_IMPORTED_IDS, {}),
     accountId,
   );
-  const { present, stale, ledger } = reconciled;
-  const { toImport, adopted } = adoptUntrackedRows(reconciled.toImport, existing, ledger, accountId, {
+  const { present, stale } = reconciled;
+  const { toImport, adopted } = adoptUntrackedRows(reconciled.toImport, existing, reconciled.ledger, accountId, {
     equivalents: { DEPOSIT: ["TRANSFER_IN"], WITHDRAWAL: ["TRANSFER_OUT"] },
     eligible: (a) => !!a.id && movesIds.has(a.id),
     // The two legs of a move can be dated days apart; a transfer made by hand carries one date.
     windowMs: MOVE_MATCH_WINDOW_MS,
   });
   let imported = 0;
+  let unsaved: UnsavedRow[] = [];
   if (toImport.length > 0) {
-    const r = await ctx.api.activities.import(toImport);
-    imported = r.summary.imported;
+    const r = await importStoredRows((rows) => ctx.api.activities.import(rows), toImport);
+    imported = r.stored.length;
+    unsaved = r.unsaved;
   }
+  // The ledger keeps entries only for rows Wealthfolio stored: an unsaved row is sent again.
+  const ledger = withoutUnsaved(reconciled.ledger, unsaved);
   await store.set(KEY_IMPORTED_IDS, ledger);
 
   let updated = 0;
@@ -91,7 +107,7 @@ export async function importRows(
         })),
       })
       .catch(() => null);
-    if (!res) return { imported, updated: 0, duplicates: present.length + adopted.length };
+    if (!res) return { imported, updated: 0, duplicates: present.length + adopted.length, unsaved };
     const failed = new Set((res.errors ?? []).map((e) => e.id));
     for (const { row, activity } of stale) {
       if (failed.has(row.id) || !activity.id) continue;
@@ -100,12 +116,14 @@ export async function importRows(
     }
     await store.set(KEY_IMPORTED_IDS, ledger);
   }
-  return { imported, updated, duplicates: present.length + adopted.length - updated };
+  return { imported, updated, duplicates: present.length + adopted.length - updated, unsaved };
 }
 
 export interface StatementImportOutcome extends ImportOutcome {
   /** One line per kind of linking (exchanges, Trading 212, savings). */
   notes: string[];
+  /** Set when Wealthfolio did not store some rows (`unsaved`): say so, and import again. */
+  error?: string;
 }
 
 /**
@@ -124,7 +142,7 @@ export async function importStatement(
 ): Promise<StatementImportOutcome> {
   const accounts = await ctx.api.accounts.getAll();
   const refs = trading212Refs(accounts);
-  const total: ImportOutcome = { imported: 0, updated: 0, duplicates: 0 };
+  const total: ImportOutcome = { imported: 0, updated: 0, duplicates: 0, unsaved: [] };
   for (const currency of new Set(transactions.map((tx) => tx.currency))) {
     const accountId = mapping[currency];
     if (!accountId) continue;
@@ -148,10 +166,11 @@ export async function importStatement(
     total.imported += outcome.imported;
     total.updated += outcome.updated;
     total.duplicates += outcome.duplicates;
+    total.unsaved.push(...outcome.unsaved);
   }
 
   const notes = await linkOwnMoves(ctx, mapping, accounts, opts.savingsAccountId);
-  return { ...total, notes };
+  return { ...total, notes, error: unsavedMessage(total.unsaved) };
 }
 
 /**

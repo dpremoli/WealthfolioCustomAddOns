@@ -1,5 +1,5 @@
 /**
- * End to end against a fake Wealthfolio 3.11 (see test-host.ts): a real Trading 212 export goes
+ * End to end against a fake Wealthfolio 3.11 (the kit's `@wf-addons/kit/testing`): a real Trading 212 export goes
  * through the whole sync, and the test counts what the host actually STORES, not what was sent.
  * 2.6.0 and 2.6.1 passed their unit tests while storing no trades at all on a real host, because
  * their fakes accepted whatever the add-on sent.
@@ -8,7 +8,7 @@ import { act, renderHook } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { runSyncAll, useSync, ledgerAhead } from "./hooks/use-sync";
 import { addImportedRefs, fitResult, getImportedRefs } from "./hooks/use-config";
-import { FakeWealthfolio, STORAGE_CAP_BYTES } from "./test-host";
+import { FakeWealthfolio, STORAGE_CAP_BYTES } from "@wf-addons/kit/testing";
 import type { SyncResult } from "./types";
 
 const HDR =

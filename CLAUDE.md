@@ -24,8 +24,11 @@ Sandbox rules that bite:
   gives every row a **new id** (match rows by position) and fills in the resolved asset, which
   `import` then requires; `import` stores **none** of a call's rows if any row fails validation
   (`summary.success: false`, `imported: 0`, reasons on the returned rows). Read the result row by
-  row; record an id as imported only for a row the host stored. Test against `src/test-host.ts`
-  (it behaves that way), not a mock that accepts whatever is sent.
+  row; record an id as imported only for a row the host stored. For cash importers use the kit's
+  `importStoredRows` (it reads the answer, rejects the rows that fail and retries the rest) and
+  `withoutUnsaved` (keeps unsaved rows out of the ledger), then report the unsaved rows and
+  surface an error. Test against the kit's fake host (`@wf-addons/kit/testing`), which behaves that
+  way, not a mock that accepts whatever is sent.
 - One storage value is capped at ~244 KB ("too large to sync across devices"): never keep a list
   that grows with the user's history (imported ids, logs) in a single key. Shard it, or cap it.
 - Manifest `permissions` must cover every `ctx.api.<category>.<fn>` the bundle calls.

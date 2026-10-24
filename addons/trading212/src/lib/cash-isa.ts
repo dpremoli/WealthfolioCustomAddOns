@@ -4,13 +4,17 @@ import {
   T212_CASH_ISA_PROVIDER_ID,
   adoptUntrackedRows,
   isTrading212Payee,
+  importStoredRows,
   jsonStore,
   ledgerAccountId,
   linkMovesBetween,
   moveLinkNote,
   reconcileWithLedger,
   trading212Refs,
+  unsavedMessage,
+  withoutUnsaved,
   type ImportLedger,
+  type UnsavedRow,
 } from "@wf-addons/kit";
 import { PROVIDER } from "../constants";
 import { mapCsvRow, parseCsv } from "./csv";
@@ -157,6 +161,7 @@ export async function ensureCashIsaAccount(
 }
 
 export interface CashIsaImportResult {
+  /** Rows Wealthfolio stored. */
   imported: number;
   /** Already in the account (same Trading 212 id, or the same row imported earlier). */
   duplicates: number;
@@ -164,6 +169,10 @@ export interface CashIsaImportResult {
   linked: number;
   /** One line about the matching with other accounts, when there was anything to say. */
   moveNote?: string;
+  /** Rows Wealthfolio did not store, with its reason: not in the ledger, so a re-import sends them again. */
+  unsaved: UnsavedRow[];
+  /** Set when there are unsaved rows: tell the user, and have them import again. */
+  error?: string;
 }
 
 /**
@@ -175,13 +184,16 @@ export interface CashIsaImportResult {
  * Deposits and withdrawals stay as they are, which is right for everyone (they count towards the
  * ISA allowance) and is all that happens unless another Wealthfolio account holds the other half
  * of the move: see {@link matchWithOtherAccounts}.
+ *
+ * Wealthfolio answers 200 even when it stored nothing, so a row is recorded in the ledger only
+ * when the answer says it was stored (kit `importStoredRows`); the rest come back as `unsaved`.
  */
 export async function importCashIsa(
   ctx: AddonContext,
   accountId: string,
   activities: ActivityImport[],
 ): Promise<CashIsaImportResult> {
-  if (activities.length === 0) return { imported: 0, duplicates: 0, linked: 0 };
+  if (activities.length === 0) return { imported: 0, duplicates: 0, linked: 0, unsaved: [] };
   const store = jsonStore(ctx.api.storage);
   const rows = activities.map((a) => ({ ...a, accountId }));
   const existing = await ctx.api.activities.getAll(accountId);
@@ -191,18 +203,21 @@ export async function importCashIsa(
     await store.get<ImportLedger>(LEDGER_KEY, {}),
     accountId,
   );
-  const { present, ledger } = reconciled;
-  const { toImport, adopted } = adoptUntrackedRows(reconciled.toImport, existing, ledger, accountId, {
+  const { present } = reconciled;
+  const { toImport, adopted } = adoptUntrackedRows(reconciled.toImport, existing, reconciled.ledger, accountId, {
     equivalents: { DEPOSIT: ["TRANSFER_IN"], WITHDRAWAL: ["TRANSFER_OUT"] },
     // The two legs of a move can be dated days apart; a transfer made by hand carries one date.
     windowMs: MOVE_MATCH_WINDOW_MS,
   });
   let imported = 0;
+  let unsaved: UnsavedRow[] = [];
   if (toImport.length > 0) {
-    const res = await ctx.api.activities.import(toImport);
-    imported = res.summary.imported;
+    const res = await importStoredRows((rows) => ctx.api.activities.import(rows), toImport);
+    imported = res.stored.length;
+    unsaved = res.unsaved;
   }
-  await store.set(LEDGER_KEY, ledger);
+  // The ledger keeps entries only for rows Wealthfolio stored: an unsaved row is sent again.
+  await store.set(LEDGER_KEY, withoutUnsaved(reconciled.ledger, unsaved));
   await store.set<CashIsaState>(STATE_KEY, { accountId, lastImport: new Date().toISOString() });
   const moves = await matchWithOtherAccounts(ctx, accountId);
   return {
@@ -210,6 +225,8 @@ export async function importCashIsa(
     duplicates: present.length + adopted.length,
     linked: moves.linked,
     moveNote: moveLinkNote("your bank account", moves) ?? undefined,
+    unsaved,
+    error: unsavedMessage(unsaved),
   };
 }
 

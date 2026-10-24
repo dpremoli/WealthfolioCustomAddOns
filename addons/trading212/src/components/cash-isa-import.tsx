@@ -2,6 +2,7 @@ import type { AddonContext } from "@wealthfolio/addon-sdk";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertFeedback, Badge, Button, Icons, Label } from "@wealthfolio/ui";
 import { useMemo, useRef, useState } from "react";
+import { describeUnsaved } from "@wf-addons/kit";
 import { CASH_ISA_QUERY_KEY, useCashIsa } from "../hooks/use-cash-isa";
 import {
   DEFAULT_CASH_ISA_NAME,
@@ -236,9 +237,19 @@ export function CashIsaImport({ ctx, newAccountName = DEFAULT_CASH_ISA_NAME }: C
         </AlertFeedback>
       )}
       {result && !isImporting && (
-        <AlertFeedback variant="success" title="Imported">
+        <AlertFeedback variant={result.error ? "error" : "success"} title={result.error ? "Some rows were not saved" : "Imported"}>
           {result.imported} imported, {result.duplicates} already there.
           {result.moveNote ? ` ${result.moveNote}` : ""}
+          {result.error && (
+            <>
+              <span className="block">{result.error}</span>
+              <ul className="list-disc pl-5 text-xs">
+                {result.unsaved.slice(0, 20).map((u) => (
+                  <li key={u.activity.id ?? describeUnsaved(u)}>{describeUnsaved(u)}</li>
+                ))}
+              </ul>
+            </>
+          )}
         </AlertFeedback>
       )}
     </div>

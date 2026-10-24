@@ -15,6 +15,17 @@ export {
   type ExistingActivityLike,
 } from "./reconcile";
 export {
+  describeUnsaved,
+  importStoredRows,
+  readImportResult,
+  reasonOf,
+  unsavedMessage,
+  withoutUnsaved,
+  type HostImport,
+  type ImportRead,
+  type UnsavedRow,
+} from "./host-import";
+export {
   brokeredRequest,
   brokeredJson,
   HttpError,

@@ -11,6 +11,8 @@
  *   the valid ones sent with it. A row its writer policy refuses is left out and marked invalid
  *   on the returned row while the rest are stored.
  * - A stored activity gets a new id of the host's own (the id sent is not kept).
+ * - `storeNothing` makes `import` answer 200 and `success: true` while saving nothing and saying
+ *   nothing about any row (the worst case: no reason anywhere).
  * - `storage.set` refuses a value above ~244 KB: "too large to sync across devices".
  */
 import type { AddonContext, ActivityImport } from "@wealthfolio/addon-sdk";
@@ -69,6 +71,8 @@ export class FakeWealthfolio {
   validation: (a: ActivityImport) => string | null = () => null;
   /** Returns a reason to make only `import`'s own validation fail a row (the whole call stores nothing). */
   importValidation: (a: ActivityImport) => string | null = () => null;
+  /** Makes `import` answer 200 and store nothing, with no reason on any row. */
+  storeNothing = false;
   readonly ctx: AddonContext;
 
   constructor(accounts: FakeAccount[], opts: { search?: (q: string) => unknown[] } = {}) {
@@ -234,6 +238,8 @@ export class FakeWealthfolio {
       if (why) fail("general", why);
     }
     if (failed) return result(checked, 0, false, "", "Validation errors found in activities.");
+
+    if (this.storeNothing) return result(checked, 0, true, "");
 
     // Writer policy: refuses some rows, stores the rest.
     const toStore: ActivityImport[] = [];

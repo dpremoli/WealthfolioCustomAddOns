@@ -1,5 +1,5 @@
 import type { ActivityImport, AddonContext, ImportActivitiesResult } from "@wealthfolio/addon-sdk";
-import { selectNewActivities, type ExistingActivityLike } from "@wf-addons/kit";
+import { selectNewActivities, type ExistingActivityLike, type RefusedUnit } from "@wf-addons/kit";
 
 /**
  * Rows per checkImport/import call. Wealthfolio has no row cap for add-on imports (the web
@@ -32,6 +32,11 @@ export interface ImportOutcome {
   /** Ids of every row now accounted for: stored, or already there. Never a row that was only sent. */
   accounted: string[];
   rejected: RejectedRow[];
+  /**
+   * The units (as given to `importRows`) that had a row refused, each with the reason of the
+   * first refused row. A unit is sent again as a whole, which is why the whole unit is listed.
+   */
+  refused: RefusedUnit[];
 }
 
 type Progress = (done: number, total: number) => void;
@@ -72,7 +77,7 @@ export class ActivityImporter {
   // bundle, and es-module-lexer reports a class method of that name as one (see
   // tooling/check-bundle.mjs).
   async importRows(units: ImportUnit[], onProgress?: Progress): Promise<ImportOutcome> {
-    const out: ImportOutcome = { imported: 0, importedIds: [], duplicates: 0, accounted: [], rejected: [] };
+    const out: ImportOutcome = { imported: 0, importedIds: [], duplicates: 0, accounted: [], rejected: [], refused: [] };
     const inputRows = units.reduce((n, u) => n + u.length, 0);
     const fresh = await this.leaveOutPresent(units, out);
     const total = fresh.reduce((n, u) => n + u.length, 0);
@@ -82,6 +87,7 @@ export class ActivityImporter {
       done += chunk.reduce((n, u) => n + u.length, 0);
       onProgress?.(done, total);
     }
+    out.refused = refusedUnitsOf(units, out.rejected);
     // Every row must have ended up somewhere; a gap here would be a row lost without a word.
     const handled = out.imported + out.duplicates + out.rejected.length;
     if (handled !== inputRows) {
@@ -231,6 +237,19 @@ export class ActivityImporter {
     }
     for (const a of units[0]) out.rejected.push({ activity: a, reason });
   }
+}
+
+/** The units that had a row refused (by the row's id), each with its first row's own reason. */
+function refusedUnitsOf(units: ImportUnit[], rejected: RejectedRow[]): RefusedUnit[] {
+  const unitOfId = new Map<string, ImportUnit>();
+  for (const u of units) for (const a of u) if (a.id) unitOfId.set(a.id, u);
+  const out = new Map<ImportUnit, string>();
+  for (const r of rejected) {
+    const unit = (r.activity.id ? unitOfId.get(r.activity.id) : undefined) ?? [r.activity];
+    // The row that was actually refused says why; its pair-mates only say they were left out with it.
+    if (!out.has(unit) || out.get(unit)!.startsWith("left out with")) out.set(unit, r.reason);
+  }
+  return [...out].map(([unit, reason]) => ({ unit, reason }));
 }
 
 /** Groups units into chunks of at most `size` rows (a unit larger than that goes alone). */

@@ -26,6 +26,10 @@ Sandbox rules that bite:
   (`summary.success: false`, `imported: 0`, reasons on the returned rows). Read the result row by
   row; record an id as imported only for a row the host stored. Test against `src/test-host.ts`
   (it behaves that way), not a mock that accepts whatever is sent.
+- A row the host refuses on every call (unresolvable symbol, bad date) must not hold a sync's
+  watermark: move the watermark on and keep the row in the kit's `refused-rows` store (own storage
+  key per connection: row, host reason, attempts), retry it at the start of every sync, remove it once
+  stored, and keep the sync error while the list is not empty.
 - One storage value is capped at ~244 KB ("too large to sync across devices"): never keep a list
   that grows with the user's history (imported ids, logs) in a single key. Shard it, or cap it.
 - Manifest `permissions` must cover every `ctx.api.<category>.<fn>` the bundle calls.

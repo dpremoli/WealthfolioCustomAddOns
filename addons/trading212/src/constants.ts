@@ -40,6 +40,12 @@ export const refsKey = (connectionId: string, shard: number) =>
 /** The share counts of a connection's dividend rows (evidence for inferring a split), own key. */
 export const dividendsKey = (connectionId: string) => `t212_divs_${connectionId}`;
 
+/**
+ * Rows Wealthfolio refuses (an unresolvable or delisted symbol, say): kept apart from the
+ * watermark and retried at the start of every sync, so one never makes a sync re-read the history.
+ */
+export const refusedKey = (connectionId: string) => `t212_refused_${connectionId}`;
+
 /** What the dashboard keeps showing of a connection's last sync (result and log), across reloads. */
 export const lastResultKey = (connectionId: string) => `t212_last_result_${connectionId}`;
 

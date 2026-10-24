@@ -344,8 +344,13 @@ never a separate fee.
   Nothing is deleted. If you only have some trades missing, **Reset** the connection in Settings
   and sync.
 - **A sync now fails loudly** when Wealthfolio does not store rows that were sent: the error names
-  the first row and why, the log lists them, the ids of unsaved rows are not recorded, and the
-  history is not marked as read, so the next sync tries again.
+  the first row and why, the log lists them, and the ids of unsaved rows are not recorded.
+- **Rows Wealthfolio refuses keep being retried, without slowing the sync.** A row it refuses on
+  every call (a symbol it cannot find, a delisted instrument) is kept in a short list of its own
+  (with Wealthfolio's reason and how often it was refused). The history is still marked as read, so
+  no sync re-downloads it; only the listed rows are sent again at the start of every sync, and a row
+  leaves the list once Wealthfolio has stored it. The error stays while the list is not empty. Card
+  rows are treated the same way.
 - **Long histories no longer hit Wealthfolio's storage limit** ("too large to sync across
   devices"): the imported-row ids are kept in 32 small keys instead of one value.
 - **The sync log stays after a refresh**: each account's last result (summary, symbols, Log

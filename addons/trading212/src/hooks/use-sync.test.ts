@@ -291,7 +291,8 @@ describe("useSync — JSON incremental path", () => {
     });
 
     const r = result.current.results!.perAccount[0];
-    expect(r.error).toMatch(/^5 trade or corporate-action rows were not imported, so holdings will not match Trading 212/);
+    // The host refuses all five: they wait in the refused list (retried every sync) and the error stays.
+    expect(r.error).toMatch(/^5 rows are refused by Wealthfolio and retried on every sync \(see the log\)/);
     const notImported = r.log.filter((l) => l.startsWith("Not imported: BUY 2026-04-01 AAPL"));
     expect(notImported).toHaveLength(5);
     expect(notImported[0]).toMatch(/\(t212-order-1\): checkImport refused it: Unprocessable Entity/);
@@ -1187,7 +1188,7 @@ describe("useSync — no split is inferred while rows were left out", () => {
     expect(importFn.mock.calls.flatMap((c) => c[0] as ActivityImport[]).some((a) => a.activityType === "SPLIT")).toBe(false);
     const r = result.current.results!.perAccount[0];
     expect(r.error).toContain("not imported");
-    expect(r.log.join("\n")).toContain("Not looking for splits in the dividend rows: 1 trade or corporate-action row was not imported");
+    expect(r.log.join("\n")).toContain("Not looking for splits in the dividend rows: 1 row was not imported or refused by Wealthfolio");
   });
 });
 

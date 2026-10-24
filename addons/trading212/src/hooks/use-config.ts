@@ -1,5 +1,6 @@
 import type { AddonContext } from "@wealthfolio/addon-sdk";
-import { jsonStore, migrateSecretsToStorage } from "@wf-addons/kit";
+import { jsonStore, migrateSecretsToStorage, type ExistingActivityLike } from "@wf-addons/kit";
+import { orphanFundingLegs } from "../lib/card-funding";
 import {
   KEYS,
   MAX_STORED_BYTES,
@@ -85,13 +86,36 @@ export async function updateConnection(
 }
 
 /** Forgets the credentials + sync state. The Wealthfolio account is left intact
- *  (the SDK has no accounts.delete); the user removes it natively if desired. */
+ *  (the SDK has no accounts.delete); the user removes it natively if desired. If its investing
+ *  account is already gone, the funding transfers left in its card account are deleted too. */
 export async function removeConnection(ctx: AddonContext, id: string): Promise<void> {
   const conns = await getConnections(ctx);
+  const conn = conns.find((c) => c.id === id);
+  if (conn?.cardAccountId) await deleteOrphanedFunding(ctx, conn.cardAccountId, conn.accountId);
   await saveConnections(ctx, conns.filter((c) => c.id !== id));
   await resetSyncState(ctx, id);
   await ctx.api.secrets.delete(authSecretKey(id));
   await ctx.api.secrets.delete(pendingAuthSecretKey(id));
+}
+
+/**
+ * Deletes the funding transfers in a card account whose other half is gone (see
+ * `orphanFundingLegs`): what is left when its investing account was deleted. Best effort.
+ */
+async function deleteOrphanedFunding(ctx: AddonContext, cardAccountId: string, mainAccountId: string): Promise<void> {
+  try {
+    const legs: (ExistingActivityLike & { id?: string; accountId: string })[] = [];
+    for (const acc of await ctx.api.accounts.getAll()) {
+      for (const r of (await ctx.api.activities.getAll(acc.id)) as (ExistingActivityLike & { id?: string })[]) legs.push({ ...r, accountId: acc.id });
+    }
+    const ids = orphanFundingLegs(legs, [cardAccountId, mainAccountId])
+      .filter((l) => l.accountId === cardAccountId)
+      .map((l) => l.id)
+      .filter((x): x is string => !!x);
+    for (let i = 0; i < ids.length; i += CLEAR_CHUNK_SIZE) await ctx.api.activities.saveMany({ deleteIds: ids.slice(i, i + CLEAR_CHUNK_SIZE) });
+  } catch {
+    /* best effort: the next sync of a connection using this card account cleans up as well */
+  }
 }
 
 // --- credentials (secrets) -----------------------------------------------

@@ -42,8 +42,22 @@ export function isNonSecurity(r: Pick<SymbolSearchResult, "quoteType" | "symbol"
   return /^[A-Z0-9]{2,10}[-/](USD|EUR|GBP|USDT|USDC|BTC|ETH)$/i.test(r.symbol ?? "") || /=X$/i.test(r.symbol ?? "");
 }
 
-/** Trading 212 tickers look like `AAPL_US_EQ` — the base symbol is the first segment. */
+// A European listing has no market segment: Trading 212 appends a lowercase exchange letter to the
+// ticker instead (VUAAm_EQ is VUAA on Milan, RBl_EQ Reckitt on London, 22UAd_EQ BioNTech on Xetra).
+const EXCHANGE_LETTER_RE = /^(.*[A-Z0-9])([a-z])_EQ$/;
+
+/** The lowercase exchange letter of a `VUAAm_EQ`-style ticker, or undefined. */
+export function exchangeLetter(ticker: string): string | undefined {
+  return EXCHANGE_LETTER_RE.exec(ticker)?.[2];
+}
+
+/**
+ * Trading 212 tickers look like `AAPL_US_EQ` — the base symbol is the first segment — or, for a
+ * European listing, `VUAAm_EQ`: the base symbol without the exchange letter.
+ */
 export function parseBaseSymbol(ticker: string): string {
+  const lettered = EXCHANGE_LETTER_RE.exec(ticker);
+  if (lettered) return lettered[1];
   return ticker.split("_")[0] || ticker;
 }
 
@@ -92,14 +106,30 @@ const MARKET_MICS: Record<string, string[]> = {
   LU: ["XLUX"],
 };
 
-/** Currency implied by the T212 ticker's market segment, or undefined if unknown. */
+// Trading 212 exchange letter → the listing's MIC(s) and, where it has only one, its currency.
+// London quotes in pence, pounds or dollars, so `l` gives no currency. An unmapped letter yields
+// no hint.
+const EXCHANGE_LETTERS: Record<string, { mics: string[]; currency?: string }> = {
+  l: { mics: ["XLON"] },
+  d: { mics: MARKET_MICS.DE, currency: "EUR" },
+  p: { mics: ["XPAR"], currency: "EUR" },
+  a: { mics: ["XAMS"], currency: "EUR" },
+  m: { mics: ["XMIL"], currency: "EUR" },
+  e: { mics: ["XMAD"], currency: "EUR" },
+};
+
+/** Currency implied by the T212 ticker's market segment (or exchange letter), or undefined if unknown. */
 export function marketCurrency(ticker: string): string | undefined {
+  const letter = exchangeLetter(ticker);
+  if (letter) return EXCHANGE_LETTERS[letter]?.currency;
   const seg = ticker.split("_")[1];
   return seg ? MARKET_CURRENCY[seg.toUpperCase()] : undefined;
 }
 
-/** Expected exchange MIC(s) for the T212 ticker's market segment, or undefined. */
+/** Expected exchange MIC(s) for the T212 ticker's market segment (or exchange letter), or undefined. */
 export function marketMics(ticker: string): string[] | undefined {
+  const letter = exchangeLetter(ticker);
+  if (letter) return EXCHANGE_LETTERS[letter]?.mics;
   const seg = ticker.split("_")[1];
   return seg ? MARKET_MICS[seg.toUpperCase()] : undefined;
 }
@@ -336,6 +366,12 @@ export async function resolveTickerSymbol(
  *  - `""`           : known-unresolved (don't re-query)
  *  - `"SYMBOL"`     : resolved to a bare symbol, exchange MIC unknown
  *  - `"SYMBOL|MIC"` : resolved to a symbol on a specific exchange MIC
+ *
+ * One instrument reaches the resolver under two tickers: the CSV export's (`VUAA`, `TSM`) and the
+ * API's (`VUAAm_EQ`, `TSM_US_EQ`), with different hints. Resolved separately they can land on two
+ * listings, so trades from the export and the API's positions would never meet. So a resolution
+ * is also kept under the instrument's ISIN and currency (`isin:IE00BFMXXD54|EUR`), and that entry
+ * wins over the ticker's: whichever ticker resolves the instrument first decides its listing.
  */
 export class SymbolResolver {
   private dirty = false;
@@ -346,7 +382,18 @@ export class SymbolResolver {
   constructor(
     private readonly search: SearchFn,
     private readonly cache: Record<string, string> = {},
-  ) {}
+  ) {
+    // Entries for `VUAAm_EQ`-style tickers made before their exchange letter was read can point at
+    // another venue's listing (VUAAM on Cboe for VUAA on Milan): resolve those again.
+    for (const [ticker, value] of Object.entries(cache)) {
+      const mics = exchangeLetter(ticker) ? marketMics(ticker) : undefined;
+      const mic = parseCacheValue(value)?.exchangeMic;
+      if (mics && mic && !mics.includes(mic)) {
+        delete cache[ticker];
+        this.dirty = true;
+      }
+    }
+  }
 
   /**
    * Returns `{ symbol, exchangeMic? }` so the caller can record the MIC too.
@@ -358,19 +405,29 @@ export class SymbolResolver {
     instrument?: SymbolHints,
     onDiag?: DiagFn,
   ): Promise<Resolution | null> {
-    if (Object.prototype.hasOwnProperty.call(this.cache, ticker)) {
+    const has = (k: string) => Object.prototype.hasOwnProperty.call(this.cache, k);
+    const byIsin = isinCacheKey(instrument?.isin, instrument?.currency ?? marketCurrency(ticker));
+    if (byIsin && has(byIsin)) return parseCacheValue(this.cache[byIsin]);
+    if (has(ticker)) {
+      if (byIsin && this.cache[ticker]) {
+        this.cache[byIsin] = this.cache[ticker];
+        this.dirty = true;
+      }
       return parseCacheValue(this.cache[ticker]);
     }
-    let lookup = this.pending.get(ticker);
+    const key = byIsin ?? ticker;
+    let lookup = this.pending.get(key);
     if (!lookup) {
       lookup = resolveTicker(this.search, ticker, instrument, onDiag).then((resolved) => {
         this.cache[ticker] = formatCacheValue(resolved);
+        // An unresolved ticker says nothing about the instrument's other tickers.
+        if (byIsin && resolved) this.cache[byIsin] = this.cache[ticker];
         this.dirty = true;
-        this.pending.delete(ticker);
+        this.pending.delete(key);
         return resolved;
       });
-      lookup.catch(() => this.pending.delete(ticker));
-      this.pending.set(ticker, lookup);
+      lookup.catch(() => this.pending.delete(key));
+      this.pending.set(key, lookup);
     }
     return lookup;
   }
@@ -387,6 +444,13 @@ export class SymbolResolver {
   snapshot(): Record<string, string> {
     return this.cache;
   }
+}
+
+/** The cache key an instrument's resolution is shared under, by ISIN and currency (none without an ISIN). */
+export function isinCacheKey(isin?: string, currency?: string): string | undefined {
+  const id = isin?.trim().toUpperCase();
+  if (!id || !ISIN_RE.test(id)) return undefined;
+  return `isin:${id}|${normalizeCurrency(currency) ?? ""}`;
 }
 
 function formatCacheValue(r: Resolution | null): string {

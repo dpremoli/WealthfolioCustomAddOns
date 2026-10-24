@@ -14,6 +14,14 @@
  * - `storeNothing` makes `import` answer 200 and `success: true` while saving nothing and saying
  *   nothing about any row (the worst case: no reason anywhere).
  * - `storage.set` refuses a value above ~244 KB: "too large to sync across devices".
+ * - **Duplicates** (`activities_service.rs`, `idempotency.rs`), keyed like the host's idempotency
+ *   key (account, type, day, asset@MIC, quantity, price, amount, currency, comment): `checkImport`
+ *   marks a row matching a stored activity `duplicateOfId` and a row matching an earlier row of the
+ *   same call `duplicateOfLineNumber` (with a `_duplicate` warning). `import` skips such a row
+ *   unless it is sent with `forceImport`, and returns it marked; a forced row is stored even if it
+ *   still carries a marker, and the marker it was sent with comes back on the returned row.
+ * - Holdings apply `SPLIT` rows (ratio in `amount`) to the lots held before the split day, and
+ *   `saveMany({ deleteIds })` deletes activities.
  */
 import type { AddonContext, ActivityImport } from "@wealthfolio/addon-sdk";
 
@@ -25,6 +33,7 @@ export interface StoredActivity {
   activityType: string;
   date: Date;
   assetSymbol: string | null;
+  exchangeMic: string | null;
   quantity: number | null;
   unitPrice: number | null;
   amount: number | null;
@@ -45,6 +54,7 @@ export interface ImportCall {
 export interface FakeAccount {
   id: string;
   name: string;
+  provider?: string;
   currency?: string;
   trackingMode?: string;
   providerAccountId?: string;
@@ -105,8 +115,9 @@ export class FakeWealthfolio {
         market: { searchTicker: async (q: string) => search(q) },
         accounts: {
           getAll: async () => this.accounts.map((a) => ({ providerAccountId: "", ...a })),
-          create: async (a: { name: string; accountType?: string; currency?: string; trackingMode?: string }) => {
-            const created = { id: `acc-${this.accounts.length + 1}`, name: a.name, accountType: a.accountType, currency: a.currency, trackingMode: a.trackingMode };
+          create: async (a: Omit<FakeAccount, "id"> & Record<string, unknown>) => {
+            // Everything the add-on sent is kept (provider ids included): it is how it finds the account again.
+            const created = { ...a, id: `acc-${this.accounts.length + 1}` } as FakeAccount;
             this.accounts.push(created);
             return created;
           },
@@ -115,7 +126,11 @@ export class FakeWealthfolio {
           checkImport: async (rows: ActivityImport[]) => this.checkImport(rows),
           import: async (rows: ActivityImport[]) => this.importRows(rows),
           getAll: async (accountId?: string) => [...(this.stored.get(accountId ?? "") ?? [])],
-          saveMany: async () => ({}),
+          saveMany: async (req: { deleteIds?: string[] }) => {
+            const gone = new Set(req.deleteIds ?? []);
+            for (const [id, list] of this.stored) this.stored.set(id, list.filter((r) => !gone.has(r.id)));
+            return { deleted: [...gone] };
+          },
         },
         snapshots: { getAll: async () => [], save: async () => {}, delete: async () => {} },
         portfolio: { getHoldings: async (accountId: string) => this.holdings(accountId) },
@@ -140,10 +155,17 @@ export class FakeWealthfolio {
   holdings(accountId: string) {
     const qty = new Map<string, number>();
     let cash = 0;
-    for (const r of this.rows(accountId)) {
+    // A split scales the lots held before its day; rows of the split day come after it.
+    const order = (r: StoredActivity) => (r.activityType === "SPLIT" ? 0 : 1);
+    const rows = this.rows(accountId).sort((a, b) => {
+      const d = a.date.toISOString().slice(0, 10).localeCompare(b.date.toISOString().slice(0, 10));
+      return d !== 0 ? d : order(a) - order(b);
+    });
+    for (const r of rows) {
       const q = r.quantity ?? 0;
       if (r.assetSymbol && (r.activityType === "BUY" || r.activityType === "TRANSFER_IN")) qty.set(r.assetSymbol, (qty.get(r.assetSymbol) ?? 0) + q);
       else if (r.assetSymbol && (r.activityType === "SELL" || r.activityType === "TRANSFER_OUT")) qty.set(r.assetSymbol, (qty.get(r.assetSymbol) ?? 0) - q);
+      else if (r.assetSymbol && r.activityType === "SPLIT") qty.set(r.assetSymbol, (qty.get(r.assetSymbol) ?? 0) * (r.amount ?? 1));
       cash += this.cashEffect(r);
     }
     const securities = [...qty].filter(([, q]) => Math.abs(q) > 1e-9).map(([symbol, quantity]) => ({ holdingType: "security", instrument: { symbol }, quantity, localCurrency: "GBP" }));
@@ -180,13 +202,48 @@ export class FakeWealthfolio {
     }
   }
 
+  /** The host's idempotency key for a row as sent (the fields its key hashes). */
+  private keyOf(a: ActivityImport): string {
+    const n = (v: unknown) => (v === null || v === undefined || v === "" ? "" : String(Math.abs(Number(v))));
+    const asset = this.isAssetRow(a) ? `${a.symbol ?? ""}@${a.exchangeMic ?? ""}` : "";
+    const comment = (a.comment ?? "").split(/\s+/).filter(Boolean).join(" ");
+    return [a.accountId, a.activityType, String(a.date ?? "").slice(0, 10), asset, n(a.quantity), n(a.unitPrice), n(a.amount), a.currency ?? "", comment, n(a.fee)].join("|");
+  }
+
+  private keyOfStored(r: StoredActivity): string {
+    return this.keyOf({
+      accountId: r.accountId,
+      activityType: r.activityType as ActivityImport["activityType"],
+      date: r.date.toISOString(),
+      symbol: r.assetSymbol ?? "",
+      exchangeMic: r.exchangeMic ?? undefined,
+      quantity: r.quantity,
+      unitPrice: r.unitPrice,
+      amount: r.amount,
+      fee: r.fee,
+      currency: r.currency,
+      comment: r.comment ?? undefined,
+      isValid: true,
+      isDraft: false,
+    });
+  }
+
+  /** Stored activity ids by key, for duplicate detection. */
+  private storedKeys(): Map<string, string> {
+    const out = new Map<string, string>();
+    for (const r of this.rows()) if (!out.has(this.keyOfStored(r))) out.set(this.keyOfStored(r), r.id);
+    return out;
+  }
+
   private isAssetRow(a: ActivityImport): boolean {
     return ASSET_TYPES.has(String(a.activityType)) || (!!a.symbol && !String(a.symbol).startsWith("$CASH") && !CASH_TYPES.has(String(a.activityType)));
   }
 
   private checkImport(rows: ActivityImport[]): ActivityImport[] {
     this.checkedIds.push(rows.map((a) => a.id));
-    return rows.map((a) => {
+    const stored = this.storedKeys();
+    const firstInBatch = new Map<string, number>();
+    return rows.map((a, i) => {
       const out: ActivityImport = { ...a, id: uuid(), isValid: true, errors: undefined, warnings: undefined };
       if (Number.isNaN(Date.parse(String(a.date)))) {
         out.isValid = false;
@@ -207,19 +264,31 @@ export class FakeWealthfolio {
       if (why) {
         out.isValid = false;
         out.errors = { general: [why] };
+        return out;
       }
+      // Duplicates, as the host's check marks them (on the filled-in row).
+      const key = this.keyOf(out);
+      const existing = stored.get(key);
+      if (existing) {
+        out.duplicateOfId = existing;
+        out.warnings = { _duplicate: ["Duplicate activity already exists"] };
+      } else if (firstInBatch.has(key)) {
+        out.duplicateOfLineNumber = firstInBatch.get(key)! + 1;
+        out.warnings = { _duplicate: [`Duplicate of line ${firstInBatch.get(key)! + 1} in this import batch`] };
+      } else firstInBatch.set(key, i);
       return out;
     });
   }
 
   private importRows(rows: ActivityImport[]) {
     const total = rows.length;
+    let duplicates = 0;
     const result = (activities: ActivityImport[], stored: number, success: boolean, runId: string, error?: string) => {
       this.importCalls.push({ sent: total, sentIds: rows.map((a) => a.id), stored, success, importRunId: runId });
       return {
         activities,
         importRunId: runId,
-        summary: { total, imported: stored, skipped: total - stored, duplicates: 0, assetsCreated: 0, success, errorMessage: error },
+        summary: { total, imported: stored, skipped: total - stored, duplicates, assetsCreated: 0, success, errorMessage: error },
       };
     };
 
@@ -246,15 +315,35 @@ export class FakeWealthfolio {
 
     if (this.storeNothing) return result(checked, 0, true, "");
 
-    // Writer policy: refuses some rows, stores the rest.
+    // Writer policy: refuses some rows, stores the rest; then duplicates are left out unless forced
+    // (a forced row is stored and keeps whatever marker it was sent with).
     const toStore: ActivityImport[] = [];
-    for (const a of checked) {
+    const stored = this.storedKeys();
+    const firstInBatch = new Map<string, number>();
+    checked.forEach((a, i) => {
       const why = this.policy(a);
       if (why) {
         a.isValid = false;
         a.errors = { general: [why] };
-      } else toStore.push(a);
-    }
+        return;
+      }
+      const key = this.keyOf(a);
+      const forced = (a as ActivityImport & { forceImport?: boolean }).forceImport === true;
+      if (!forced && stored.has(key)) {
+        a.duplicateOfId = stored.get(key);
+        a.warnings = { _duplicate: ["Duplicate activity already exists"] };
+        duplicates++;
+        return;
+      }
+      if (!forced && firstInBatch.has(key)) {
+        a.duplicateOfLineNumber = firstInBatch.get(key)! + 1;
+        a.warnings = { _duplicate: [`Duplicate of line ${firstInBatch.get(key)! + 1} in this import batch`] };
+        duplicates++;
+        return;
+      }
+      if (!firstInBatch.has(key)) firstInBatch.set(key, i);
+      toStore.push(a);
+    });
     const runId = toStore.length > 0 ? uuid() : "";
     for (const a of toStore) {
       const list = this.stored.get(a.accountId) ?? [];
@@ -264,6 +353,7 @@ export class FakeWealthfolio {
         activityType: String(a.activityType),
         date: new Date(String(a.date)),
         assetSymbol: this.isAssetRow(a) ? (a.symbol ?? null) : null,
+        exchangeMic: this.isAssetRow(a) ? (a.exchangeMic ?? null) : null,
         quantity: num(a.quantity),
         unitPrice: num(a.unitPrice),
         amount: num(a.amount),

@@ -51,6 +51,30 @@ describe("compareWithTrading212", () => {
     ]);
   });
 
+  it("pairs a position held under another listing's symbol when only their quantities match", () => {
+    const v = compareWithTrading212({
+      positions: [
+        { ticker: "VUAAm_EQ", symbol: "VUAAM", quantity: 12.5 },
+        { ticker: "BNTX_US_EQ", symbol: "BNTX", quantity: 3 },
+        { ticker: "AAA_US_EQ", symbol: "AAA", quantity: 1 },
+        { ticker: "BBB_US_EQ", symbol: "BBB", quantity: 1 },
+      ],
+      cash: 0,
+      accountCurrency: "EUR",
+      holdings: [security("VUAA", 12.5), security("22UA", 3), security("CCC", 1)],
+    });
+    expect(v.notes).toEqual([
+      "VUAAM (VUAAm_EQ) is held in Wealthfolio as VUAA: the same 12.5 shares under another listing.",
+      "BNTX (BNTX_US_EQ) is held in Wealthfolio as 22UA: the same 3 shares under another listing.",
+    ]);
+    // Two positions of 1 share each and one holding of 1: which is which is unknown, so not paired.
+    expect(v.mismatches).toEqual([
+      "AAA (AAA_US_EQ): Trading 212 holds 1, Wealthfolio 0.",
+      "BBB (BBB_US_EQ): Trading 212 holds 1, Wealthfolio 0.",
+      "CCC: Wealthfolio holds 1, Trading 212 none.",
+    ]);
+  });
+
   describe("cash in several currencies (an account with a GBP and a USD wallet)", () => {
     const rates = [
       { fromCurrency: "GBP", toCurrency: "EUR", rate: 1.15 },

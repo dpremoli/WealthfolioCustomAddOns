@@ -351,7 +351,9 @@ describe("useSync — JSON incremental path", () => {
     });
     const imported = importFn.mock.calls.flatMap((c) => c[0]);
     expect(imported.map((a) => a.id)).toEqual(["t212-txn-D1", "t212-txn-D2"]);
-    expect(imported.every((a) => a.forceImport)).toBe(true);
+    // Only the row Wealthfolio would drop as a duplicate is forced, and its marker is taken off.
+    expect(imported.map((a) => a.forceImport)).toEqual([false, true]);
+    expect(imported.some((a) => a.duplicateOfId || a.duplicateOfLineNumber != null)).toBe(false);
   });
 
   it("isolates imported refs per connection (same order id in two accounts)", async () => {

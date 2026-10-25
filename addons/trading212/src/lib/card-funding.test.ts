@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ActivityImport } from "@wealthfolio/addon-sdk";
-import { CARD_FUNDING_COMMENT, fundingForExisting, isFundingId, orphanFundingLegs, withCardFunding } from "./card-funding";
+import { CARD_FUNDING_COMMENT, fundingForExisting, isFundingId, orphanFundingLegs, refundTwins, withCardFunding } from "./card-funding";
 
 const card = (activityType: string, amount: number): ActivityImport => ({
   id: "t212-txn-C1",
@@ -101,5 +101,25 @@ describe("orphanFundingLegs", () => {
 
   it("ignores transfers that are not card funding", () => {
     expect(orphanFundingLegs([{ ...leg("t", "card", "TRANSFER_IN", "2026-01-02", 5), comment: "Moved" }], ["card", "inv"])).toEqual([]);
+  });
+});
+
+describe("refundTwins", () => {
+  const at = (id: string, activityType: string, comment = "AMAZON · Shopping", amount = 8.54) => ({ id, activityType, date: "2025-06-02T15:00:00Z", amount, currency: "GBP", comment });
+  it("deletes the DEPOSIT beside an older CREDIT, and the funding pair beyond one per refund", () => {
+    // Older CREDIT funded by nothing, 2.6.4 DEPOSIT with its pair: the pair now funds the CREDIT.
+    expect(refundTwins([at("c", "CREDIT"), at("d", "DEPOSIT"), at("o", "TRANSFER_OUT", "Card funding")], [at("i", "TRANSFER_IN", "Card funding")])).toEqual(["d"]);
+    // Both had a pair: one pair goes with the DEPOSIT.
+    expect(
+      refundTwins(
+        [at("c", "CREDIT"), at("d", "DEPOSIT"), at("o1", "TRANSFER_OUT", "Card funding"), at("o2", "TRANSFER_OUT", "Card funding")],
+        [at("i1", "TRANSFER_IN", "Card funding"), at("i2", "TRANSFER_IN", "Card funding")],
+      ),
+    ).toEqual(["d", "o1", "i1"]);
+  });
+
+  it("leaves refunds of one kind alone, and twins of other days or amounts", () => {
+    expect(refundTwins([at("d1", "DEPOSIT"), at("d2", "DEPOSIT")], [])).toEqual([]);
+    expect(refundTwins([at("c", "CREDIT"), at("d", "DEPOSIT", "x", 2.96)], [])).toEqual([]);
   });
 });

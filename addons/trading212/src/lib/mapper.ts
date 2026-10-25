@@ -1,5 +1,5 @@
 import type { ActivityImport, SnapshotHoldingInput } from "@wealthfolio/addon-sdk";
-import { cashSymbol, round2 } from "@wf-addons/kit";
+import { cashSymbol, minorUnit, round2 } from "@wf-addons/kit";
 import type { DividendItem, HistoricalOrder, Position, TransactionItem } from "../types";
 
 type ActivityType = ActivityImport["activityType"];
@@ -39,6 +39,32 @@ export function accountPerActivityRate(
   const direct = Math.abs(Math.log(t212Rate / implied));
   const inverted = Math.abs(Math.log(inverse / implied));
   return roundTo(direct < inverted ? t212Rate : inverse, 10);
+}
+
+/** A trade's price, charges, currency and rate (account currency per unit of `currency`). */
+export interface TradeTerms {
+  unitPrice: number;
+  fee: number;
+  currency: string;
+  fxRate: number | undefined;
+}
+
+/**
+ * A trade priced in a minor unit (GBX: pence) restated in its major unit (GBP). Wealthfolio
+ * divides a GBX row's price and fee by 100 on import but keeps its rate as sent, a rate per penny,
+ * so the trade would settle at a hundredth of its cost (an RR buy of €123.97 cost €1.24). Here the
+ * rate is per pound, and there is none when pounds are the account's own currency.
+ */
+export function inMajorUnits(t: TradeTerms, accountCurrency: string): TradeTerms {
+  const minor = minorUnit(t.currency);
+  if (!minor) return t;
+  const same = minor.major.toUpperCase() === accountCurrency.toUpperCase();
+  return {
+    unitPrice: roundTo(t.unitPrice / minor.factor, 10),
+    fee: roundTo(t.fee / minor.factor, 8),
+    currency: minor.major,
+    fxRate: same || t.fxRate === undefined ? undefined : roundTo(t.fxRate * minor.factor, 10),
+  };
 }
 
 /**
@@ -104,10 +130,18 @@ export function mapOrderToActivity(
       : undefined;
   const fxRate = crossCurrency ? accountPerActivityRate(wallet?.fxRate, implied) : undefined;
 
-  const fee = chargesInActivityCurrency(
-    (wallet?.taxes ?? []).map((t) => ({ amount: t.quantity ?? 0, currency: t.currency ?? wallet?.currency })),
-    currency,
-    fxRate,
+  const terms = inMajorUnits(
+    {
+      unitPrice,
+      currency,
+      fxRate,
+      fee: chargesInActivityCurrency(
+        (wallet?.taxes ?? []).map((t) => ({ amount: t.quantity ?? 0, currency: t.currency ?? wallet?.currency })),
+        currency,
+        fxRate,
+      ),
+    },
+    wallet?.currency ?? currency,
   );
 
   return {
@@ -117,10 +151,10 @@ export function mapOrderToActivity(
     date,
     symbol,
     quantity,
-    unitPrice,
-    fee: fee > 0 ? fee : undefined,
-    currency,
-    fxRate,
+    unitPrice: terms.unitPrice,
+    fee: terms.fee > 0 ? terms.fee : undefined,
+    currency: terms.currency,
+    fxRate: terms.fxRate,
     isValid: true,
     isDraft: false,
     comment: o.instrument?.name || undefined,

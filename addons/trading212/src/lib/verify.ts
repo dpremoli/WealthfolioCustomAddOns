@@ -64,11 +64,6 @@ export function convertRate(rates: RateLike[], from: string, to: string): number
 const sameQuantity = (a: number, b: number) => Math.abs(a - b) <= 1e-4 + 1e-5 * Math.abs(b);
 /** Cash is the sum of thousands of rows rounded to cents. */
 const sameCash = (a: number, b: number) => Math.abs(a - b) <= 0.05 + 5e-4 * Math.abs(b);
-/**
- * Cash in several currencies is compared as one total, converted at Wealthfolio's current rates,
- * against Trading 212's total at its own: they differ by the rates' difference, so allow a margin.
- */
-const sameConvertedCash = (a: number, b: number) => Math.abs(a - b) <= 1 + 0.01 * Math.abs(b);
 
 /**
  * Wealthfolio may keep an asset under its canonical symbol (`RR` for `RR.L`), so symbols are
@@ -82,15 +77,14 @@ const fmt = (n: number) => String(Math.round(n * 1e6) / 1e6);
 /**
  * Compares Wealthfolio's holdings for the account (`portfolio.getHoldings`) with Trading 212's
  * positions and cash. Positions resolving to one symbol are summed on both sides; Trading 212's
- * cash (available, reserved for orders and in pies) is all in the account currency, so any other
- * currency Wealthfolio holds is a mismatch too (a deposit that was never converted, say).
+ * cash (available, reserved for orders and in pies) is its account-currency wallet, compared with
+ * Wealthfolio's cash in that currency. Other wallets are noted, not compared.
  */
 export function compareWithTrading212(input: {
   positions: ResolvedPosition[];
   cash: number;
   accountCurrency: string;
   holdings: Holding[];
-  rates?: RateLike[];
 }): Omit<Verification, "checkedAt" | "settled"> & { gaps: PositionGap[] } {
   const mismatches: string[] = [];
   const notes: string[] = [];
@@ -160,35 +154,17 @@ export function compareWithTrading212(input: {
     }
   }
 
-  // Trading 212 reports one cash figure, in the account currency, for every wallet the account has
-  // (EUR plus the GBP and USD it was topped up in). With only account-currency cash the two figures
-  // are compared directly; with other wallets Wealthfolio's are converted into the account currency.
+  // Trading 212's cash figure is the account-currency wallet alone: an EUR account's 1,822.43
+  // matched its EUR wallet, with 206.92 GBP held beside it. So that wallet is compared, and the
+  // other wallets Wealthfolio holds are noted, not added in at some rate.
   const ccy = input.accountCurrency.toUpperCase();
   const haveCash = cash.get(ccy) ?? 0;
-  const others = [...cash].filter(([c, amount]) => c !== ccy && !sameCash(amount, 0));
-  if (others.length === 0) {
-    if (!sameCash(haveCash, input.cash)) {
-      mismatches.push(`Cash ${ccy}: Trading 212 ${round2(input.cash)}, Wealthfolio ${round2(haveCash)}.`);
-    }
-  } else {
-    let total = haveCash;
-    const parts = [`${ccy} ${round2(haveCash)}`];
-    let convertible = true;
-    for (const [c, amount] of others) {
-      const rate = convertRate(input.rates ?? [], c, ccy);
-      parts.push(`${c} ${round2(amount)}`);
-      if (rate === null) {
-        convertible = false;
-        notes.push(`Cash in ${c} (${round2(amount)}) was not compared: Wealthfolio has no ${c}→${ccy} exchange rate.`);
-      } else {
-        total += amount * rate;
-      }
-    }
-    if (convertible && !sameConvertedCash(total, input.cash)) {
-      mismatches.push(
-        `Cash: Trading 212 ${round2(input.cash)} ${ccy}, Wealthfolio ${round2(total)} ${ccy} ` +
-          `(${parts.join(" + ")}, converted at Wealthfolio's rates; allowed to differ by 1% for the rates).`,
-      );
+  if (!sameCash(haveCash, input.cash)) {
+    mismatches.push(`Cash ${ccy}: Trading 212 ${round2(input.cash)}, Wealthfolio ${round2(haveCash)}.`);
+  }
+  for (const [c, amount] of cash) {
+    if (c !== ccy && !sameCash(amount, 0)) {
+      notes.push(`Cash in ${c} (${round2(amount)}) was not compared: Trading 212's cash figure is the ${ccy} wallet only.`);
     }
   }
   return { ok: mismatches.length === 0, mismatches, notes, positions: input.positions.length, gaps };

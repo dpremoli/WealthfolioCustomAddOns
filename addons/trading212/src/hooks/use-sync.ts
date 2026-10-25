@@ -47,8 +47,9 @@ import { cardSpendingRules } from "../lib/spending-category";
 import { SymbolResolver, importAssetFields, type ResolveDiag } from "../lib/symbol-resolver";
 import { ActivityImporter, describeRejected, type ImportUnit, type RejectedRow } from "../lib/importer";
 import { RefusedRowsStore } from "../lib/refused";
-import { CARD_FUNDING_COMMENT, fundingForExisting, isFundingId, orphanFundingLegs, withCardFunding } from "../lib/card-funding";
+import { CARD_FUNDING_COMMENT, fundingForExisting, isFundingId, orphanFundingLegs, refundTwins, withCardFunding } from "../lib/card-funding";
 import { foldMonthlyInterest } from "../lib/interest";
+import { healPennyRates, type StoredTrade } from "../lib/minor-units";
 import { healSplitRatios, repairSplits, type DividendShares, type PositionGap } from "../lib/split-repair";
 import {
   describeRow,
@@ -460,6 +461,22 @@ async function fundExistingCardRows(
   const withAccount = (accountId: string, rows: ExistingActivityLike[]) =>
     (rows as (ExistingActivityLike & { id?: string })[]).map((r) => ({ ...r, accountId }));
   const own: [string, string] = [cardAccountId, mainAccountId];
+  // Refunds 2.6.4 imported again as DEPOSIT beside an older version's CREDIT go first, with any
+  // funding pair beyond one per refund.
+  const twins = refundTwins(
+    (await importer.existingIn(cardAccountId)) as (ExistingActivityLike & { id?: string })[],
+    (await importer.existingIn(mainAccountId)) as (ExistingActivityLike & { id?: string })[],
+  );
+  if (twins.length > 0) {
+    try {
+      await ctx.api.activities.saveMany({ deleteIds: twins });
+      importer.forget(cardAccountId, twins);
+      importer.forget(mainAccountId, twins);
+      log.push(`Card refunds: deleted ${twins.length} row${twins.length === 1 ? "" : "s"} 2.6.4 had imported a second time (a refund an older version stored as CREDIT, and its funding).`);
+    } catch (e) {
+      log.push(`Card refunds: could not delete ${twins.length} refund rows imported twice (${errDetail(e)}).`);
+    }
+  }
   let legs = [
     ...withAccount(cardAccountId, await importer.existingIn(cardAccountId)),
     ...withAccount(mainAccountId, await importer.existingIn(mainAccountId)),
@@ -756,6 +773,10 @@ async function syncOne(
     await healLedger(ctx, conn.id, accountId, importer, log);
     // Splits sent in pence before 2.6.4 were stored at a hundredth of their ratio: put them right.
     await healSplitRatios(ctx, importer, accountId, log);
+    // Trades priced in pence before 2.6.5 kept a rate per penny: put their rate right.
+    if (account?.currency) {
+      await healPennyRates(ctx, (await importer.existingIn(accountId)) as StoredTrade[], accountId, account.currency, log);
+    }
     const { lastSync: since, backfillCheckpoint, backfillStartedAt } = await getSyncState(ctx, conn.id);
     const syncStartedAt = new Date().toISOString();
     const importedRefs = await getImportedRefs(ctx, conn.id);
@@ -1178,21 +1199,11 @@ async function verifyAccount(
   const summary = await client.getAccountSummary();
   const positions = await resolvePositions(await client.getPositions(), resolver);
   const holdings = await ctx.api.portfolio.getHoldings(accountId);
-  // Wallets in other currencies are converted into the account currency; without rates (or the
-  // permission to read them) those wallets are noted as not compared rather than failed.
-  const rates = await (async () => {
-    try {
-      return await ctx.api.exchangeRates.getAll();
-    } catch {
-      return [];
-    }
-  })();
   const { gaps, ...cmp } = compareWithTrading212({
     positions,
     cash: trading212Cash(summary),
     accountCurrency: summary.currency || "GBP",
     holdings,
-    rates,
   });
   return { verification: { ...cmp, checkedAt: new Date().toISOString(), settled }, gaps };
 }

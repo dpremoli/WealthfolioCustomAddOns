@@ -22,10 +22,13 @@
  *   still carries a marker, and the marker it was sent with comes back on the returned row.
  * - A row in a minor-unit currency (GBX) is stored in its major unit: its price, amount and fee
  *   divided by 100, a SPLIT's ratio included (`activities_service.rs`, `fx/currency.rs`).
+ * - A row in another currency with an `fxRate` settles in the account's currency at that rate, kept
+ *   as sent (a GBX row's rate is not converted with its price); cash is held per currency.
  * - Holdings apply `SPLIT` rows (ratio in `amount`) to the lots held before the split day, and
- *   `saveMany({ deleteIds })` deletes activities.
+ *   `saveMany` deletes activities (`deleteIds`) and patches them (`updates`).
  */
 import type { AddonContext, ActivityImport } from "@wealthfolio/addon-sdk";
+import { minorUnit } from "../money";
 
 export const STORAGE_CAP_BYTES = 244 * 1024;
 
@@ -41,6 +44,8 @@ export interface StoredActivity {
   amount: number | null;
   fee: number | null;
   currency: string;
+  /** Account currency per unit of `currency`, as sent. */
+  fxRate?: number | null;
   comment: string | null;
 }
 
@@ -68,8 +73,6 @@ const ASSET_TYPES = new Set(["BUY", "SELL", "DIVIDEND", "SPLIT"]);
 
 let counter = 0;
 const uuid = () => `00000000-0000-4000-8000-${(++counter).toString(16).padStart(12, "0")}`;
-// Minor-unit currencies the host stores in their major unit: [major, units per major].
-const MINOR_UNITS: Record<string, [string, number]> = { GBX: ["GBP", 100], ZAC: ["ZAR", 100], ILA: ["ILS", 100], KWF: ["KWD", 1000], USX: ["USD", 100] };
 const num = (v: unknown): number | null => (v === null || v === undefined || v === "" ? null : Number(v));
 const bytes = (s: string) => new TextEncoder().encode(s).length;
 
@@ -89,6 +92,8 @@ export class FakeWealthfolio {
   validation: (a: ActivityImport) => string | null = () => null;
   /** Returns a reason to make only `import`'s own validation fail a row (the whole call stores nothing). */
   importValidation: (a: ActivityImport) => string | null = () => null;
+  /** Wealthfolio's current exchange rates (`exchangeRates.getAll`). */
+  rates: { fromCurrency: string; toCurrency: string; rate: number }[] = [];
   /** Makes `import` answer 200 and store nothing, with no reason on any row. */
   storeNothing = false;
   readonly ctx: AddonContext;
@@ -130,14 +135,30 @@ export class FakeWealthfolio {
           checkImport: async (rows: ActivityImport[]) => this.checkImport(rows),
           import: async (rows: ActivityImport[]) => this.importRows(rows),
           getAll: async (accountId?: string) => [...(this.stored.get(accountId ?? "") ?? [])],
-          saveMany: async (req: { deleteIds?: string[] }) => {
+          saveMany: async (req: { deleteIds?: string[]; updates?: Record<string, unknown>[] }) => {
             const gone = new Set(req.deleteIds ?? []);
             for (const [id, list] of this.stored) this.stored.set(id, list.filter((r) => !gone.has(r.id)));
-            return { deleted: [...gone] };
+            // An update patches the fields it carries (the host's patch semantics); a missing id fails.
+            const errors: { id?: string; action: string; message: string }[] = [];
+            for (const u of req.updates ?? []) {
+              const row = this.rows().find((r) => r.id === u.id);
+              if (!row) {
+                errors.push({ id: String(u.id), action: "update", message: "Activity not found" });
+                continue;
+              }
+              if (u.fxRate !== undefined) row.fxRate = num(u.fxRate);
+              if (u.amount !== undefined) row.amount = num(u.amount);
+              if (u.unitPrice !== undefined) row.unitPrice = num(u.unitPrice);
+              if (u.fee !== undefined) row.fee = num(u.fee);
+              if (u.quantity !== undefined) row.quantity = num(u.quantity);
+              if (typeof u.currency === "string") row.currency = u.currency;
+            }
+            return { deleted: [...gone], errors };
           },
         },
         snapshots: { getAll: async () => [], save: async () => {}, delete: async () => {} },
         portfolio: { getHoldings: async (accountId: string) => this.holdings(accountId) },
+        exchangeRates: { getAll: async () => [...this.rates] },
         logger: { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} },
       },
     } as unknown as AddonContext;
@@ -158,7 +179,8 @@ export class FakeWealthfolio {
   /** The securities Wealthfolio derives from the stored rows, and the cash (account currency). */
   holdings(accountId: string) {
     const qty = new Map<string, number>();
-    let cash = 0;
+    const base = this.currencyOf(accountId);
+    const cash = new Map<string, number>([[base, 0]]);
     // A split scales the lots held before its day; rows of the split day come after it.
     const order = (r: StoredActivity) => (r.activityType === "SPLIT" ? 0 : 1);
     const rows = this.rows(accountId).sort((a, b) => {
@@ -170,14 +192,35 @@ export class FakeWealthfolio {
       if (r.assetSymbol && (r.activityType === "BUY" || r.activityType === "TRANSFER_IN")) qty.set(r.assetSymbol, (qty.get(r.assetSymbol) ?? 0) + q);
       else if (r.assetSymbol && (r.activityType === "SELL" || r.activityType === "TRANSFER_OUT")) qty.set(r.assetSymbol, (qty.get(r.assetSymbol) ?? 0) - q);
       else if (r.assetSymbol && r.activityType === "SPLIT") qty.set(r.assetSymbol, (qty.get(r.assetSymbol) ?? 0) * (r.amount ?? 1));
-      cash += this.cashEffect(r);
+      const { currency, amount } = this.settlement(r, base);
+      cash.set(currency, (cash.get(currency) ?? 0) + amount);
     }
-    const securities = [...qty].filter(([, q]) => Math.abs(q) > 1e-9).map(([symbol, quantity]) => ({ holdingType: "security", instrument: { symbol }, quantity, localCurrency: "GBP" }));
-    return [...securities, { holdingType: "cash", instrument: undefined as { symbol: string } | undefined, quantity: cash, localCurrency: "GBP" }];
+    const securities = [...qty].filter(([, q]) => Math.abs(q) > 1e-9).map(([symbol, quantity]) => ({ holdingType: "security", instrument: { symbol }, quantity, localCurrency: base }));
+    const wallets = [...cash].map(([currency, quantity]) => ({ holdingType: "cash", instrument: undefined as { symbol: string } | undefined, quantity, localCurrency: currency }));
+    return [...securities, ...wallets];
   }
 
-  cash(accountId: string): number {
-    return this.rows(accountId).reduce((n, r) => n + this.cashEffect(r), 0);
+  /** The account's cash in `currency` (its own currency by default). */
+  cash(accountId: string, currency = this.currencyOf(accountId)): number {
+    const base = this.currencyOf(accountId);
+    return this.rows(accountId).reduce((n, r) => {
+      const s = this.settlement(r, base);
+      return s.currency === currency ? n + s.amount : n;
+    }, 0);
+  }
+
+  private currencyOf(accountId: string): string {
+    return this.accounts.find((a) => a.id === accountId)?.currency ?? "GBP";
+  }
+
+  /**
+   * Where a row's cash lands: a row in another currency with a rate settles in the account's
+   * currency at that rate (what makes a per-penny rate cost a hundredth); otherwise in its own.
+   */
+  private settlement(r: StoredActivity, base: string): { currency: string; amount: number } {
+    const amount = this.cashEffect(r);
+    if (r.currency !== base && r.fxRate) return { currency: base, amount: amount * r.fxRate };
+    return { currency: r.currency, amount };
   }
 
   private cashEffect(r: StoredActivity): number {
@@ -209,12 +252,12 @@ export class FakeWealthfolio {
   /** The host's idempotency key for a row as sent (the fields its key hashes). */
   private keyOf(a: ActivityImport): string {
     // In major units, as the host's key is (a GBX row matches the GBP row it was stored as).
-    const minor = MINOR_UNITS[a.currency === "GBp" ? "GBX" : (a.currency ?? "").toUpperCase()];
-    const n = (v: unknown) => (v === null || v === undefined || v === "" ? "" : String(Math.abs(Number(v)) / (minor?.[1] ?? 1)));
+    const minor = minorUnit(a.currency ?? "");
+    const n = (v: unknown) => (v === null || v === undefined || v === "" ? "" : String(Math.abs(Number(v)) / (minor?.factor ?? 1)));
     const q = (v: unknown) => (v === null || v === undefined || v === "" ? "" : String(Math.abs(Number(v))));
     const asset = this.isAssetRow(a) ? `${a.symbol ?? ""}@${a.exchangeMic ?? ""}` : "";
     const comment = (a.comment ?? "").split(/\s+/).filter(Boolean).join(" ");
-    const currency = minor ? minor[0] : (a.currency ?? "");
+    const currency = minor ? minor.major : (a.currency ?? "");
     return [a.accountId, a.activityType, String(a.date ?? "").slice(0, 10), asset, q(a.quantity), n(a.unitPrice), n(a.amount), currency, comment, n(a.fee)].join("|");
   }
 
@@ -356,9 +399,10 @@ export class FakeWealthfolio {
     for (const a of toStore) {
       const list = this.stored.get(a.accountId) ?? [];
       // Like Wealthfolio, a minor-unit row (GBX) is stored in its major unit: price, amount and fee
-      // divided by 100, whatever the row is (a SPLIT's ratio included).
-      const minor = MINOR_UNITS[a.currency === "GBp" ? "GBX" : (a.currency ?? "").toUpperCase()];
-      const unit = (v: unknown) => (minor && num(v) !== null ? num(v)! / minor[1] : num(v));
+      // divided by 100, whatever the row is (a SPLIT's ratio included). The rate is kept as sent,
+      // so a rate per penny values the row at a hundredth.
+      const minor = minorUnit(a.currency ?? "");
+      const unit = (v: unknown) => (minor && num(v) !== null ? num(v)! / minor.factor : num(v));
       list.push({
         id: uuid(), // the host keeps no id of ours
         accountId: a.accountId,
@@ -370,7 +414,8 @@ export class FakeWealthfolio {
         unitPrice: unit(a.unitPrice),
         amount: unit(a.amount),
         fee: unit(a.fee),
-        currency: minor ? minor[0] : (a.currency ?? "GBP"),
+        currency: minor ? minor.major : (a.currency ?? "GBP"),
+        fxRate: num(a.fxRate),
         comment: a.comment ?? null,
       });
       this.stored.set(a.accountId, list);

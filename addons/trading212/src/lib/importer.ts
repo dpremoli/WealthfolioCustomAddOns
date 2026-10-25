@@ -41,14 +41,18 @@ export interface ImportOutcome {
 
 type Progress = (done: number, total: number) => void;
 
-/** What a card row is for matching: its day, type, amount and currency — not the merchant text. */
-const CARD_TYPES = new Set(["WITHDRAWAL", "DEPOSIT", "INTEREST"]);
+/**
+ * What a card row is for matching: its day, kind, amount and currency — not the merchant text.
+ * Versions before 2.6.4 stored a card refund as CREDIT, later ones as DEPOSIT: one kind of row.
+ */
+const CARD_TYPES = new Set(["WITHDRAWAL", "DEPOSIT", "CREDIT", "INTEREST"]);
+const cardKind = (type: string) => (type === "CREDIT" ? "DEPOSIT" : type);
 const FUNDING_COMMENT = "Card funding";
 type CardLike = { activityType: string; date?: Date | string | null; amount?: number | string | null; currency?: string | null };
 function cardKey(a: CardLike): string {
   const day = (a.date instanceof Date ? a.date.toISOString() : String(a.date ?? "")).slice(0, 10);
   const amount = Math.round(Math.abs(Number(a.amount ?? 0)) * 100) / 100;
-  return [a.activityType, day, amount.toFixed(2), (a.currency ?? "").toUpperCase()].join("|");
+  return [cardKind(String(a.activityType)), day, amount.toFixed(2), (a.currency ?? "").toUpperCase()].join("|");
 }
 const isCardRow = (a: { activityType: string; comment?: string | null }) =>
   CARD_TYPES.has(String(a.activityType)) && a.comment !== FUNDING_COMMENT;

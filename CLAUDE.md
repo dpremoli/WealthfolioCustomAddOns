@@ -44,7 +44,9 @@ Sandbox rules that bite:
   `import` stores a forced row but returns it still marked. Judge a row by `forceImport`, never by
   the marker, and force only a row your own count proves new (never one the account already has).
 - Wealthfolio divides price, amount and fee of a minor-unit row (GBX/GBp, ZAc, ILA…) by 100 on
-  import, whatever its type: send a `SPLIT` (ratio in `amount`) in `majorCurrency(ccy)`.
+  import, whatever its type, but keeps `fxRate` as sent: send such rows in the major unit
+  (`minorUnit`/`majorCurrency`), a `SPLIT` (ratio in `amount`) and a trade (price ÷ 100, rate per
+  pound) alike.
 
 Releasing: `pnpm bump <addon> <patch|minor|major>` and merge to main — `release.yml` publishes
 every add-on whose `<addon>-v<version>` tag is missing (see `tooling/release-plan.mjs`). Bump in

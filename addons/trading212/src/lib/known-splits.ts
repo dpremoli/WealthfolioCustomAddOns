@@ -38,4 +38,7 @@ export const KNOWN_SPLITS: KnownSplit[] = [
   // on 2021-09-06. With no trades between June and 2021-07-29, any date from 2021-07-22 to
   // 2021-07-29 replays to the same quantity (0.321687, Trading 212's position).
   { isin: "GB00BNNTLN49", date: "2021-07-26", ratio: 2 / 3, name: "Pennon (2-for-3 consolidation)" },
+  // Brooklyn ImmunoTherapeutics became Eterna Therapeutics with a 1-for-20 reverse split effective
+  // 2022-10-17 (its SEC 8-K and 10-Q); Trading 212's export has no row for it.
+  { isin: "US1140824079", date: "2022-10-17", ratio: 1 / 20, name: "Eterna Therapeutics (1-for-20 reverse split)" },
 ];

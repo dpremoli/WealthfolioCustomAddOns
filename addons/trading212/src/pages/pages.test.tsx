@@ -224,6 +224,29 @@ describe("pages (smoke)", () => {
     expect(screen.getByText(/Full backfill \(no previous sync\)/)).toBeTruthy();
   });
 
+  it("dashboard: a sync that failed still shows its Log tab, open, since the error points at it", async () => {
+    const saved = {
+      connectionId: "c1", accountId: "acc-1", accountName: "T212 Invest", imported: 40, duplicates: 0, unresolved: 0,
+      breakdown: { BUY: 40 },
+      log: ["Import: 40 imported, 0 duplicates, 0 not imported.", "Does not match Trading 212 (1 difference):", "  Cash EUR: Trading 212 1822.43, Wealthfolio 2400.95."],
+      finishedAt: "2026-10-24T00:00:00.000Z",
+      error: "1 difference from Trading 212 (see the log).",
+    };
+    const { ctx } = makeCtx({
+      storage: [
+        ["t212_connections", JSON.stringify([{ id: "c1", name: "T212 Invest", keyIdLast4: "1234", accountId: "acc-1", kind: "invest" }])],
+        ["t212_settings", JSON.stringify({ env: "live" })],
+        ["t212_last_result_c1", JSON.stringify(saved)],
+      ],
+    });
+    renderPage(DashboardPage, ctx);
+
+    await waitFor(() => expect(screen.getByText("1 difference from Trading 212 (see the log).")).toBeTruthy());
+    const tab = screen.getByRole("tab", { name: "Log" });
+    expect(tab.hasAttribute("disabled") || tab.getAttribute("aria-disabled") === "true").toBe(false);
+    expect(screen.getByText(/Cash EUR: Trading 212 1822\.43, Wealthfolio 2400\.95\./)).toBeTruthy();
+  });
+
   it("dashboard: no card account card while card extraction is off", async () => {
     const { ctx } = dashboardCtx(false);
     renderPage(DashboardPage, ctx);

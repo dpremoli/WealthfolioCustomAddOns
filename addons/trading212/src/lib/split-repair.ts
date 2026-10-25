@@ -86,6 +86,9 @@ export function describeRatio(ratio: number): string {
     const a = Math.round(ratio * b);
     if (a >= 1 && Math.abs(ratio - a / b) < 1e-9) return `${a}:${b}`;
   }
+  // A reverse split of more than 1-for-12 (1:20, 1:100).
+  const inverse = Math.round(1 / ratio);
+  if (inverse > 1 && Math.abs(ratio - 1 / inverse) < 1e-9) return `1:${inverse}`;
   return `×${String(Math.round(ratio * 1e6) / 1e6)}`;
 }
 

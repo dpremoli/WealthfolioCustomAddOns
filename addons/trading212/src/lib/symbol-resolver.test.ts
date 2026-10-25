@@ -7,6 +7,8 @@ import {
   isNonSecurity,
   marketCurrency,
   marketMics,
+  exchangeLetter,
+  isinCacheKey,
   normalizeCurrency,
   parseBaseSymbol,
   pickBestSymbol,
@@ -32,6 +34,39 @@ describe("parseBaseSymbol", () => {
   it("extracts the first segment of a T212 ticker", () => {
     expect(parseBaseSymbol("AAPL_US_EQ")).toBe("AAPL");
     expect(parseBaseSymbol("VUSA")).toBe("VUSA");
+  });
+
+  it("drops the lowercase exchange letter of a European listing", () => {
+    expect(parseBaseSymbol("VUAAm_EQ")).toBe("VUAA");
+    expect(parseBaseSymbol("RBl_EQ")).toBe("RB");
+    expect(parseBaseSymbol("22UAd_EQ")).toBe("22UA");
+  });
+});
+
+describe("Trading 212 exchange letters", () => {
+  it("map to the listing's MICs, and to a currency where the venue has one", () => {
+    expect(exchangeLetter("VUAAm_EQ")).toBe("m");
+    expect(exchangeLetter("AAPL_US_EQ")).toBeUndefined();
+    expect(marketMics("VUAAm_EQ")).toEqual(["XMIL"]);
+    expect(marketCurrency("VUAAm_EQ")).toBe("EUR");
+    expect(marketMics("RBl_EQ")).toEqual(["XLON"]);
+    // London quotes in pence, pounds or dollars: no currency hint.
+    expect(marketCurrency("RBl_EQ")).toBeUndefined();
+    expect(marketMics("22UAd_EQ")).toContain("XETR");
+    expect(marketMics("ABCq_EQ")).toBeUndefined();
+  });
+
+  it("resolve VUAAm_EQ to VUAA on Milan, not the Cboe mirror VUAAM", async () => {
+    const hits = [
+      result({ symbol: "VUAAM", score: 9, currency: "EUR", exchangeMic: "DXE" }),
+      result({ symbol: "VUAA.MI", score: 4, currency: "EUR", exchangeMic: "XMIL" }),
+      result({ symbol: "VUAA.DE", score: 5, currency: "EUR", exchangeMic: "XETR" }),
+    ];
+    const search = vi.fn(async () => hits);
+    expect(await resolveTicker(search, "VUAAm_EQ", { isin: "IE00BFMXXD54", currency: "EUR" })).toEqual({
+      symbol: "VUAA.MI",
+      exchangeMic: "XMIL",
+    });
   });
 });
 
@@ -484,6 +519,55 @@ describe("SymbolResolver caching", () => {
     // A pre-v1.7.2 entry (just the symbol) still decodes — MIC is undefined.
     expect(await r.resolveDetailed("AAPL_US_EQ")).toEqual({ symbol: "AAPL" });
     expect(search).not.toHaveBeenCalled();
+  });
+});
+
+describe("SymbolResolver — one listing per instrument across tickers", () => {
+  const vuaa = [
+    result({ symbol: "VUAAM", score: 9, currency: "EUR", exchangeMic: "DXE" }),
+    result({ symbol: "VUAA.MI", score: 4, currency: "EUR", exchangeMic: "XMIL" }),
+  ];
+
+  it("gives the export's bare ticker the listing the API ticker resolved, through the ISIN", async () => {
+    const search = vi.fn(async (q: string) => (q === "IE00BFMXXD54" || q.startsWith("VUAA") ? vuaa : []));
+    const r = new SymbolResolver(search);
+    const api = await r.resolveDetailed("VUAAm_EQ", { isin: "IE00BFMXXD54", currency: "EUR" });
+    const calls = search.mock.calls.length;
+    const csv = await r.resolveDetailed("VUAA", { isin: "IE00BFMXXD54", currency: "EUR" });
+    expect(csv).toEqual(api);
+    expect(search).toHaveBeenCalledTimes(calls);
+    expect(r.snapshot()[isinCacheKey("IE00BFMXXD54", "EUR")!]).toBe("VUAA.MI|XMIL");
+  });
+
+  it("keeps an instrument's listings in other currencies apart", async () => {
+    const search = vi.fn(async (q: string) =>
+      q === "VUAG" ? [result({ symbol: "VUAG.L", currency: "GBp", exchangeMic: "XLON" })] : vuaa,
+    );
+    const r = new SymbolResolver(search);
+    await r.resolveDetailed("VUAAm_EQ", { isin: "IE00BFMXXD54", currency: "EUR" });
+    expect(await r.resolveDetailed("VUAG", { isin: "IE00BFMXXD54", currency: "GBX" })).toEqual({
+      symbol: "VUAG.L",
+      exchangeMic: "XLON",
+    });
+  });
+
+  it("shares a ticker already cached with the instrument's ISIN entry", async () => {
+    const search = vi.fn(async () => []);
+    const r = new SymbolResolver(search, { TSM: "TSM|XNYS" });
+    expect(await r.resolveDetailed("TSM", { isin: "US8740391003", currency: "USD" })).toEqual({ symbol: "TSM", exchangeMic: "XNYS" });
+    expect(await r.resolveDetailed("TSM_US_EQ", { isin: "US8740391003", currency: "USD" })).toEqual({ symbol: "TSM", exchangeMic: "XNYS" });
+    expect(search).not.toHaveBeenCalled();
+  });
+
+  it("resolves again a lettered ticker cached on another venue's listing", async () => {
+    const search = vi.fn(async () => vuaa);
+    const r = new SymbolResolver(search, { "VUAAm_EQ": "VUAAM|DXE", RR_GB_EQ: "RR.L|XLON" });
+    expect(r.isDirty).toBe(true);
+    expect(r.snapshot()).toEqual({ RR_GB_EQ: "RR.L|XLON" });
+    expect(await r.resolveDetailed("VUAAm_EQ", { isin: "IE00BFMXXD54", currency: "EUR" })).toEqual({
+      symbol: "VUAA.MI",
+      exchangeMic: "XMIL",
+    });
   });
 });
 

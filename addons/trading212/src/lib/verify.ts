@@ -122,6 +122,22 @@ export function compareWithTrading212(input: {
     }
   }
 
+  // A position Wealthfolio holds under another listing's symbol (VUAA for Trading 212's VUAAM, an
+  // asset an earlier version created on 22UA for BNTX) shows as missing on one side and extra on
+  // the other. When exactly one leftover holding has the position's quantity, and no other
+  // leftover position shares it, they are the same shares: a note, not a difference.
+  const missing = [...expected].filter(([k, e]) => !held.has(k) && !sameQuantity(e.quantity, 0));
+  const extra = [...held].filter(([k, h]) => !expected.has(k) && !sameQuantity(h.quantity, 0));
+  for (const [k, e] of missing) {
+    const twins = extra.filter(([, h]) => sameQuantity(h.quantity, e.quantity));
+    const rivals = missing.filter(([, o]) => sameQuantity(o.quantity, e.quantity));
+    if (twins.length !== 1 || rivals.length !== 1) continue;
+    const [hk, h] = twins[0];
+    notes.push(`${e.label} is held in Wealthfolio as ${h.symbol}: the same ${fmt(e.quantity)} shares under another listing.`);
+    expected.delete(k);
+    held.delete(hk);
+  }
+
   for (const [k, e] of expected) {
     const have = held.get(k)?.quantity ?? 0;
     if (!sameQuantity(have, e.quantity)) {

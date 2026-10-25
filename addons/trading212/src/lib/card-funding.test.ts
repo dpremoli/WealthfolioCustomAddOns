@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ActivityImport } from "@wealthfolio/addon-sdk";
-import { CARD_FUNDING_COMMENT, fundingForExisting, isFundingId, withCardFunding } from "./card-funding";
+import { CARD_FUNDING_COMMENT, fundingForExisting, isFundingId, orphanFundingLegs, withCardFunding } from "./card-funding";
 
 const card = (activityType: string, amount: number): ActivityImport => ({
   id: "t212-txn-C1",
@@ -67,5 +67,39 @@ describe("fundingForExisting", () => {
         ["inv", "TRANSFER_IN", 4, "2025-05-02T09:00:00.000Z"],
       ],
     ]);
+  });
+});
+
+describe("orphanFundingLegs", () => {
+  const leg = (id: string, accountId: string, activityType: string, day: string, amount: number) => ({
+    id, accountId, activityType, date: new Date(`${day}T12:00:00Z`), amount: String(amount), currency: "GBP", comment: CARD_FUNDING_COMMENT,
+  });
+
+  it("finds the legs whose other half is gone, in the connection's two accounts only", () => {
+    const legs = [
+      leg("c1", "card", "TRANSFER_IN", "2026-01-02", 5), leg("i1", "inv", "TRANSFER_OUT", "2026-01-02", 5), // a pair
+      leg("c2", "card", "TRANSFER_IN", "2026-01-03", 7), // its investing leg was deleted with the account
+      leg("c3", "card", "TRANSFER_OUT", "2026-01-04", 2), leg("i3", "inv", "TRANSFER_IN", "2026-01-04", 2), // a refund pair
+      leg("i4", "inv", "TRANSFER_OUT", "2026-01-05", 9), // its card leg is gone
+      leg("x5", "elsewhere", "TRANSFER_IN", "2026-01-06", 3), // another account's: not ours to touch
+    ];
+    expect(orphanFundingLegs(legs, ["card", "inv"]).map((l) => l.id).sort()).toEqual(["c2", "i4"]);
+  });
+
+  it("keeps a leg whose partner sits in another account (an older card account)", () => {
+    const legs = [leg("i1", "inv", "TRANSFER_OUT", "2026-01-02", 5), leg("old", "old-card", "TRANSFER_IN", "2026-01-02", 5)];
+    expect(orphanFundingLegs(legs, ["new-card", "inv"])).toEqual([]);
+  });
+
+  it("pairs by count: two equal spends on a day need two pairs", () => {
+    const legs = [
+      leg("c1", "card", "TRANSFER_IN", "2026-01-02", 5), leg("c2", "card", "TRANSFER_IN", "2026-01-02", 5),
+      leg("i1", "inv", "TRANSFER_OUT", "2026-01-02", 5),
+    ];
+    expect(orphanFundingLegs(legs, ["card", "inv"])).toHaveLength(1);
+  });
+
+  it("ignores transfers that are not card funding", () => {
+    expect(orphanFundingLegs([{ ...leg("t", "card", "TRANSFER_IN", "2026-01-02", 5), comment: "Moved" }], ["card", "inv"])).toEqual([]);
   });
 });

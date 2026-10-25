@@ -37,7 +37,7 @@ function setup(opts: {
 }
 
 describe("ActivityImporter", () => {
-  it("imports in large chunks, force-imported, and reads each account once across calls", async () => {
+  it("imports in large chunks, forces nothing the host did not mark, and reads each account once across calls", async () => {
     const t = setup();
     const imp = new ActivityImporter(t.ctx, 1000);
     const rows = Array.from({ length: 1500 }, (_, i) => [cash(`r${i}`, i + 1)]);
@@ -45,7 +45,7 @@ describe("ActivityImporter", () => {
     const b = await imp.importRows(rows.slice(1200));
     expect(a.imported + b.imported).toBe(1500);
     expect(t.calls.map((c) => c.length)).toEqual([1000, 200, 300]);
-    expect(t.calls[0].every((r) => r.forceImport)).toBe(true);
+    expect(t.calls[0].some((r) => r.forceImport)).toBe(false);
     expect(t.getAll).toHaveBeenCalledTimes(1);
   });
 

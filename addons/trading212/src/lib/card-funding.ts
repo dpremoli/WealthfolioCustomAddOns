@@ -73,3 +73,41 @@ export function fundingForExisting(
       return fundingPair(card, investAccountId, `t212-card-${r.id ?? `${date}-${r.amount}`}`);
     });
 }
+
+type Leg = ExistingActivityLike & { id?: string };
+const legKey = (r: Leg) =>
+  [(r.date instanceof Date ? r.date.toISOString() : String(r.date ?? "")).slice(0, 10), (Math.round(Math.abs(Number(r.amount ?? 0)) * 100) / 100).toFixed(2), (r.currency ?? "").toUpperCase()].join("|");
+const isLeg = (r: Leg) => r.comment === CARD_FUNDING_COMMENT && (r.activityType === "TRANSFER_IN" || r.activityType === "TRANSFER_OUT");
+
+/**
+ * The funding legs in `accounts` whose other half is gone: no leg of the opposite direction with
+ * the same day, amount and currency in another account. That is what deleting one of the two
+ * accounts leaves behind (687 orphans after an Invest account was deleted). `legs` should hold the
+ * funding legs of every account, so a leg whose partner sits in an older card account or a
+ * previously linked investing account is not taken for an orphan. Pairing prefers the two
+ * accounts in `accounts` (the connection's card and investing accounts).
+ */
+export function orphanFundingLegs(legs: (Leg & { accountId: string })[], accounts: [string, string]): (Leg & { accountId: string })[] {
+  const own = new Set(accounts);
+  const groups = new Map<string, (Leg & { accountId: string })[]>();
+  for (const l of legs.filter(isLeg)) groups.set(legKey(l), [...(groups.get(legKey(l)) ?? []), l]);
+  const orphans: (Leg & { accountId: string })[] = [];
+  for (const group of groups.values()) {
+    const outs = group.filter((l) => l.activityType === "TRANSFER_OUT");
+    const ins = group.filter((l) => l.activityType === "TRANSFER_IN");
+    const used = new Set<Leg>();
+    // First the connection's own pairs, then any partner in another account.
+    for (const pass of [true, false]) {
+      for (const o of outs) {
+        if (used.has(o)) continue;
+        const partner = ins.find((i) => !used.has(i) && i.accountId !== o.accountId && (!pass || (own.has(i.accountId) && own.has(o.accountId))));
+        if (partner) {
+          used.add(o);
+          used.add(partner);
+        }
+      }
+    }
+    orphans.push(...group.filter((l) => !used.has(l) && own.has(l.accountId)));
+  }
+  return orphans;
+}

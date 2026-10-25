@@ -372,7 +372,11 @@ snapshot.
 
 ### Symbol resolution (`symbol-resolver.ts`)
 
-Trading 212 tickers look like `AAPL_US_EQ`. `resolveTicker` queries the host
+Trading 212 tickers look like `AAPL_US_EQ`, or, for a European listing, `VUAAm_EQ`: the base
+ticker with a lowercase exchange letter (`l` London, `d` Xetra, `p` Paris, `a` Amsterdam, `m`
+Milan, `e` Madrid), which `parseBaseSymbol` drops and `marketMics`/`marketCurrency` read like a
+market segment. Without it `VUAAm` exactly matched Cboe's `VUAAM` and won over VUAA on Milan.
+`resolveTicker` queries the host
 `market.searchTicker` and resolves in two stages:
 
 1. **ISIN is authoritative.** A search *by ISIN* returns the security's own
@@ -431,7 +435,16 @@ would vanish; merging preserves the total.
 `SymbolResolver` caches each lookup (including known misses, stored as `""`) for
 the duration of a sync and persists the map to add-on storage. Values are encoded
 `"SYMBOL"` (no MIC) or `"SYMBOL|MIC"`; back-compat read-only for pre-v1.7.2
-entries. "Reset sync history" clears it.
+entries. "Reset sync history" clears it. One instrument reaches the resolver under two tickers
+(the export's `VUAA`, the API's `VUAAm_EQ`) with different hints, so a resolution is also kept
+under `isin:<ISIN>|<currency>` and that entry wins: the first ticker to resolve an instrument
+decides its listing for both. A full backfill resolves the held positions (API tickers, which name
+the market) before reading the export. Cached entries of lettered tickers that sit on another
+venue's MIC are dropped on load and resolved again.
+
+The check after a backfill (`compareWithTrading212`) pairs a position missing from Wealthfolio
+with the one leftover holding of the same quantity (when no other leftover position shares that
+quantity) and notes it as held under another listing, rather than reporting two differences.
 
 ## Idempotency model (defence in depth)
 
@@ -444,7 +457,33 @@ Three independent guards ensure re-syncs never duplicate:
    account — an Invest and an ISA account can each independently produce `order id 1`,
    so a global set would wrongly drop the second.
 3. **Host `checkImport`** — Wealthfolio's own duplicate detection is the final
-   backstop; rows flagged `duplicateOfId` are dropped.
+   backstop. `checkImport` marks a row matching a stored activity `duplicateOfId` and one matching
+   an earlier row of the call `duplicateOfLineNumber`. A row is sent with `forceImport` only when
+   the host marked it and the add-on's own count proves it new (the second of two identical
+   deposits on one day); the markers are stripped before `import`, and a row the host returns
+   still marked is judged by `forceImport`, not by the marker (a forced row comes back marked but
+   stored). When the stored count still disagrees with the rows, the account is read again and
+   each row is judged by whether it is there (`settleByReading`); a call is never refused
+   wholesale.
+
+Card rows (`WITHDRAWAL`/`DEPOSIT`/`INTEREST` in the card account, not the funding legs) are matched
+against the card account's rows by day, amount, type and currency, ignoring the comment: an older
+version wrote other merchant text ("Lidl GB · Shopping" for "Lidl · Shopping"), and the host's key
+includes the comment, so neither the content key nor the host would catch them. Rows of the same
+export window already recorded as imported are counted first, so two identical spends on one day
+still both land.
+
+**Card funding legs.** Each card row is funded by a `TRANSFER_OUT` (Invest) + `TRANSFER_IN` (card)
+pair. A leg whose partner is gone (its account deleted) is an orphan (`orphanFundingLegs`, which
+looks for partners in every account before calling a leg an orphan): `fundExistingCardRows`
+deletes the orphans and funds their card rows again, and removing a connection deletes the
+card-side orphans as well (best effort; the next sync using that card account does it anyway).
+
+**Minor-unit currencies.** Wealthfolio divides a GBX (GBp, ZAc, ILA, KWF, USX) row's price, amount
+and fee into the major unit on import, whatever the row is, so a `SPLIT` sent in GBX stores a
+hundredth of its ratio. Splits are sent in the major currency (kit `majorCurrency`), and
+`healSplitRatios` re-imports any split whose stored ratio is a hundredth (or thousandth) of the one
+its comment states, deleting the wrong row once the right one is stored.
 
 The local guards exist because the exact key Wealthfolio uses for `checkImport`
 deduplication is not documented; the stable `id` is supplied to give it the best

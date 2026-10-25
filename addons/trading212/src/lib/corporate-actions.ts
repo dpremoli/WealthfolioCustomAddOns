@@ -1,5 +1,5 @@
 import type { ActivityImport } from "@wealthfolio/addon-sdk";
-import { cashSymbol, round2 } from "@wf-addons/kit";
+import { cashSymbol, majorCurrency, round2 } from "@wf-addons/kit";
 import { col, parseAmount, toIsoDate } from "./csv";
 import type { ImportUnit } from "./importer";
 import { importAssetFields, type Resolution } from "./symbol-resolver";
@@ -122,7 +122,12 @@ function roundingError(text: string | undefined, value: number): number {
   return value > 0 ? (0.5 * 10 ** -decimals) / value : 0;
 }
 
-/** The `SPLIT` activity for a pair. Wealthfolio multiplies the lots bought before that day by `amount`. */
+/**
+ * The `SPLIT` activity for a pair. Wealthfolio multiplies the lots bought before that day by
+ * `amount`. A London listing quotes in pence (GBX), and Wealthfolio divides the `amount` of a GBX
+ * row by 100, ratio or not (Reckitt's consolidation landed as a hundredth of the shares), so the
+ * row goes in pounds.
+ */
 export function mapStockSplit(split: StockSplit, accountId: string, resolved: Resolution): ActivityImport {
   return {
     id: split.id,
@@ -131,7 +136,7 @@ export function mapStockSplit(split: StockSplit, accountId: string, resolved: Re
     date: split.time,
     ...importAssetFields(resolved),
     amount: split.ratio,
-    currency: split.currency,
+    currency: majorCurrency(split.currency),
     isValid: true,
     isDraft: false,
     comment: `Stock split: ${split.closeShares} → ${split.openShares} shares`,

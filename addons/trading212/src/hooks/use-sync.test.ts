@@ -73,6 +73,8 @@ function makeCtx(opts: {
   existingActivities?: { id: string }[];
   existingSnapshots?: { snapshotDate: string }[];
   holdings?: unknown[] | (() => unknown[]);
+  /** The account holds what was imported too (the split repair reads it back). */
+  accountKeepsImports?: boolean;
 }) {
   const connections = opts.connections ?? [
     { id: "c1", name: "Trading 212 (Invest)", accountId: "acc-1" },
@@ -140,7 +142,12 @@ function makeCtx(opts: {
         activities: {
           checkImport: opts.checkImport ?? (async (a: ActivityImport[]) => a),
           import: importFn,
-          getAll: async () => opts.existingActivities ?? [],
+          getAll: async () => [
+            ...(opts.existingActivities ?? []),
+            ...(opts.accountKeepsImports
+              ? importFn.mock.calls.flatMap((c) => c[0]).map((a) => ({ ...a, assetSymbol: a.symbol }))
+              : []),
+          ],
           saveMany: activitiesSaveMany,
         },
         snapshots: {
@@ -351,7 +358,9 @@ describe("useSync — JSON incremental path", () => {
     });
     const imported = importFn.mock.calls.flatMap((c) => c[0]);
     expect(imported.map((a) => a.id)).toEqual(["t212-txn-D1", "t212-txn-D2"]);
-    expect(imported.every((a) => a.forceImport)).toBe(true);
+    // Only the row Wealthfolio would drop as a duplicate is forced, and its marker is taken off.
+    expect(imported.map((a) => a.forceImport)).toEqual([false, true]);
+    expect(imported.some((a) => a.duplicateOfId || a.duplicateOfLineNumber != null)).toBe(false);
   });
 
   it("isolates imported refs per connection (same order id in two accounts)", async () => {
@@ -1014,6 +1023,7 @@ describe("useSync — a split Trading 212 never listed", () => {
     net(async (url: string) => route(String(url)));
     let imports: { mock: { calls: unknown[][] } } | undefined;
     const { ctx, importFn } = makeCtx({
+      accountKeepsImports: true,
       syncStates: { c1: { lastSync: null, importedRefs: [] } },
       searchTicker: async () => [{ symbol: "AMZN", exchangeMic: "XNAS", currency: "USD", score: 1, quoteType: "EQUITY" }],
       holdings: () => {
@@ -1048,6 +1058,7 @@ describe("useSync — a split Trading 212 never listed", () => {
       return route(u);
     });
     const { ctx, importFn } = makeCtx({
+      accountKeepsImports: true,
       syncStates: { c1: { lastSync: null, importedRefs: [] } },
       searchTicker: async () => [{ symbol: "AMZN", exchangeMic: "XNAS", currency: "USD", score: 1, quoteType: "EQUITY" }],
       holdings: () => [amzn(0.108245)],
@@ -1118,6 +1129,7 @@ describe("useSync — a split found from the dividend rows", () => {
     net(async (url: string) => route(String(url)));
     let imports: { mock: { calls: unknown[][] } } | undefined;
     const { ctx, importFn, storage } = makeCtx({
+      accountKeepsImports: true,
       syncStates: { c1: { lastSync: null, importedRefs: [] } },
       searchTicker: async () => [{ symbol: "PNN", exchangeMic: "XLON", currency: "GBX", score: 1, quoteType: "EQUITY" }],
       holdings: () => {
@@ -1136,7 +1148,7 @@ describe("useSync — a split found from the dividend rows", () => {
       GB00BNNTLN49: [["2021-07-21", 0.23384732], ["2021-09-06", 0.15589821]],
     });
     const split = importFn.mock.calls.flatMap((c) => c[0] as ActivityImport[]).find((a) => a.activityType === "SPLIT");
-    expect(split).toMatchObject({ amount: 2 / 3, symbol: "PNN", currency: "GBX" });
+    expect(split).toMatchObject({ amount: 2 / 3, symbol: "PNN", currency: "GBP" });
     const day = String(split!.date).slice(0, 10);
     expect(day >= "2021-07-22" && day <= "2021-07-29").toBe(true);
     const r = result.current.results!.perAccount[0];

@@ -233,8 +233,36 @@ export async function mapCsvRow(
     actionLower.includes("interest") ||
     actionLower === "result adjustment" ||
     actionLower === "stock distribution";
-  if (!csvId && !actionLower.startsWith("dividend") && !cashAction) return null;
+  // A "sell" of shares with no price and no proceeds is a corporate action taking them away (the old
+  // line of a spin-off, HCMC.CNT): the mirror of a stock distribution, below.
+  const isSell = actionLower.endsWith(" sell") || actionLower === "sell";
+  const removal = isSell && parseAmount(row["No. of shares"]) > 0 && parseAmount(row["Price / share"]) <= 0 && total === 0;
+  if (!csvId && !actionLower.startsWith("dividend") && !cashAction && !removal) return null;
   const cashId = csvId || stableId(actionLower);
+
+  // ── SHARES REMOVED FOR NOTHING (corporate action) ─────────────────────
+  // No cash and no contribution: an internal transfer out at zero value, so the position closes as
+  // Trading 212's does (a SELL at 0 would book the cost as a realised loss).
+  if (removal) {
+    if (!ticker) return null;
+    const priceCurrency = col(row, "Currency (Price / share)") || currency;
+    const resolved = await resolver.resolveDetailed(ticker, { isin, name, currency: priceCurrency });
+    if (!resolved) return null;
+    return {
+      id: `t212-removal-${cashId}`,
+      accountId,
+      activityType: "TRANSFER_OUT" as ActivityType,
+      date,
+      ...importAssetFields(resolved),
+      quantity: parseAmount(row["No. of shares"]),
+      unitPrice: 0,
+      currency: priceCurrency,
+      isExternal: false,
+      isValid: true,
+      isDraft: false,
+      comment: ["Shares removed by a corporate action (no proceeds)", name].filter(Boolean).join(" · "),
+    };
+  }
 
   // ── BUY ────────────────────────────────────────────────────────────────
   if (actionLower.endsWith(" buy") || actionLower === "buy") {

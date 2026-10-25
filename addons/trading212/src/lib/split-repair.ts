@@ -1,5 +1,5 @@
-import type { ActivityImport } from "@wealthfolio/addon-sdk";
-import type { ExistingActivityLike } from "@wf-addons/kit";
+import type { ActivityImport, AddonContext } from "@wealthfolio/addon-sdk";
+import { majorCurrency, type ExistingActivityLike } from "@wf-addons/kit";
 import { snapRatio } from "./corporate-actions";
 import type { ActivityImporter } from "./importer";
 import { KNOWN_SPLITS, type KnownSplit } from "./known-splits";
@@ -403,7 +403,10 @@ export async function repairSplits(
   log: string[],
   dividends: Record<string, DividendShares[]> = {},
 ): Promise<number> {
-  const rows = (await importer.existingIn(accountId)) as RowLike[];
+  // Read the account afresh: the repair replays what Wealthfolio holds, whatever an import call
+  // answered about it (2.6.2 left rows it had misread as refused out of its view, and found no
+  // activities to repair).
+  const rows = (await importer.reload(accountId)) as RowLike[];
   const units: ActivityImport[][] = [];
   for (const gap of gaps) {
     const events = quantityEvents(rows, gap.symbol);
@@ -437,7 +440,8 @@ export async function repairSplits(
           date: `${s.date}T00:00:00.000Z`,
           ...importAssetFields(resolved),
           amount: s.ratio,
-          currency: gap.currency ?? "USD",
+          // In pounds, not pence: Wealthfolio divides a GBX row's amount by 100 (see mapStockSplit).
+          currency: majorCurrency(gap.currency ?? "USD"),
           isValid: true,
           isDraft: false,
           comment: `Stock split ${describeRatio(s.ratio)} (not in the Trading 212 export; ${found})`,
@@ -449,4 +453,86 @@ export async function repairSplits(
   const out = await importer.importRows(units);
   for (const r of out.rejected) log.push(`Split not imported: ${r.reason}`);
   return out.imported;
+}
+
+/**
+ * The ratio a split row's comment states, as this add-on writes them ("Stock split: 1.2 → 1.152
+ * shares" for an exported pair, "Stock split 2:3 (…" or "Stock split ×0.96 (…" for an added one),
+ * or null for any other comment.
+ */
+export function statedRatio(comment?: string | null): number | null {
+  const c = comment ?? "";
+  const pair = /^Stock split: ([\d.]+) → ([\d.]+) shares/.exec(c);
+  if (pair) {
+    const [close, open] = [Number(pair[1]), Number(pair[2])];
+    return close > 0 && open > 0 ? open / close : null;
+  }
+  const said = /^Stock split (\d+):(\d+) /.exec(c);
+  if (said) return Number(said[2]) > 0 ? Number(said[1]) / Number(said[2]) : null;
+  const times = /^Stock split ×([\d.]+) /.exec(c);
+  return times ? Number(times[1]) : null;
+}
+
+type StoredSplit = ExistingActivityLike & { id?: string; exchangeMic?: string };
+
+/**
+ * The split rows Wealthfolio stored at a hundredth (or thousandth) of the ratio their comment
+ * states: sent in a minor-unit currency (GBX) before 2.6.4, whose `amount` Wealthfolio divides by
+ * 100 like any price. Each comes with the ratio it should have.
+ */
+export function minorUnitSplits(rows: StoredSplit[]): { row: StoredSplit; ratio: number }[] {
+  const near = (a: number, b: number) => Math.abs(a - b) <= 1e-3 * b;
+  const out: { row: StoredSplit; ratio: number }[] = [];
+  for (const row of rows) {
+    if (String(row.activityType) !== "SPLIT") continue;
+    const stated = statedRatio(row.comment);
+    const amount = num(row.amount);
+    if (!stated || stated <= 0 || amount <= 0 || near(amount, stated)) continue;
+    const factor = [100, 1000].find((f) => near(amount * f, stated));
+    if (factor) out.push({ row, ratio: Number((amount * factor).toFixed(10)) });
+  }
+  return out;
+}
+
+/**
+ * Puts right the splits Wealthfolio stored at a hundredth of their ratio (see
+ * {@link minorUnitSplits}): imports each again with the right ratio, in the major currency, and
+ * deletes the wrong row once the new one is stored. Returns how many were fixed.
+ */
+export async function healSplitRatios(
+  ctx: AddonContext,
+  importer: ActivityImporter,
+  accountId: string,
+  log: string[],
+): Promise<number> {
+  const bad = minorUnitSplits((await importer.existingIn(accountId)) as StoredSplit[]).filter((b) => b.row.id);
+  if (bad.length === 0) return 0;
+  const idOf = (b: (typeof bad)[number]) => `t212-split-fix-${b.row.id}`;
+  const units: ActivityImport[][] = bad.map((b) => [
+    {
+      id: idOf(b),
+      accountId,
+      activityType: "SPLIT" as ActivityImport["activityType"],
+      date: b.row.date instanceof Date ? b.row.date.toISOString() : String(b.row.date),
+      ...importAssetFields({ symbol: b.row.assetSymbol ?? "", exchangeMic: b.row.exchangeMic }),
+      amount: b.ratio,
+      currency: majorCurrency(b.row.currency || "GBP"),
+      isValid: true,
+      isDraft: false,
+      comment: b.row.comment ?? undefined,
+    },
+  ]);
+  const out = await importer.importRows(units);
+  const stored = new Set(out.accounted);
+  const wrong = bad.filter((b) => stored.has(idOf(b))).map((b) => b.row.id as string);
+  if (wrong.length > 0) {
+    await ctx.api.activities.saveMany({ deleteIds: wrong });
+    importer.forget(accountId, wrong);
+  }
+  for (const b of bad) {
+    const what = `${b.row.assetSymbol} split of ${day(b.row.date)}: Wealthfolio stored a ratio of ${fmt(num(b.row.amount))} for ${fmt(b.ratio)} (it was sent in pence)`;
+    log.push(stored.has(idOf(b)) ? `Fixed the ${what}.` : `Could not fix the ${what}.`);
+  }
+  for (const r of out.rejected) log.push(`Split not fixed: ${r.reason}`);
+  return wrong.length;
 }

@@ -564,6 +564,34 @@ describe("mapCsvRow — rows seen in real exports", () => {
     expect(act!.id).toMatch(/^t212-dist-/);
   });
 
+  it("a sell with shares but no price and no proceeds takes the shares out at zero value (the old line of a corporate action)", async () => {
+    const act = await mapCsvRow(
+      tradeRow("Market sell", {
+        Ticker: "HCMC.CNT_US_EQ",
+        ISIN: "US42227T1051",
+        Name: "Healthier Choices Management (contingent)",
+        "No. of shares": "0.01440327",
+        "Price / share": "",
+        Total: "0",
+        ID: "",
+      }),
+      ACC,
+      makeResolver({ "HCMC.CNT_US_EQ": "HCMC|XNAS" }),
+    );
+    expect(act).toMatchObject({
+      activityType: "TRANSFER_OUT",
+      symbol: "HCMC",
+      quantity: 0.01440327,
+      unitPrice: 0,
+      currency: "USD",
+      isExternal: false,
+    });
+    expect(act!.id).toMatch(/^t212-removal-/);
+    expect(act!.comment).toContain("corporate action");
+    // A sell with proceeds but no price is not one: still left out (and logged by the sync).
+    expect(await mapCsvRow(tradeRow("Market sell", { "Price / share": "", Total: "12" }), ACC, RESOLVER)).toBeNull();
+  });
+
   it("a dividend adjustment that is a clawback takes the cash back instead of paying it", async () => {
     const act = await mapCsvRow(
       cashRow("Dividend adjustment", {

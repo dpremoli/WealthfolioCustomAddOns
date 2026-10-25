@@ -13,6 +13,21 @@ export function cashSymbol(currency: string): string {
   return `$CASH-${currency.trim().toUpperCase()}`;
 }
 
+// Minor-unit currencies Wealthfolio converts to their major unit on import (fx/currency.rs).
+const MINOR_UNITS: Record<string, string> = { GBX: "GBP", KWF: "KWD", ZAC: "ZAR", ILA: "ILS", USX: "USD" };
+
+/**
+ * The major unit of a minor-unit currency (GBp/GBX → GBP, ZAc → ZAR), else the code unchanged.
+ * Wealthfolio divides an imported row's price, amount and fee by 100 (1,000 for KWF) when its
+ * currency is a minor unit, whatever the row is: a SPLIT carries its ratio in `amount`, so one
+ * sent in GBX stores a hundredth of the ratio. Send such rows in the major unit.
+ */
+export function majorCurrency(currency: string): string {
+  // "GBp" is pence; uppercased it would read as pounds.
+  if (currency.trim() === "GBp") return "GBP";
+  return MINOR_UNITS[currency.trim().toUpperCase()] ?? currency;
+}
+
 /** FNV-1a string hash → 8-char hex. Used for stable ids derived from row content. */
 export function fnv1a(input: string): string {
   let h = 0x811c9dc5;

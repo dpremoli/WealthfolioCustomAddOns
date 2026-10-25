@@ -41,9 +41,10 @@ describe("compareWithTrading212", () => {
       "NVDA (NVDA_US_EQ): Trading 212 holds 10.955, Wealthfolio 1.0955.",
       "CRWD (CRWD_US_EQ): Trading 212 holds 0.69, Wealthfolio 0.",
       "LTC-EUR: Wealthfolio holds 2, Trading 212 none.",
+      "Cash EUR: Trading 212 1822, Wealthfolio 12810.11.",
     ]);
-    // With a GBP wallet and no rate the cash cannot be compared: said so, not called a difference.
-    expect(v.notes).toEqual(["Cash in GBP (3699) was not compared: Wealthfolio has no GBP→EUR exchange rate."]);
+    // A GBP wallet is not in Trading 212's figure: said so, not called a difference.
+    expect(v.notes).toEqual(["Cash in GBP (3699) was not compared: Trading 212's cash figure is the EUR wallet only."]);
     // The positions Wealthfolio holds a wrong quantity of are handed on for the split repair.
     expect(v.gaps.map((g) => [g.ticker, g.held, g.derived])).toEqual([
       ["NVDA_US_EQ", 10.955, 1.0955],
@@ -75,27 +76,20 @@ describe("compareWithTrading212", () => {
     ]);
   });
 
-  describe("cash in several currencies (an account with a GBP and a USD wallet)", () => {
-    const rates = [
-      { fromCurrency: "GBP", toCurrency: "EUR", rate: 1.15 },
-      { fromCurrency: "EUR", toCurrency: "USD", rate: 1.1 },
-    ];
-    const cashCheck = (cash: number, holdings: Holding[]) =>
-      compareWithTrading212({ positions: [], cash, accountCurrency: "EUR", holdings, rates });
+  describe("cash in several currencies (an EUR account with GBP and USD wallets)", () => {
+    const cashCheck = (cash: number, holdings: Holding[]) => compareWithTrading212({ positions: [], cash, accountCurrency: "EUR", holdings });
 
-    it("compares the wallets as one total in the account currency, within the rates' margin", () => {
-      // 800 EUR + 1000 GBP (×1.15) + 110 USD (÷1.1) = 800 + 1150 + 100.
-      const wallets = [cashOf("EUR", 800), cashOf("GBP", 1000), cashOf("USD", 110)];
-      expect(cashCheck(2050, wallets).ok).toBe(true);
-      expect(cashCheck(2060, wallets).ok).toBe(true); // 0.5% apart: the two sides' rates
-      const off = cashCheck(1822, wallets);
-      expect(off.ok).toBe(false);
-      expect(off.mismatches).toEqual([
-        "Cash: Trading 212 1822 EUR, Wealthfolio 2050 EUR (EUR 800 + GBP 1000 + USD 110, converted at Wealthfolio's rates; allowed to differ by 1% for the rates).",
-      ]);
+    it("compares Trading 212's figure with the EUR wallet alone, and notes the others", () => {
+      // The real case: Trading 212 reported 1,822.43 EUR, its EUR wallet, with 206.92 GBP beside it.
+      const wallets = [cashOf("EUR", 1822.43), cashOf("GBP", 206.92), cashOf("USD", 0)];
+      const v = cashCheck(1822.43, wallets);
+      expect(v.ok).toBe(true);
+      expect(v.notes).toEqual(["Cash in GBP (206.92) was not compared: Trading 212's cash figure is the EUR wallet only."]);
+      const off = cashCheck(1822.43, [cashOf("EUR", 2400.95), cashOf("GBP", 206.92)]);
+      expect(off.mismatches).toEqual(["Cash EUR: Trading 212 1822.43, Wealthfolio 2400.95."]);
     });
 
-    it("still compares account-currency cash exactly when there is no other wallet", () => {
+    it("compares account-currency cash exactly", () => {
       expect(cashCheck(1822, [cashOf("EUR", 1822.02)]).ok).toBe(true);
       expect(cashCheck(1822, [cashOf("EUR", 1900)]).ok).toBe(false);
     });

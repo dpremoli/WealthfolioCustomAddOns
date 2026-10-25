@@ -1,7 +1,7 @@
 {
   "id": "trading212-addon",
   "name": "Trading 212 Sync",
-  "version": "2.6.4",
+  "version": "2.6.5",
   "description": "Sync your Trading 212 investment account (trades, dividends, deposits, withdrawals, fees and interest) into Wealthfolio, directly from the Trading 212 API.",
   "author": "dpremoli",
   "license": "GPL-3.0-only",
@@ -81,7 +81,7 @@
     {
       "category": "currency",
       "functions": ["getAll"],
-      "purpose": "Convert the cash Wealthfolio holds in other currencies (a GBP or USD wallet) into the account currency when comparing it with Trading 212's total"
+      "purpose": "Tell a trade stored with an exchange rate per penny (by an earlier version) from one with a rate per pound, so its rate can be corrected"
     },
     {
       "category": "portfolio",

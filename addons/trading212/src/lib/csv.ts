@@ -1,6 +1,6 @@
 import type { ActivityImport } from "@wealthfolio/addon-sdk";
 import { cashSymbol } from "@wf-addons/kit";
-import { accountPerActivityRate, chargesInActivityCurrency } from "./mapper";
+import { accountPerActivityRate, chargesInActivityCurrency, inMajorUnits, type TradeTerms } from "./mapper";
 import { importAssetFields, type SymbolResolver } from "./symbol-resolver";
 import { mapSpendingCategory } from "./spending-category";
 
@@ -130,7 +130,7 @@ function tradeFxAndFee(
   unitPrice: number,
   priceCurrency: string,
   accountCurrency: string,
-): { fxRate: number | undefined; fee: number } {
+): TradeTerms {
   const cross = priceCurrency.toUpperCase() !== accountCurrency.toUpperCase();
   const total = Math.abs(parseAmount(col(row, "Total", "Result (GBP)", "Result")));
   const implied = total > 0 && qty > 0 && unitPrice > 0 ? total / (qty * unitPrice) : undefined;
@@ -158,7 +158,8 @@ function tradeFxAndFee(
     priceCurrency,
     fxRate,
   );
-  return { fxRate, fee };
+  // A price in pence goes in pounds, with a rate per pound (see `inMajorUnits`).
+  return inMajorUnits({ unitPrice, fee, currency: priceCurrency, fxRate }, accountCurrency);
 }
 
 /**
@@ -275,7 +276,7 @@ export async function mapCsvRow(
     // exchange (e.g. a USD price picks TSM over the MXN-quoted TSMN).
     const resolved = await resolver.resolveDetailed(ticker, { isin, name, currency: priceCurrency });
     if (!resolved) return null;
-    const { fxRate, fee } = tradeFxAndFee(row, qty, unitPrice, priceCurrency, currency);
+    const terms = tradeFxAndFee(row, qty, unitPrice, priceCurrency, currency);
     return {
       id: `t212-order-${csvId}`,
       accountId,
@@ -283,10 +284,10 @@ export async function mapCsvRow(
       date,
       ...importAssetFields(resolved),
       quantity: qty,
-      unitPrice,
-      fee: fee > 0 ? fee : undefined,
-      currency: priceCurrency,
-      fxRate,
+      unitPrice: terms.unitPrice,
+      fee: terms.fee > 0 ? terms.fee : undefined,
+      currency: terms.currency,
+      fxRate: terms.fxRate,
       isValid: true,
       isDraft: false,
       comment: name,
@@ -302,7 +303,7 @@ export async function mapCsvRow(
     const priceCurrency = col(row, "Currency (Price / share)") || currency;
     const resolved = await resolver.resolveDetailed(ticker, { isin, name, currency: priceCurrency });
     if (!resolved) return null;
-    const { fxRate, fee } = tradeFxAndFee(row, qty, unitPrice, priceCurrency, currency);
+    const terms = tradeFxAndFee(row, qty, unitPrice, priceCurrency, currency);
     return {
       id: `t212-order-${csvId}`,
       accountId,
@@ -310,10 +311,10 @@ export async function mapCsvRow(
       date,
       ...importAssetFields(resolved),
       quantity: qty,
-      unitPrice,
-      fee: fee > 0 ? fee : undefined,
-      currency: priceCurrency,
-      fxRate,
+      unitPrice: terms.unitPrice,
+      fee: terms.fee > 0 ? terms.fee : undefined,
+      currency: terms.currency,
+      fxRate: terms.fxRate,
       isValid: true,
       isDraft: false,
       comment: name,

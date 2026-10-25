@@ -209,7 +209,8 @@ When a Transactions-mode backfill finishes, the add-on waits for Wealthfolio to 
 account and compares what it shows with Trading 212 — every position from `/equity/positions`
 (the call Holdings mode uses) and the cash from `/equity/account/summary`. Each difference is
 listed in the sync log (a wrong quantity, a position on one side only, an instrument that did not
-match a symbol, cash in the wrong amount), the sync ends with an error, and the dashboard shows **"N differences from Trading 212"** with the list on hover. The
+match a symbol, cash in the wrong amount; Trading 212's cash is its account-currency wallet, so
+another wallet is only noted), the sync ends with an error, and the dashboard shows **"N differences from Trading 212"** with the list on hover. The
 check runs again on every sync until the account matches, then shows **"Matches Trading 212"**.
 
 Every row Wealthfolio did not import is listed too, with its type, date, symbol, Trading 212
@@ -336,6 +337,24 @@ never a separate fee.
 - Requests can only reach the hosts declared in the manifest, over HTTPS.
 
 ---
+
+## Upgrading to 2.6.5
+
+- **Shares priced in pence no longer cost a hundredth in another currency's account.** A London
+  share's trade went in pence with the rate per penny; Wealthfolio turns the price into pounds but
+  keeps the rate, so an EUR account paid €1.24 for €123.97 of Rolls-Royce (and its cash came out
+  too high by every such trade). Trades are now sent in pounds with the rate per pound, and the
+  next sync corrects the rate of trades already stored that way (in place).
+- **The cash check compares the account-currency wallet.** Trading 212's cash figure covers that
+  wallet alone (the EUR wallet of an EUR account), so a GBP or USD wallet is noted rather than
+  converted and added.
+- **Eterna (ERNA)'s 1-for-20 reverse split of 2022-10-17** is added when the position is short by
+  it (Trading 212's export has no row for it).
+- **Card refunds an older version stored as CREDIT** are matched with the DEPOSIT rows 2.6.4
+  imports, so they are no longer imported twice, and are funded like any refund. The next sync
+  deletes the second copy 2.6.4 imported (the DEPOSIT beside the CREDIT) and any funding transfer
+  beyond one per refund.
+- **The Log tab stays after a sync that failed** (it opens on it), so "see the log" can be followed.
 
 ## Upgrading to 2.6.4
 

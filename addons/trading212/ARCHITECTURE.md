@@ -208,10 +208,11 @@ delete ends the sync with a clear error and leaves the connection on its old mod
 matches), `verifyAccount` waits for the recalculation the import queued (`PortfolioUpdates`:
 an `onUpdateStart` after the last import, then its `onUpdateComplete`; up to 3 min), then
 compares `portfolio.getHoldings(accountId)` with `/equity/positions` (resolved with the same
-resolver) and the cash from `/account/summary`. Trading 212 reports one cash figure in the account
-currency for all wallets, so with cash in other currencies Wealthfolio's wallets are converted at
-its exchange rates (`currency.getAll`) and compared within 1%. Differences are logged, fail the
-sync, and are kept in `t212_sync_{id}.verification` for the dashboard badge.
+resolver) and the cash from `/account/summary`. Trading 212's cash figure is the account-currency
+wallet alone (an EUR account's 1,822.43 matched its EUR wallet, with GBP held beside it; the API
+docs do not say), so it is compared with Wealthfolio's cash in that currency, and other wallets are
+noted, not compared. Differences are logged, fail the sync, and are kept in
+`t212_sync_{id}.verification` for the dashboard badge.
 
 **Silent splits.** Trading 212 applies older splits to a position without a history row, so the
 imported trades fall short. For each position whose quantity differs, `repairSplits` replays the
@@ -484,6 +485,14 @@ and fee into the major unit on import, whatever the row is, so a `SPLIT` sent in
 hundredth of its ratio. Splits are sent in the major currency (kit `majorCurrency`), and
 `healSplitRatios` re-imports any split whose stored ratio is a hundredth (or thousandth) of the one
 its comment states, deleting the wrong row once the right one is stored.
+
+It keeps the `fxRate` as sent, though: a GBX trade's rate is account currency per *penny*, so once
+the price is pounds the trade settles at a hundredth (an EUR account's RR buy cost €1.24 for
+€123.97). Trades priced in a minor unit are restated in the major one with a rate per major unit
+(`inMajorUnits`, both the CSV and the API path), with no rate when that is the account's currency.
+`healPennyRates` (`minor-units.ts`) patches trades stored per penny in place (`saveMany` updates
+carry only the rate): a stored rate is taken for one per penny when, ×100, it is nearer
+Wealthfolio's current rate than as it stands.
 
 The local guards exist because the exact key Wealthfolio uses for `checkImport`
 deduplication is not documented; the stable `id` is supplied to give it the best

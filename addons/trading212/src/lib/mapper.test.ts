@@ -48,6 +48,34 @@ describe("mapOrderToActivity", () => {
     expect(a.fee).toBeCloseTo(0.635, 6);
   });
 
+  it("sends a trade priced in pence in pounds, with a rate per pound (a EUR account buying RR)", () => {
+    const rr: HistoricalOrder = {
+      order: { id: 777, side: "BUY", currency: "GBX", instrument: { ticker: "RR_GB_EQ", isin: "GB00B63H8491", name: "Rolls-Royce" } },
+      fill: {
+        type: "TRADE",
+        filledAt: "2024-10-15T10:00:00.000Z",
+        price: 540.2,
+        quantity: 19.0384,
+        // 19.0384 × 540.2p = £102.85 ≈ €123.18 at 1.19762 €/£, plus a €0.79 charge.
+        walletImpact: { currency: "EUR", fxRate: 83.4987, netValue: -123.97, taxes: [{ quantity: 0.79, currency: "EUR" }] },
+      },
+    };
+    const a = mapOrderToActivity(rr, "acc-1", "RR")!;
+    expect(a).toMatchObject({ currency: "GBP", unitPrice: 5.402 });
+    expect(a.fxRate).toBeCloseTo(1.19762, 4);
+    // What Wealthfolio settles in euros: (qty × price + fee) × rate is the €123.97 Trading 212 took.
+    expect((19.0384 * Number(a.unitPrice) + Number(a.fee)) * Number(a.fxRate)).toBeCloseTo(123.97, 1);
+  });
+
+  it("drops the rate of a trade in pence on a pounds account (pence and pounds are one currency)", () => {
+    const a = mapOrderToActivity(
+      { order: { id: 778, side: "BUY", currency: "GBX" }, fill: { type: "TRADE", filledAt: "2024-10-15T10:00:00.000Z", price: 540.2, quantity: 10, walletImpact: { currency: "GBP", fxRate: 100, netValue: -54.02, taxes: [] } } },
+      "acc-1",
+      "RR",
+    )!;
+    expect(a).toMatchObject({ currency: "GBP", unitPrice: 5.402, fxRate: undefined });
+  });
+
   it("omits `amount` on trades so Wealthfolio derives the final cash (qty × price ± fee)", () => {
     const buy = mapOrderToActivity(baseOrder, "acc-1", "AAPL")!;
     const sell = mapOrderToActivity(

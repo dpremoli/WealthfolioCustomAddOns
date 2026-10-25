@@ -43,7 +43,8 @@ function fundingPair(card: ActivityImport, investAccountId: string, key: string)
 /** Whether an import id is one of the funding legs {@link withCardFunding} adds. */
 export const isFundingId = (id: string) => /-fund-(in|out)$/.test(id);
 
-const FUNDED_TYPES = ["WITHDRAWAL", "DEPOSIT", "INTEREST"];
+// A refund an older version stored as CREDIT is funded like one stored as DEPOSIT.
+const FUNDED_TYPES = ["WITHDRAWAL", "DEPOSIT", "CREDIT", "INTEREST"];
 
 /**
  * Funding pairs for card rows already in the card account (imported before the add-on funded
@@ -110,4 +111,40 @@ export function orphanFundingLegs(legs: (Leg & { accountId: string })[], account
     orphans.push(...group.filter((l) => !used.has(l) && own.has(l.accountId)));
   }
   return orphans;
+}
+
+/**
+ * The card refunds 2.6.4 imported a second time: a DEPOSIT beside the CREDIT an older version
+ * stored for the same refund (same day, amount and currency in the card account), and any funding
+ * pair beyond one per refund left. Only 2.6.4 wrote card refunds as DEPOSIT and only older versions
+ * as CREDIT, so a CREDIT and a DEPOSIT with one key are one refund. Returns the ids to delete.
+ */
+export function refundTwins(
+  cardRows: (ExistingActivityLike & { id?: string })[],
+  mainRows: (ExistingActivityLike & { id?: string })[],
+): string[] {
+  const groups = new Map<string, { credits: Leg[]; deposits: Leg[]; outs: Leg[]; ins: Leg[] }>();
+  const group = (r: Leg) => {
+    const k = legKey(r);
+    if (!groups.has(k)) groups.set(k, { credits: [], deposits: [], outs: [], ins: [] });
+    return groups.get(k)!;
+  };
+  for (const r of cardRows) {
+    if (r.comment === CARD_FUNDING_COMMENT) {
+      if (r.activityType === "TRANSFER_OUT") group(r).outs.push(r);
+    } else if (r.activityType === "CREDIT") group(r).credits.push(r);
+    else if (r.activityType === "DEPOSIT") group(r).deposits.push(r);
+  }
+  for (const r of mainRows) if (isLeg(r) && r.activityType === "TRANSFER_IN" && groups.has(legKey(r))) group(r).ins.push(r);
+  const ids: string[] = [];
+  for (const g of groups.values()) {
+    const twins = Math.min(g.credits.length, g.deposits.length);
+    if (twins === 0) continue;
+    ids.push(...g.deposits.slice(0, twins).map((r) => r.id ?? ""));
+    // Refunds left, and the funding pairs beyond one each.
+    const refunds = g.credits.length + g.deposits.length - twins;
+    const extra = Math.max(0, Math.min(g.outs.length, g.ins.length) - refunds);
+    ids.push(...g.outs.slice(0, extra).map((r) => r.id ?? ""), ...g.ins.slice(0, extra).map((r) => r.id ?? ""));
+  }
+  return ids.filter(Boolean);
 }

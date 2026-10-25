@@ -188,6 +188,14 @@ describe("repairSplits", () => {
   });
 });
 
+describe("Eterna's 1-for-20 reverse split (ERNA, not in the export)", () => {
+  it("is proposed from the table for a holding bought before it", () => {
+    const p = proposeSplits({ isin: "US1140824079", held: 0.5, events: [buy("2021-11-02", 10)], today });
+    expect(p.splits).toEqual([{ isin: "US1140824079", date: "2022-10-17", ratio: 1 / 20, name: "Eterna Therapeutics (1-for-20 reverse split)" }]);
+    expect(describeRatio(p.splits[0].ratio)).toBe("1:20");
+  });
+});
+
 describe("Pennon's 2-for-3 consolidation (numbers from a real Invest export)", () => {
   // Trading 212 books every Pennon row under GB00BNNTLN49. The two buys before the consolidation
   // total 0.23384732 shares (the split between them is illustrative); the two after are as exported.

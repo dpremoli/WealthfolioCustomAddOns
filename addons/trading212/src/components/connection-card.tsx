@@ -109,7 +109,8 @@ export function ConnectionCard({ ctx, settings, conn, result, isSyncing }: Conne
           </p>
         )}
         {stats.length > 0 && <StatTiles stats={stats} />}
-        {result && !result.error && <DetailTabs ctx={ctx} result={result} />}
+        {/* Also after an error: it says "see the log", so the Log tab must be there. */}
+        {result && <DetailTabs ctx={ctx} result={result} />}
       </CardContent>
     </Card>
   );
@@ -183,7 +184,7 @@ function DetailTabs({ ctx, result }: { ctx: AddonContext; result: SyncResult }) 
   const hasBreakdown = result.breakdown && Object.keys(result.breakdown).length > 0;
   const hasLog = result.log && result.log.length > 0;
   return (
-    <Tabs defaultValue={hasBreakdown ? "summary" : hasLog ? "log" : "symbols"}>
+    <Tabs defaultValue={result.error && hasLog ? "log" : hasBreakdown ? "summary" : hasLog ? "log" : "symbols"}>
       <TabsList className="grid w-full grid-cols-3">
         <TabsTrigger value="summary" disabled={!hasBreakdown}>Summary</TabsTrigger>
         <TabsTrigger value="symbols">Symbols</TabsTrigger>

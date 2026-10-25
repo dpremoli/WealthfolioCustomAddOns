@@ -52,7 +52,7 @@ interface Dataset {
 }
 
 /** Installs a Trading 212 API that serves each connection (told apart by its key) its own export. */
-function installTrading212(host: FakeWealthfolio, data: Record<string, Dataset>, cashOf: (secret: string) => number) {
+function installTrading212(host: FakeWealthfolio, data: Record<string, Dataset>, cashOf: (secret: string) => number, currencyOf: (secret: string) => string = () => "GBP") {
   const served = new Set<string>();
   /** How many times history was asked for: an export listed or downloaded. */
   const calls = { exports: 0 };
@@ -68,7 +68,7 @@ function installTrading212(host: FakeWealthfolio, data: Record<string, Dataset>,
     }
     const secret = req.auth?.secretKey ?? "";
     if (u.includes("/exports")) return json([REPORT(secret)]);
-    if (u.includes("account/summary")) return json({ id: secret === "t212_auth_inv" ? 11 : 22, currency: "GBP", cash: { availableToTrade: cashOf(secret) } });
+    if (u.includes("account/summary")) return json({ id: secret === "t212_auth_inv" ? 11 : 22, currency: currencyOf(secret), cash: { availableToTrade: cashOf(secret) } });
     if (u.includes("/positions")) {
       return json(
         (data[secret]?.positions ?? []).map((p) => ({ instrument: { ticker: `${p.sym}_GB_EQ`, isin: `GB00${p.sym}000001`, name: p.sym, currency: "GBP" }, quantity: p.qty })),
@@ -468,6 +468,10 @@ describe("a full switch on an account that already holds an older card import", 
     d.inv.csv.push(deposit("DEP-D", 50, 20), deposit("DEP-E", 50, 20));
     // Two identical coffees on one day, of which the older import holds one.
     d.inv.csv.push(coffee("COF-1", 45), coffee("COF-2", 45));
+    // A refund, which versions before 2.6.4 stored as CREDIT and 2.6.4 as DEPOSIT.
+    d.inv.csv.push(
+      row({ Action: "Card credit", Time: `${day(40)}T15:00:00Z`, Total: 8.54, "Currency (Total)": "GBP", "Merchant name": "AMAZON", "Merchant category": "RETAIL_STORES", ID: "REF-1" }),
+    );
     let n = 0;
     const older: Parameters<typeof host.stored.set>[1] = [];
     const add = (r: { activityType: string; date: Date; amount: number; comment: string }) =>
@@ -478,6 +482,7 @@ describe("a full switch on an account that already holds an older card import", 
       add({ activityType: "TRANSFER_IN", date, amount: 5 + i, comment: "Card funding" });
     }
     add({ activityType: "WITHDRAWAL", date: new Date(`${day(45)}T09:00:00Z`), amount: 2.8, comment: "Pret · Eating out" });
+    add({ activityType: "CREDIT", date: new Date(`${day(40)}T15:00:00Z`), amount: 8.54, comment: "Amazon refund" });
     host.stored.set("acc-card", older);
     installTrading212(host, { t212_auth_inv: d.inv, t212_auth_isa: d.isa }, (s) => host.cash(s === "t212_auth_inv" ? "acc-inv" : "acc-isa"));
     return host;
@@ -505,6 +510,11 @@ describe("a full switch on an account that already holds an older card import", 
     for (const r of results.perAccount) expect(r.log.join("\n")).not.toMatch(/refuses|not imported: /i);
     // Both identical deposits are there.
     expect(host.countsByType("acc-inv").DEPOSIT).toBe(5);
+    // The refund is there once (the older CREDIT, not a new DEPOSIT beside it), funded back to Invest once.
+    const card = host.rows("acc-card");
+    expect(card.filter((r) => r.activityType === "CREDIT" || r.activityType === "DEPOSIT")).toHaveLength(1);
+    expect(card.filter((r) => r.activityType === "TRANSFER_OUT" && r.comment === "Card funding")).toHaveLength(1);
+    expect(host.rows("acc-inv").filter((r) => r.activityType === "TRANSFER_IN" && r.comment === "Card funding")).toHaveLength(1);
     for (const r of results.perAccount) expect(r.verification?.ok ?? true, r.log.join("\n")).toBe(true);
   }
 
@@ -523,6 +533,25 @@ describe("a full switch on an account that already holds an older card import", 
     const second = await runSyncAll(host.ctx, {});
     expectClean(host, second);
     expect(host.rows().length).toBe(before);
+  });
+
+  it("removes the refund 2.6.4 imported a second time (a DEPOSIT beside an older CREDIT), with its extra funding", async () => {
+    const host = withOlderCardImport();
+    // What 2.6.4 left: the CREDIT from an older version, and beside it a DEPOSIT for the same refund
+    // with the funding pair that sends it back to Invest.
+    const date = new Date(`${day(40)}T15:00:00Z`);
+    const base = { assetSymbol: null, exchangeMic: null, quantity: null, unitPrice: null, fee: null, currency: "GBP", date, amount: 8.54 };
+    host.stored.get("acc-card")!.push(
+      { ...base, id: "dup-dep", accountId: "acc-card", activityType: "DEPOSIT", comment: "AMAZON · Shopping" },
+      { ...base, id: "dup-out", accountId: "acc-card", activityType: "TRANSFER_OUT", comment: "Card funding" },
+    );
+    host.stored.set("acc-inv", [{ ...base, id: "dup-in", accountId: "acc-inv", activityType: "TRANSFER_IN", comment: "Card funding" }]);
+
+    const results = await runSyncAll(host.ctx, {});
+    expectClean(host, results);
+    expect(host.rows().map((r) => r.id)).not.toContain("dup-dep");
+    const inv = results.perAccount.find((r) => r.connectionId === "inv")!;
+    expect(inv.log.join("\n")).toMatch(/Card refunds: deleted 1 row 2\.6\.4 had imported a second time/);
   });
 
   it("a later sync deletes the card legs whose Invest partner is gone and funds those spends again", async () => {
@@ -575,5 +604,43 @@ describe("splits Trading 212 does not export, against the fake host", () => {
     expect(split, inv.log.join("\n")).toMatchObject({ assetSymbol: "AMZN", amount: 20 });
     expect(Number(host.holdings("acc-inv").find((h) => h.instrument?.symbol === "AMZN")?.quantity)).toBeCloseTo(2.1649, 6);
     expect(inv.log.join("\n")).toMatch(/adding the 20:1 split of 2022-06-06/);
+  });
+});
+
+describe("an EUR account trading shares priced in pence", () => {
+  it("pays in euros what Trading 212 took for the share, and the check compares the EUR wallet alone", async () => {
+    const host = new FakeWealthfolio([
+      { id: "acc-inv", name: "Trading 212 (Invest)", currency: "EUR", trackingMode: "TRANSACTIONS" },
+      { id: "acc-isa", name: "Trading 212 (ISA)", currency: "GBP", trackingMode: "TRANSACTIONS" },
+    ]);
+    host.rates = [{ fromCurrency: "GBP", toCurrency: "EUR", rate: 1.17 }];
+    connect(host, CONNS, { env: "demo", extractCard: false });
+    const inv = [
+      HDR,
+      row({ Action: "Deposit", Time: `${day(30)}T08:00:00Z`, Total: 1000, "Currency (Total)": "EUR", ID: "DEP-EUR" }),
+      // A GBP top-up stays in a GBP wallet: Trading 212's cash figure leaves it out.
+      row({ Action: "Deposit", Time: `${day(29)}T08:00:00Z`, Total: 200, "Currency (Total)": "GBP", ID: "DEP-GBP" }),
+      // 19.0384 RR at 540.2p; Trading 212 took €123.37 from the EUR wallet (rate given per penny).
+      row({
+        Action: "Market buy", Time: `${day(20)}T10:00:00Z`, ISIN: "GB00RR000001", Ticker: "RR_GB_EQ", Name: "RR",
+        "No. of shares": 19.0384, "Price / share": 540.2, "Currency (Price / share)": "GBX", "Exchange rate": 83.4987,
+        Total: 123.37, "Currency (Total)": "EUR", "Currency conversion fee": 0.19, "Currency (Currency conversion fee)": "EUR", ID: "RR-1",
+      }),
+    ];
+    installTrading212(
+      host,
+      { t212_auth_inv: { csv: inv, positions: [{ sym: "RR", qty: 19.0384 }] }, t212_auth_isa: { csv: [HDR], positions: [] } },
+      // Trading 212's own figure: the EUR wallet, 1000 − 123.37.
+      (s) => (s === "t212_auth_inv" ? 876.63 : 0),
+      (s) => (s === "t212_auth_inv" ? "EUR" : "GBP"),
+    );
+
+    const results = await runSyncAll(host.ctx, {});
+    const r = results.perAccount.find((x) => x.connectionId === "inv")!;
+    expect(host.rows("acc-inv").find((a) => a.activityType === "BUY")).toMatchObject({ currency: "GBP", unitPrice: 5.402 });
+    expect(host.cash("acc-inv", "EUR")).toBeCloseTo(876.63, 1);
+    expect(host.cash("acc-inv", "GBP")).toBeCloseTo(200, 2);
+    expect(r.verification?.ok, r.log.join("\n")).toBe(true);
+    expect(r.log.join("\n")).toMatch(/Cash in GBP \(200\) was not compared: Trading 212's cash figure is the EUR wallet only/);
   });
 });

@@ -529,6 +529,40 @@ describe("mapCsvRow — currency conversion", () => {
   });
 });
 
+describe("mapCsvRow — a share priced in pence", () => {
+  const rr = (extra: Record<string, string> = {}) =>
+    tradeRow("Market buy", {
+      Time: "2024-10-15T10:00:00.000Z",
+      ISIN: "GB00B63H8491",
+      Ticker: "RR",
+      Name: "Rolls-Royce",
+      "No. of shares": "19.0384",
+      "Price / share": "540.2",
+      "Currency (Price / share)": "GBX",
+      "Exchange rate": "83.4987",
+      Total: "123.97",
+      "Currency (Total)": "EUR",
+      "Currency conversion fee": "0.19",
+      "Currency (Currency conversion fee)": "EUR",
+      ID: "RR1",
+      ...extra,
+    });
+
+  it("goes in pounds with a rate per pound, so a EUR account pays what Trading 212 took", async () => {
+    const a = await mapCsvRow(rr(), ACC, makeResolver({ RR: "RR|XLON" }));
+    expect(a).toMatchObject({ activityType: "BUY", currency: "GBP", unitPrice: 5.402, quantity: 19.0384 });
+    // 2.6.4 sent 540.2 GBX at 0.0119762 €/p: Wealthfolio made it £5.402 at 0.0119762 €/£, i.e. €1.24.
+    expect(a!.fxRate).toBeCloseTo(1.19762, 4);
+    const cost = (19.0384 * Number(a!.unitPrice) + Number(a!.fee ?? 0)) * Number(a!.fxRate);
+    expect(cost).toBeCloseTo(123.37, 1);
+  });
+
+  it("has no rate on a pounds account", async () => {
+    const a = await mapCsvRow(rr({ "Exchange rate": "100", Total: "102.85", "Currency (Total)": "GBP", "Currency conversion fee": "0" }), ACC, makeResolver({ RR: "RR|XLON" }));
+    expect(a).toMatchObject({ currency: "GBP", unitPrice: 5.402, fxRate: undefined });
+  });
+});
+
 describe("mapCsvRow — rows seen in real exports", () => {
   const R = makeResolver({
     MDT_US_EQ: "MDT|XNYS",

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { samplePayslipLines, writePdf } from "../test-utils";
+import { lineContent, rawPdf, samplePayslipLines, writePdf } from "../test-utils";
 import { PayslipFormatError, parsePayslipLines, parsePayslipPdf } from "./payslip-parser";
 
 describe("parsePayslipLines", () => {
@@ -92,6 +92,36 @@ describe("parsePayslipLines", () => {
   });
 });
 
+describe("tax code", () => {
+  const withCodeLine = (line: string) => {
+    const lines = samplePayslipLines();
+    lines[3] = `      Tax Code/Basis : ${line}`;
+    return lines;
+  };
+
+  it("does not swallow the tax office that follows after a single space", () => {
+    const p = parsePayslipLines(withCodeLine("1257L 0 Tax Office: Faketown"));
+    expect(p.taxCode).toBe("1257L 0");
+    expect(JSON.stringify(p)).not.toContain("Faketown");
+  });
+
+  it.each([
+    ["K475 M1 Tax Office: Faketown", "K475 M1"],
+    ["BR Tax Office: Faketown", "BR"],
+    ["S1257L Tax Office: Faketown", "S1257L"],
+    ["C1257L  W1", "C1257L W1"],
+    ["0T", "0T"],
+  ])("reads %s", (text, code) => {
+    const p = parsePayslipLines(withCodeLine(text));
+    expect(p.taxCode).toBe(code);
+    expect(JSON.stringify(p)).not.toContain("Faketown");
+  });
+
+  it("stores nothing for a value that is not a tax code", () => {
+    expect(parsePayslipLines(withCodeLine("Faketown Office")).taxCode).toBe("");
+  });
+});
+
 describe("parsePayslipPdf", () => {
   const now = new Date("2026-11-02T09:00:00.000Z");
 
@@ -108,6 +138,24 @@ describe("parsePayslipPdf", () => {
     expect(p.warnings).toEqual([]);
     expect(p.totalPayments).toBe(2817);
     expect(JSON.stringify(p)).not.toContain("QQ123456C");
+  });
+
+  it("parses a payslip page split across two content streams", async () => {
+    const sample = samplePayslipLines();
+    const first = sample[0]!;
+    const at = first.indexOf("31.10.2026");
+    const valueX = (20 + at * 4.8).toFixed(2);
+    const pdf = rawPdf(
+      [
+        lineContent([first.slice(0, at).trimEnd()]),
+        `BT ${valueX} 800 Td /F1 8 Tf (31.10.2026) Tj ET\n${lineContent(sample.slice(1), 1)}`,
+      ],
+      { pages: [[0, 1]] },
+    );
+    const p = await parsePayslipPdf(pdf, now);
+    expect(p.payDate).toBe("2026-10-31");
+    expect(p.netPay).toBe(2287);
+    expect(p.warnings).toEqual([]);
   });
 
   it("warns when the figures do not add up", async () => {

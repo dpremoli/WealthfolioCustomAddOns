@@ -53,6 +53,9 @@ function field(lines: string[], label: RegExp): string | undefined {
   return undefined;
 }
 
+/** A UK tax code with an optional week 1 / month 1 basis, at the start of a value. */
+const TAX_CODE = /^(?:[SC])?(?:\d{1,4}[LMNTP]|K\d{1,4}|BR|D[0-2]|NT|0T)(?:\s+(?:0|1|M1|W1|X))?\b/;
+
 function lineAfterLabel(lines: string[], label: RegExp): string | undefined {
   for (const line of lines) {
     const m = label.exec(line);
@@ -82,7 +85,8 @@ export function parsePayslipLines(lines: string[]): Omit<Payslip, "warnings" | "
   } catch {
     throw missing("Tax Period");
   }
-  const taxCode = field(lines, /Tax Code\/Basis/) ?? "";
+  // Only a value shaped like a tax code is kept: the field can run on into "Tax Office: …".
+  const taxCode = TAX_CODE.exec(field(lines, /Tax Code\/Basis/) ?? "")?.[0] ?? "";
 
   const totalsText = lines.findIndex((l) => /\bTotal Payments\b/.test(l));
   if (totalsText < 0) throw missing("Total Payments");

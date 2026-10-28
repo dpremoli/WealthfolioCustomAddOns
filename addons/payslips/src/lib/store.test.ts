@@ -32,9 +32,9 @@ describe("payslips", () => {
   it("shards by tax year and keeps an index", async () => {
     const h = host();
     await savePayslips(h.ctx, [slip("2026-04-30", 2026), slip("2025-10-31", 2025, 7)]);
-    expect(JSON.parse(h.storage.get("payslips/2025")!)).toHaveLength(1);
-    expect(JSON.parse(h.storage.get("payslips/2026")!)).toHaveLength(1);
-    expect(JSON.parse(h.storage.get("payslips/index")!)).toEqual([2025, 2026]);
+    expect(JSON.parse(h.storage.get("payslips:2025")!)).toHaveLength(1);
+    expect(JSON.parse(h.storage.get("payslips:2026")!)).toHaveLength(1);
+    expect(JSON.parse(h.storage.get("payslips:index")!)).toEqual([2025, 2026]);
     expect(await taxYears(h.ctx)).toEqual([2025, 2026]);
     expect((await loadPayslips(h.ctx)).map((p) => p.payDate)).toEqual(["2025-10-31", "2026-04-30"]);
     expect((await loadPayslips(h.ctx, 2026)).map((p) => p.payDate)).toEqual(["2026-04-30"]);
@@ -58,8 +58,8 @@ describe("payslips", () => {
     await deletePayslip(h.ctx, "2026-04-30");
     expect(await loadPayslips(h.ctx)).toHaveLength(1);
     expect(await loadLinks(h.ctx)).toEqual({});
-    expect(h.storage.has("payslips/2026")).toBe(false);
-    expect(h.storage.has("links/2026")).toBe(false);
+    expect(h.storage.has("payslips:2026")).toBe(false);
+    expect(h.storage.has("links:2026")).toBe(false);
     expect(await taxYears(h.ctx)).toEqual([2025]);
     await deletePayslip(h.ctx, "2030-01-01");
     expect(await loadPayslips(h.ctx)).toHaveLength(1);
@@ -88,12 +88,12 @@ describe("links", () => {
     await savePayslips(h.ctx, [slip("2025-10-31", 2025, 7), slip("2026-10-31", 2026, 7)]);
     await saveLink(h.ctx, "2026-10-31", link);
     await saveLink(h.ctx, "2025-10-31", { ...link, activityId: "act-2", chosen: "manual" });
-    expect(JSON.parse(h.storage.get("links/2026")!)).toEqual({ "2026-10-31": link });
+    expect(JSON.parse(h.storage.get("links:2026")!)).toEqual({ "2026-10-31": link });
     expect(await loadLinks(h.ctx, 2026)).toEqual({ "2026-10-31": link });
     expect(Object.keys(await loadLinks(h.ctx))).toEqual(["2025-10-31", "2026-10-31"]);
     await saveLink(h.ctx, "2026-10-31", null);
     expect(await loadLinks(h.ctx, 2026)).toEqual({});
-    expect(h.storage.has("links/2026")).toBe(false);
+    expect(h.storage.has("links:2026")).toBe(false);
   });
 });
 

@@ -19,16 +19,28 @@ import {
   TableHeader,
   TableRow,
 } from "@wealthfolio/ui";
-import { sourceRefOf, type AddonPageProps } from "@wf-addons/kit";
+import type { AddonPageProps } from "@wf-addons/kit";
 import { PageShell } from "@wf-addons/kit/ui";
 import { useState } from "react";
 import { PayslipsNav } from "../components/nav";
 import { QUERY_ROOT, useSalaryMatches } from "../hooks/use-payslip-data";
 import { gbp, isoDay } from "../lib/format";
 import { findPayrollAccount, recordPayroll, PAYROLL_ACCOUNT_NAME, type PayrollOutcome } from "../lib/payroll";
-import { previewPayroll, type PayrollPreview } from "../lib/payroll-preview";
+import { payslipStatusLabel, previewPayroll, type PayrollPreview } from "../lib/payroll-preview";
 import { defaultAccountIds } from "../lib/salary-match";
-import { saveSettings } from "../lib/store";
+import type { Payslip } from "../lib/model";
+import type { SalaryMatch } from "../lib/salary-match";
+import { loadSettings, saveSettings } from "../lib/store";
+
+/** Exactly what Preview showed: record writes this, never newer data. */
+interface PreviewSnapshot {
+  /** `dataUpdatedAt` of the loaded data the preview was made from; a later load makes it stale. */
+  updatedAt: number;
+  payslips: Payslip[];
+  matches: SalaryMatch[];
+  windowDays: number;
+  preview: PayrollPreview;
+}
 
 export const SPENDING_CAVEAT =
   "Keep the Payroll account switched off for Spending in Wealthfolio's settings. Linking turns the bank's salary deposit into a transfer, so Wealthfolio's spending report may no longer count it as income.";
@@ -39,12 +51,16 @@ const MAX_DAYS = 10;
 export default function SettingsPage({ ctx }: AddonPageProps) {
   const client = useQueryClient();
   const refresh = () => client.invalidateQueries({ queryKey: [QUERY_ROOT] });
-  const { data, isLoading } = useSalaryMatches(ctx);
+  const { data, isLoading, dataUpdatedAt } = useSalaryMatches(ctx);
   const [picked, setPicked] = useState<string[] | null>(null);
   const [days, setDays] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
-  const [preview, setPreview] = useState<PayrollPreview | null>(null);
+  const [snapshot, setSnapshot] = useState<PreviewSnapshot | null>(null);
   const [outcome, setOutcome] = useState<PayrollOutcome | null>(null);
+
+  // A preview is only good for the data it was made from; once that is reloaded it is dropped.
+  const preview = snapshot && snapshot.updatedAt === dataUpdatedAt ? snapshot.preview : null;
+  const previewStale = snapshot !== null && preview === null;
 
   const accounts = data?.accounts ?? [];
   const defaults = defaultAccountIds(accounts);
@@ -64,7 +80,7 @@ export default function SettingsPage({ ctx }: AddonPageProps) {
       setSaved(true);
       setPicked(null);
       setDays(null);
-      setPreview(null);
+      setSnapshot(null);
       await refresh();
     },
   });
@@ -74,39 +90,41 @@ export default function SettingsPage({ ctx }: AddonPageProps) {
       if (settings) await saveSettings(ctx, { ...settings, payroll: { ...settings.payroll, enabled } });
     },
     onSuccess: async () => {
-      setPreview(null);
+      setSnapshot(null);
       setOutcome(null);
       await refresh();
     },
   });
 
   const showPreview = useMutation({
-    mutationFn: async (): Promise<PayrollPreview> => {
+    mutationFn: async (): Promise<PreviewSnapshot> => {
       if (!data) throw new Error("Still loading");
+      const { payslips, matches } = data;
+      const windowDays = data.settings.windowDays;
       const payroll = findPayrollAccount(data.accounts);
       const existing = payroll ? await ctx.api.activities.getAll(payroll.id) : [];
-      const refs = new Set(existing.map((a) => sourceRefOf(a.comment)).filter((r): r is string => !!r));
-      return previewPayroll(data.payslips, data.matches, payroll?.id ?? "payroll-new", refs);
+      const preview = previewPayroll(payslips, matches, payroll?.id ?? "payroll-new", existing);
+      return { updatedAt: dataUpdatedAt, payslips, matches, windowDays, preview };
     },
-    onSuccess: (p) => {
-      setPreview(p);
+    onSuccess: (snap) => {
+      setSnapshot(snap);
       setOutcome(null);
     },
   });
 
   const record = useMutation({
-    mutationFn: async (): Promise<PayrollOutcome> => {
-      if (!data) throw new Error("Still loading");
-      const result = await recordPayroll(ctx, data.payslips, data.matches);
+    mutationFn: async (snap: PreviewSnapshot): Promise<PayrollOutcome> => {
+      const result = await recordPayroll(ctx, snap.payslips, snap.matches, snap.windowDays);
       const account = findPayrollAccount(await ctx.api.accounts.getAll());
-      if (account && account.id !== data.settings.payroll.accountId) {
-        await saveSettings(ctx, { ...data.settings, payroll: { ...data.settings.payroll, accountId: account.id } });
+      const settings = await loadSettings(ctx);
+      if (account && account.id !== settings.payroll.accountId) {
+        await saveSettings(ctx, { ...settings, payroll: { ...settings.payroll, accountId: account.id } });
       }
       return result;
     },
     onSuccess: async (result) => {
       setOutcome(result);
-      setPreview(null);
+      setSnapshot(null);
       await refresh();
     },
   });
@@ -201,8 +219,8 @@ export default function SettingsPage({ ctx }: AddonPageProps) {
             Turned on, the add-on can keep a separate "{PAYROLL_ACCOUNT_NAME}" cash account in Wealthfolio. Each payslip
             is recorded there as gross pay in, income tax, National Insurance, other deductions, and the net pay out as a
             transfer. The transfer is linked to the salary deposit already in your bank account, which is turned from a
-            deposit into the other side of that transfer. Only payslips without warnings are recorded, and recording a
-            payslip twice adds nothing.
+            deposit into the other side of that transfer. Only payslips without warnings are recorded; recording an unchanged
+            payslip again adds nothing, and a corrected one replaces the rows already recorded for its pay date.
           </p>
           <AlertFeedback variant="warning">{SPENDING_CAVEAT}</AlertFeedback>
 
@@ -227,13 +245,19 @@ export default function SettingsPage({ ctx }: AddonPageProps) {
                 </Button>
                 <Button
                   variant="destructive"
-                  onClick={() => record.mutate()}
+                  onClick={() => snapshot && preview && record.mutate(snapshot)}
                   disabled={!preview || preview.rows.length === 0 || record.isPending}
                   title="Writes the previewed rows to Wealthfolio and converts the matched bank deposits to linked transfers"
                 >
                   {record.isPending ? "Recording…" : "Record in Wealthfolio"}
                 </Button>
-                {!preview && <span className="text-muted-foreground text-xs">Preview first: nothing is written until you record.</span>}
+                {previewStale ? (
+                  <span className="text-muted-foreground text-xs">
+                    Your payslips or deposits changed since the preview. Preview again to see what will be recorded.
+                  </span>
+                ) : (
+                  !preview && <span className="text-muted-foreground text-xs">Preview first: nothing is written until you record.</span>
+                )}
               </div>
 
               {preview && (
@@ -243,6 +267,14 @@ export default function SettingsPage({ ctx }: AddonPageProps) {
                     <span className="font-medium">{payrollExists ? PAYROLL_ACCOUNT_NAME : `${PAYROLL_ACCOUNT_NAME} (new)`}</span>
                     {payrollExists ? "" : " — would be created (GBP cash)"}
                   </p>
+
+                  {preview.payslips.length > 0 && (
+                    <ul className="list-disc pl-5">
+                      {preview.payslips.map((p) => (
+                        <li key={p.payDate}>{`${p.payDate}: ${payslipStatusLabel(p)}`}</li>
+                      ))}
+                    </ul>
+                  )}
 
                   {preview.rows.length === 0 ? (
                     <p className="text-muted-foreground">No payslip can be recorded yet.</p>
@@ -283,7 +315,11 @@ export default function SettingsPage({ ctx }: AddonPageProps) {
                           <li key={c.payDate}>
                             {gbp(Number(c.activity.amount))} on {isoDay(c.activity.date)} in {accountName(c.activity.accountId)} (
                             {c.payDate} payslip)
-                            {c.alreadyTransfer ? ": already a transfer" : ": DEPOSIT becomes TRANSFER_IN"}
+                            {c.pennyOff
+                              ? ": won't be linked (amount differs by a penny)"
+                              : c.alreadyTransfer
+                                ? ": already a transfer"
+                                : ": DEPOSIT becomes TRANSFER_IN"}
                           </li>
                         ))}
                       </ul>
@@ -318,6 +354,7 @@ function OutcomeView({ outcome }: { outcome: PayrollOutcome }) {
     <AlertFeedback variant={clean ? "success" : "warning"} title="Payroll recorded">
       <ul className="list-disc pl-5">
         <li>{outcome.stored} rows stored</li>
+        {outcome.replaced > 0 && <li>{`${outcome.replaced} payslip${outcome.replaced === 1 ? "" : "s"} replaced`}</li>}
         <li>{outcome.linked} bank deposits linked</li>
         {outcome.unsaved.length > 0 && (
           <li>

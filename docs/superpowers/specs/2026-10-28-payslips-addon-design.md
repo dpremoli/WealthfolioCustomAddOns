@@ -63,9 +63,9 @@ All under `addons/payslips/src/lib/` unless noted.
   `grossBeforeSacrifice` (= totalPayments + ussSacrifice), `incomeTax`, `employeeNi`,
   `studentLoan` (deductions matching `/student loan|\bSLC\b|\bPGL\b/i`), `otherDeductions`.
 - **`store.ts`** — storage layout (all JSON via kit `jsonStore`):
-  - `payslips/<taxYearStart>` → `Payslip[]` (one tax year: ≤ ~14 payslips, a few KB);
-  - `payslips/index` → `number[]` tax years present;
-  - `links/<taxYearStart>` → `Record<payDate, Link>` with
+  - `payslips:<taxYearStart>` → `Payslip[]` (one tax year: ≤ ~14 payslips, a few KB);
+  - `payslips:index` → `number[]` tax years present;
+  - `links:<taxYearStart>` → `Record<payDate, Link>` with
     `Link = { activityId, accountId, chosen: "auto" | "manual", tagged?: boolean }`;
   - `uss-statements` → `UssStatement[]`, capped at 100 entries;
   - `settings` → `{ accountIds?: string[]; windowDays: number; payroll: { enabled: boolean; accountId?: string } }`;
@@ -81,7 +81,7 @@ All under `addons/payslips/src/lib/` unless noted.
   `tagDeposit(ctx, row, payDate)` writes `withSourceRef(comment, "payslip:<payDate>")` via
   `activities.saveMany` (opt-in button only).
 - **`payroll.ts`** — `planPayroll(payslip, accountId)` → `ActivityImport[]` with ids
-  `payslip:<payDate>:<n>` and refs in comments: `DEPOSIT` Total Payments ("Gross pay … after USS
+  `payslip:<payDate>:<role>` (`gross`, `tax`, `ni`, `net`, `ded:<slug>`; stable when a corrected payslip adds a line, which then replaces that payslip's rows) and refs in comments: `DEPOSIT` Total Payments ("Gross pay … after USS
   salary sacrifice £x"), `TAX` income tax, `TAX` employee NI, `WITHDRAWAL` each other deduction,
   `TRANSFER_OUT` net pay. Sums to 0. Only payslips with no warnings are offered.
   `ensurePayrollAccount(ctx)` reuses or creates `Payroll` (CASH, GBP, TRANSACTIONS, provider

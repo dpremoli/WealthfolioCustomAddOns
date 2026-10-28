@@ -40,37 +40,63 @@ function hexOf(text: string): string {
   return hex;
 }
 
+export interface RawPdfOptions {
+  flate?: boolean;
+  /** Write each stream's `/Length` as an indirect reference to an integer object. */
+  indirectLength?: boolean;
+  /** Line ending after the `stream` keyword (default `\n`). */
+  streamEol?: "\n" | "\r\n";
+  /** Line ending between the stream data and `endstream` (default `\n`). */
+  endEol?: "\n" | "\r\n" | "\r" | "\n\n";
+  /** Page layout: each entry lists the indexes of the `contents` that make up that page
+   *  (one stream = `/Contents n 0 R`, several = `/Contents [a b]`). Default: one page per stream. */
+  pages?: number[][];
+}
+
 /**
- * A valid PDF 1.3 with one page per content stream (catalog, pages, a Type1 Courier `/F1`
- * with WinAnsiEncoding, exact xref offsets). `contents` are raw content-stream texts, so
- * tests can hand-write operators the line-based `writePdf` never emits.
+ * A valid PDF 1.3 (catalog, pages, a Type1 Courier `/F1` with WinAnsiEncoding, exact xref
+ * offsets). By default one page per content stream; `opts.pages` groups streams into pages.
+ * `contents` are raw content-stream texts, so tests can hand-write operators the line-based
+ * `writePdf` never emits.
  */
-export function rawPdf(contents: (string | Uint8Array)[], opts: { flate?: boolean } = {}): Uint8Array {
-  const pageCount = contents.length;
-  // 1 catalog, 2 pages, 3 font, then (page, content) pairs from 4.
+export function rawPdf(contents: (string | Uint8Array)[], opts: RawPdfOptions = {}): Uint8Array {
+  const pages = opts.pages ?? contents.map((_, i) => [i]);
+  const pageCount = pages.length;
+  const streamEol = opts.streamEol ?? "\n";
+  const endEol = opts.endEol ?? "\n";
+  // 1 catalog, 2 pages, 3 font, pages from 4, then the content streams, then /Length integers.
+  const firstContent = 4 + pageCount;
+  const firstLength = firstContent + contents.length;
   const objects: Uint8Array[] = [];
-  const kids = contents.map((_, i) => `${4 + i * 2} 0 R`).join(" ");
+  const kids = pages.map((_, i) => `${4 + i} 0 R`).join(" ");
   objects.push(latin1("<< /Type /Catalog /Pages 2 0 R >>"));
   objects.push(latin1(`<< /Type /Pages /Kids [${kids}] /Count ${pageCount} >>`));
   objects.push(latin1("<< /Type /Font /Subtype /Type1 /BaseFont /Courier /Encoding /WinAnsiEncoding >>"));
-  contents.forEach((content, i) => {
-    const contentId = 5 + i * 2;
+  for (const streams of pages) {
+    const refs = streams.map((k) => `${firstContent + k} 0 R`);
+    const ref = refs.length === 1 ? refs[0]! : `[${refs.join(" ")}]`;
     objects.push(
       latin1(
-        `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents ${contentId} 0 R >>`,
+        `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents ${ref} >>`,
       ),
     );
+  }
+  const lengths: number[] = [];
+  contents.forEach((content, i) => {
     const raw = typeof content === "string" ? latin1(content) : content;
     const body = opts.flate ? new Uint8Array(deflateSync(raw)) : raw;
+    lengths.push(body.length);
     const filter = opts.flate ? " /Filter /FlateDecode" : "";
+    const length = opts.indirectLength ? `${firstLength + i} 0 R` : String(body.length);
     objects.push(
       concat([
-        latin1(`<< /Length ${body.length}${filter} >>\nstream\n`),
+        latin1(`<< /Length ${length}${filter} >>\nstream${streamEol}`),
         body,
-        latin1("\nendstream"),
+        latin1(`${endEol}endstream`),
       ]),
     );
   });
+  if (opts.indirectLength) for (const n of lengths) objects.push(latin1(String(n)));
 
   const chunks: Uint8Array[] = [latin1("%PDF-1.3\n%\xe2\xe3\xcf\xd3\n")];
   let offset = chunks[0]!.length;
@@ -94,18 +120,21 @@ export function rawPdf(contents: (string | Uint8Array)[], opts: { flate?: boolea
  * line. Leading spaces become an x offset of `spaces * 0.6 * 8` from a left margin of 20; y
  * starts at 800 and steps down 10.
  */
-export function writePdf(pages: string[][], opts: { flate?: boolean } = {}): Uint8Array {
-  const contents = pages.map((lines) =>
-    lines
-      .map((line, i) => {
-        const spaces = line.length - line.trimStart().length;
-        const x = (LEFT_MARGIN + spaces * CHAR_WIDTH).toFixed(2);
-        const y = TOP - i * LINE_STEP;
-        return `BT ${x} ${y} Td /F1 ${FONT_SIZE} Tf <${hexOf(line.trimStart())}> Tj ET`;
-      })
-      .join("\n"),
-  );
-  return rawPdf(contents, opts);
+export function writePdf(pages: string[][], opts: RawPdfOptions = {}): Uint8Array {
+  return rawPdf(pages.map((lines) => lineContent(lines)), opts);
+}
+
+/** The content-stream text `writePdf` writes for `lines`; `firstRow` offsets y for a stream that
+ *  continues a page started in another stream. */
+export function lineContent(lines: string[], firstRow = 0): string {
+  return lines
+    .map((line, i) => {
+      const spaces = line.length - line.trimStart().length;
+      const x = (LEFT_MARGIN + spaces * CHAR_WIDTH).toFixed(2);
+      const y = TOP - (firstRow + i) * LINE_STEP;
+      return `BT ${x} ${y} Td /F1 ${FONT_SIZE} Tf <${hexOf(line.trimStart())}> Tj ET`;
+    })
+    .join("\n");
 }
 
 export interface SampleOptions {

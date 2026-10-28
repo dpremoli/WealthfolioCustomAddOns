@@ -84,7 +84,7 @@
 - `loadLinks(ctx, taxYear)`/`saveLink(ctx, payDate, link | null)` with `Link = { activityId; accountId; chosen: "auto" | "manual"; tagged?: boolean }`.
 - `loadSettings(ctx): Promise<Settings>`, `saveSettings(ctx, s)`, defaults `{ windowDays: 4, payroll: { enabled: false } }`.
 - `loadStatements`/`saveStatements` (cap 100, newest kept).
-- Keys exactly: `payslips/<year>`, `payslips/index`, `links/<year>`, `uss-statements`, `settings`, `payroll-refused`.
+- Keys exactly: `payslips:<year>`, `payslips:index`, `links:<year>`, `uss-statements`, `settings`, `payroll-refused`.
 
 - [ ] Tests: shards by tax year (a 5 April and 6 April payslip land in different keys); `replaces a payslip with the same pay date`; 30 years × 12 payslips stores fine and every value under the fake host's cap (`maxStoredValueBytes < 20_000`); statements capped at 100.
 - [ ] Implement, run, commit.
@@ -109,7 +109,7 @@
 
 **Interfaces:**
 - `PAYROLL_PROVIDER = "payslips-addon"`.
-- `planPayroll(p: Payslip, accountId: string): ActivityImport[]` — ids `payslip:<payDate>:<n>` and comments via `withSourceRef(text, id)`; signed sum (DEPOSIT +, others −) = 0.
+- `planPayroll(p: Payslip, accountId: string): ActivityImport[]` — ids `payslip:<payDate>:<role>` (gross, tax, ni, net, ded:<slug>) and comments via `withSourceRef(text, id)`; signed sum (DEPOSIT +, others −) = 0.
 - `findPayrollAccount(accounts)`, `ensurePayrollAccount(ctx): Promise<Account>`.
 - `recordPayroll(ctx, payslips: Payslip[], matches: SalaryMatch[]): Promise<{ stored: number; unsaved: UnsavedRow[]; linked: number; linkFailed: string[]; skipped: string[] }>` — skips payslips with warnings; refused-rows store `payroll-refused`; links each matched payslip's stored TRANSFER_OUT (found by `sourceRefOf`) with its deposit via `convertAndLinkMoves`.
 

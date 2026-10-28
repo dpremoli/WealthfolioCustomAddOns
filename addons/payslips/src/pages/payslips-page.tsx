@@ -21,7 +21,8 @@ import { PageShell } from "@wf-addons/kit/ui";
 import { useRef, useState, type DragEvent } from "react";
 import { PayslipsNav } from "../components/nav";
 import { PayslipViewer } from "../components/payslip-viewer";
-import { TaxYearSelect } from "../components/tax-year-select";
+import { cellStyle, headStyle, SortableHead } from "../components/sortable-head";
+import { PeriodSelect } from "../components/period-select";
 import { QUERY_ROOT, useSalaryMatches } from "../hooks/use-payslip-data";
 import { useKeepPdfs, usePdfDates } from "../hooks/use-pdf-dates";
 import { gbp, isoDay } from "../lib/format";
@@ -31,7 +32,9 @@ import { deletePdf, downloadPdf, getKeepPdfs, savePdf } from "../lib/pdf-store";
 import { readBytes } from "../lib/read-file";
 import { refreshPayslips, type RefreshResult } from "../lib/refresh";
 import { tagDeposit, type SalaryMatch } from "../lib/salary-match";
+import { payslipInPeriod, periodLabel as labelOfPeriod, resolvePeriod, type Period } from "../lib/period";
 import { deletePayslip, saveLink, savePayslips } from "../lib/store";
+import { DEFAULT_SORT, nextSort, SORT_COLUMNS, sortPayslips, type SortState } from "../lib/table-sort";
 import { periodLabel } from "../lib/tax-year";
 
 interface FileError {
@@ -90,7 +93,8 @@ export default function PayslipsPage({ ctx }: AddonPageProps) {
   const client = useQueryClient();
   const refresh = () => client.invalidateQueries({ queryKey: [QUERY_ROOT] });
   const { data, isLoading, error: loadError } = useSalaryMatches(ctx);
-  const [year, setYear] = useState<number | null>(null);
+  const [chosen, setChosen] = useState<Period | null>(null);
+  const [sort, setSort] = useState<SortState>(DEFAULT_SORT);
   const [dragging, setDragging] = useState(false);
   const [confirming, setConfirming] = useState<string | null>(null);
   const [viewing, setViewing] = useState<string | null>(null);
@@ -133,10 +137,9 @@ export default function PayslipsPage({ ctx }: AddonPageProps) {
   });
 
   const payslips = data?.payslips ?? [];
-  const years = [...new Set(payslips.map((p) => p.taxYear))].sort((a, b) => a - b);
-  const selected = year !== null && years.includes(year) ? year : years[years.length - 1];
-  const shown = payslips.filter((p) => p.taxYear === selected);
+  const period = resolvePeriod(chosen, payslips);
   const matchOf = new Map((data?.matches ?? []).map((m) => [m.payDate, m]));
+  const shown = sortPayslips(period ? payslips.filter((p) => payslipInPeriod(p, period)) : [], sort, (d) => matchOf.get(d));
   const accountName = (id?: string) => data?.accounts.find((a) => a.id === id)?.name ?? "account";
 
   const pick = (list: FileList | File[] | null | undefined) => {
@@ -267,30 +270,34 @@ export default function PayslipsPage({ ctx }: AddonPageProps) {
       )}
 
       <Card>
-        <CardHeader className="flex-row items-center justify-between gap-4 space-y-0">
+        <CardHeader style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 16 }}>
           <CardTitle className="text-base">Stored payslips</CardTitle>
-          {selected !== undefined && <TaxYearSelect years={years} value={selected} onChange={setYear} />}
+          {period && <PeriodSelect payslips={payslips} value={period} onChange={setChosen} />}
         </CardHeader>
         <CardContent>
           {isLoading ? (
             <p className="text-muted-foreground text-sm">Loading…</p>
           ) : shown.length === 0 ? (
-            <p className="text-muted-foreground text-sm">No payslips yet. Import a PDF above.</p>
+            <p className="text-muted-foreground text-sm">
+              {period ? `No payslips in ${labelOfPeriod(period)}.` : "No payslips yet. Import a PDF above."}
+            </p>
           ) : (
-            <div className="overflow-x-auto">
+            <div style={{ overflowX: "auto" }}>
               <Table className="text-xs">
                 <TableHeader>
                   <TableRow>
-                    <TableHead>Pay date</TableHead>
-                    <TableHead>Period</TableHead>
-                    <TableHead className="text-right">Gross before USS</TableHead>
-                    <TableHead className="text-right">USS</TableHead>
-                    <TableHead className="text-right">Tax</TableHead>
-                    <TableHead className="text-right">NI</TableHead>
-                    <TableHead className="text-right">Net</TableHead>
-                    <TableHead>Checks</TableHead>
-                    <TableHead>Salary deposit</TableHead>
-                    <TableHead />
+                    {SORT_COLUMNS.map((c) => (
+                      <SortableHead
+                        key={c.key}
+                        label={c.label}
+                        align={c.align}
+                        dir={sort.key === c.key ? sort.dir : undefined}
+                        onSort={() => setSort(nextSort(sort, c.key))}
+                      />
+                    ))}
+                    <TableHead style={headStyle("right")}>
+                      <span style={{ position: "absolute", width: 1, height: 1, overflow: "hidden", clip: "rect(0 0 0 0)" }}>Actions</span>
+                    </TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -301,16 +308,16 @@ export default function PayslipsPage({ ctx }: AddonPageProps) {
                       sourceRefOf(match?.activity?.comment) === `payslip:${p.payDate}`;
                     return (
                       <TableRow key={p.payDate}>
-                        <TableCell className="whitespace-nowrap">{p.payDate}</TableCell>
-                        <TableCell className="whitespace-nowrap">
+                        <TableCell style={cellStyle("left", { nowrap: true })}>{p.payDate}</TableCell>
+                        <TableCell style={cellStyle("left", { nowrap: true })}>
                           {periodLabel(p.period)} ({String(p.period).padStart(2, "0")}/{p.taxYear})
                         </TableCell>
-                        <TableCell className="text-right tabular-nums">{gbp(grossBeforeSacrifice(p))}</TableCell>
-                        <TableCell className="text-right tabular-nums">{gbp(ussSacrifice(p))}</TableCell>
-                        <TableCell className="text-right tabular-nums">{gbp(incomeTax(p))}</TableCell>
-                        <TableCell className="text-right tabular-nums">{gbp(employeeNi(p))}</TableCell>
-                        <TableCell className="text-right tabular-nums">{gbp(p.netPay)}</TableCell>
-                        <TableCell>
+                        <TableCell style={cellStyle("right")}>{gbp(grossBeforeSacrifice(p))}</TableCell>
+                        <TableCell style={cellStyle("right")}>{gbp(ussSacrifice(p))}</TableCell>
+                        <TableCell style={cellStyle("right")}>{gbp(incomeTax(p))}</TableCell>
+                        <TableCell style={cellStyle("right")}>{gbp(employeeNi(p))}</TableCell>
+                        <TableCell style={cellStyle("right")}>{gbp(p.netPay)}</TableCell>
+                        <TableCell style={cellStyle("left")}>
                           {p.warnings.length === 0 ? (
                             <Badge variant="success-subtle">OK</Badge>
                           ) : (
@@ -318,7 +325,7 @@ export default function PayslipsPage({ ctx }: AddonPageProps) {
                               <Badge variant="warning-subtle">
                                 {p.warnings.length} {p.warnings.length === 1 ? "warning" : "warnings"}
                               </Badge>
-                              <ul className="text-muted-foreground max-w-56 space-y-0.5">
+                              <ul className="text-muted-foreground" style={{ maxWidth: "14rem", margin: 0, padding: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: 2 }}>
                                 {p.warnings.map((w, i) => (
                                   <li key={i}>{w}</li>
                                 ))}
@@ -326,7 +333,7 @@ export default function PayslipsPage({ ctx }: AddonPageProps) {
                             </div>
                           )}
                         </TableCell>
-                        <TableCell>
+                        <TableCell style={cellStyle("left")}>
                           <MatchCell
                             match={match}
                             accountName={accountName}
@@ -334,7 +341,7 @@ export default function PayslipsPage({ ctx }: AddonPageProps) {
                             onPick={(row) => choose.mutate({ payDate: p.payDate, row })}
                           />
                         </TableCell>
-                        <TableCell className="whitespace-nowrap text-right">
+                        <TableCell style={cellStyle("right")}>
                           <Button
                             size="sm"
                             variant="outline"
@@ -456,7 +463,8 @@ function MatchCell({
       <div className="space-y-1">
         <Badge variant="warning-subtle">Ambiguous</Badge>
         <select
-          className="block w-full max-w-56 rounded border bg-background px-2 py-1 text-xs"
+          className="rounded border bg-background px-2 py-1 text-xs"
+          style={{ display: "block", width: "100%", maxWidth: "14rem" }}
           aria-label="Choose the salary deposit"
           defaultValue=""
           disabled={busy}

@@ -76,7 +76,7 @@ export default function TaxPage({ ctx }: AddonPageProps) {
           <StatTiles
             stats={[
               { label: "Gross before USS", value: gbp(summary.grossBeforeUss), icon: "Banknote" },
-              { label: "USS sacrifice", value: gbp(summary.ussSacrifice), icon: "PiggyBank" },
+              { label: "USS contributions", value: gbp(summary.ussContribution), icon: "PiggyBank" },
               { label: "Taxable pay", value: gbp(summary.taxablePay), icon: "FileText" },
               ...(summary.expenseRefunds > 0
                 ? [{ label: "Expense refunds", value: gbp(summary.expenseRefunds), icon: "Receipt" } satisfies Stat]

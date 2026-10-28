@@ -80,6 +80,19 @@ describe("planPayroll", () => {
     expect(new Set(rows.map((r) => r.id)).size).toBe(6);
   });
 
+  it("records a USS deduction as an ordinary withdrawal, with no sacrifice note, and still sums to zero", () => {
+    const p = payslip({ payments: ["Salary 3000.00"], deductions: ["Tax paid 380.00", "Employee NIC 150.00", "USS(CRB) 16 183.00"] });
+    const rows = planPayroll(p, "acc-1");
+    expect(rows.map((r) => [r.activityType, r.amount, (r.comment ?? "").split(" [ref")[0]])).toEqual([
+      ["DEPOSIT", 3000, "Gross pay 2026-10-31"],
+      ["TAX", 380, "Income tax 2026-10-31"],
+      ["TAX", 150, "Employee NI 2026-10-31"],
+      ["WITHDRAWAL", 183, "USS(CRB) 16 2026-10-31"],
+      ["TRANSFER_OUT", 2287, "Net pay 2026-10-31"],
+    ]);
+    expect(signedSum(rows)).toBe(0);
+  });
+
   it("leaves out the tax and NI rows when there are none, and the sacrifice note without a sacrifice", () => {
     const p = payslip({ payments: ["Salary 3000.00"], deductions: ["Student Loan 45.00"] });
     const rows = planPayroll(p, "acc-1");

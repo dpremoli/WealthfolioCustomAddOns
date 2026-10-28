@@ -1,5 +1,5 @@
 import { isoDay } from "./format";
-import { employeeNi, grossBeforeSacrifice, incomeTax, ussSacrifice, type Payslip } from "./model";
+import { employeeNi, grossBeforeSacrifice, incomeTax, ussContribution, type Payslip } from "./model";
 import type { MatchStatus, SalaryMatch } from "./salary-match";
 
 export type SortKey = "payDate" | "period" | "gross" | "uss" | "tax" | "ni" | "net" | "checks" | "deposit";
@@ -45,7 +45,7 @@ function cellOf(p: Payslip, key: SortKey, match: SalaryMatch | undefined): Cell[
     case "gross":
       return [grossBeforeSacrifice(p)];
     case "uss":
-      return [ussSacrifice(p)];
+      return [ussContribution(p)];
     case "tax":
       return [incomeTax(p)];
     case "ni":

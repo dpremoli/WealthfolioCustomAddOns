@@ -238,3 +238,34 @@ describe("summarise", () => {
     });
   });
 });
+
+describe("USS taken as a deduction", () => {
+  const DEDUCTED = ["Tax paid 380.00", "Employee NIC 150.00", "USS(CRB) 16 183.00"];
+  // Salary 3000, no sacrifice: payments 3000, deductions 713, net 2287; USS is 183 of the deductions.
+  const jun = slip("30.06.2026", "03/2026", { payments: ["Salary 3000.00"], deductions: DEDUCTED });
+  const stackOf = (m: { netFromPay: number; expenseRefunds: number; tax: number; ni: number; studentLoan: number; uss: number; other: number }) =>
+    m.netFromPay + m.expenseRefunds + m.tax + m.ni + m.studentLoan + m.uss + m.other;
+
+  it("counts it as the USS figure and keeps it out of the other deductions in the month's bucket", () => {
+    const s = summariseYear([jun], 2026, "2026-07-10");
+    expect(s.months[2]).toMatchObject({ hasPayslip: true, uss: 183, other: 0, tax: 380, ni: 150, net: 2287 });
+    expect(s.ussContribution).toBe(183);
+    expect(s.ussSacrifice).toBe(0);
+    expect(s.grossBeforeUss).toBe(3000);
+    expect(stackOf(s.months[2]!)).toBeCloseTo(3000, 2);
+  });
+
+  it("stacks to the gross in a year that mixes sacrificed and deducted contributions", () => {
+    const mixed = [apr, may, jun, slip("30.07.2026", "04/2026", { deductions: ["Tax paid 380.00", "Employee NIC 150.00", "USS(CRB) 16 20.00", "Cycle scheme 12.50"] })];
+    const s = summariseYear(mixed, 2026, "2026-08-10");
+    expect(s.ussSacrifice).toBe(366 + 183);
+    expect(s.ussContribution).toBe(366 + 183 + 183 + 20);
+    expect(s.months[3]).toMatchObject({ uss: 183 + 20, other: 12.5 });
+    expect(s.grossBeforeUss).toBe(3000 * 4);
+    expect(s.months.reduce((n, m) => n + stackOf(m), 0)).toBeCloseTo(s.grossBeforeUss, 2);
+    // Calendar buckets stack the same way.
+    const c = summarise(mixed, { kind: "calendar", year: 2026 }, "2026-08-10");
+    expect(c.months.reduce((n, m) => n + stackOf(m), 0)).toBeCloseTo(c.grossBeforeUss, 2);
+    expect(c.ussContribution).toBe(s.ussContribution);
+  });
+});

@@ -59,6 +59,12 @@ describe("sortPayslips", () => {
     expect(dates(sortPayslips(list, { key: "period", dir: "desc" }, () => undefined))).toEqual(["2026-05-29", "2026-04-30", "2026-03-31"]);
   });
 
+  it("sorts a USS contribution taken as a deduction with the sacrificed ones", () => {
+    const d = slip("31.07.2026", "04/2026", { payments: ["Salary 3000.00"], deductions: ["Tax paid 100.00", "USS(CRB) 16 250.00"] });
+    // USS: a 100, b 200, d 250 (deducted), c 300
+    expect(dates(sortPayslips([c, d, a, b], { key: "uss", dir: "asc" }, () => undefined))).toEqual(["2026-04-30", "2026-05-29", "2026-07-31", "2026-06-30"]);
+  });
+
   it("sorts by each figure by value, not as text", () => {
     // gross before USS: a 2000, c 3000, b 4000
     expect(sorted("gross", "asc")).toEqual(["2026-04-30", "2026-06-30", "2026-05-29"]);

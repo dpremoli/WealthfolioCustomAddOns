@@ -94,7 +94,7 @@ export default function PensionPage({ ctx }: AddonPageProps) {
       <Card>
         <CardHeader>
           <CardTitle className="text-base">USS contributions</CardTitle>
-          <CardDescription>Salary sacrificed into USS, from your stored payslips.</CardDescription>
+          <CardDescription>USS contributions from your stored payslips, whether salary sacrificed or deducted.</CardDescription>
         </CardHeader>
         <CardContent>
           {uss.byYear.length === 0 ? (

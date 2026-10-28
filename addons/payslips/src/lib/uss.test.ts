@@ -35,6 +35,18 @@ describe("ussContributions", () => {
     });
   });
 
+  it("counts a contribution taken as a deduction, and a mixed year", () => {
+    const deducted = make({ payments: ["Salary 3000.00"], deductions: ["Tax paid 380.00", "Employee NIC 150.00", "USS(CRB) 16 183.00"] });
+    expect(ussContributions([deducted])).toEqual({ byYear: [{ taxYear: 2026, amount: 183 }], total: 183 });
+    expect(ussContributions([make(), deducted, make(undefined, 2025)])).toEqual({
+      byYear: [
+        { taxYear: 2025, amount: 183 },
+        { taxYear: 2026, amount: 366 },
+      ],
+      total: 549,
+    });
+  });
+
   it("handles no payslips", () => {
     expect(ussContributions([])).toEqual({ byYear: [], total: 0 });
   });

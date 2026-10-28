@@ -26,7 +26,7 @@ import { PeriodSelect } from "../components/period-select";
 import { QUERY_ROOT, useSalaryMatches } from "../hooks/use-payslip-data";
 import { useKeepPdfs, usePdfDates } from "../hooks/use-pdf-dates";
 import { gbp, isoDay } from "../lib/format";
-import { employeeNi, grossBeforeSacrifice, incomeTax, ussSacrifice, type Payslip } from "../lib/model";
+import { employeeNi, grossBeforeSacrifice, incomeTax, ussContribution, type Payslip } from "../lib/model";
 import { parsePayslipPdf } from "../lib/payslip-parser";
 import { deletePdf, downloadPdf, getKeepPdfs, savePdf } from "../lib/pdf-store";
 import { readBytes } from "../lib/read-file";
@@ -313,7 +313,7 @@ export default function PayslipsPage({ ctx }: AddonPageProps) {
                           {periodLabel(p.period)} ({String(p.period).padStart(2, "0")}/{p.taxYear})
                         </TableCell>
                         <TableCell style={cellStyle("right")}>{gbp(grossBeforeSacrifice(p))}</TableCell>
-                        <TableCell style={cellStyle("right")}>{gbp(ussSacrifice(p))}</TableCell>
+                        <TableCell style={cellStyle("right")}>{gbp(ussContribution(p))}</TableCell>
                         <TableCell style={cellStyle("right")}>{gbp(incomeTax(p))}</TableCell>
                         <TableCell style={cellStyle("right")}>{gbp(employeeNi(p))}</TableCell>
                         <TableCell style={cellStyle("right")}>{gbp(p.netPay)}</TableCell>

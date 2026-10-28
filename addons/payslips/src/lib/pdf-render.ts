@@ -62,21 +62,45 @@ export interface PageDrawing {
 // ---------------------------------------------------------------------------------------------
 // Filters
 
-/** RunLengthDecode: n < 128 copies n + 1 bytes, n > 128 repeats the next byte 257 − n times, 128 ends. */
-export function runLengthDecode(data: Uint8Array): Uint8Array {
-  const out: number[] = [];
+/**
+ * RunLengthDecode: n < 128 copies n + 1 bytes, n > 128 repeats the next byte 257 − n times, 128 ends.
+ * With `expected` the output is written into a buffer of that size and decoding stops when it is
+ * full, so a few bytes that claim to expand to gigabytes cost no more than `expected` bytes;
+ * without it the output is the data's own size, up to MAX_STREAM_BYTES.
+ */
+export function runLengthDecode(data: Uint8Array, expected?: number): Uint8Array {
+  let size = expected;
+  if (size === undefined) {
+    size = 0;
+    for (let i = 0; i < data.length && size < MAX_STREAM_BYTES; ) {
+      const n = data[i]!;
+      if (n === 128) break;
+      if (n < 128) {
+        const take = Math.min(n + 1, data.length - i - 1);
+        size += take;
+        i += 1 + take;
+      } else {
+        if (i + 1 < data.length) size += 257 - n;
+        i += 2;
+      }
+    }
+    size = Math.min(size, MAX_STREAM_BYTES);
+  }
+  const out = new Uint8Array(size);
+  let at = 0;
   let i = 0;
-  while (i < data.length) {
+  while (i < data.length && at < size) {
     const n = data[i++]!;
     if (n === 128) break;
     if (n < 128) {
-      for (let k = 0; k <= n && i < data.length; k++) out.push(data[i++]!);
+      for (let k = 0; k <= n && i < data.length && at < size; k++) out[at++] = data[i++]!;
     } else if (i < data.length) {
-      const b = data[i++]!;
-      for (let k = 0; k < 257 - n; k++) out.push(b);
+      const count = Math.min(257 - n, size - at);
+      out.fill(data[i++]!, at, at + count);
+      at += count;
     }
   }
-  return Uint8Array.from(out);
+  return at === size ? out : out.subarray(0, at);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -315,20 +339,31 @@ class PdfFile {
     return { dict: o.value.v, data: this.bytes.subarray(start, end) };
   }
 
-  /** The stream's data with its /Filter chain applied in order, or null when a filter is unsupported or fails. */
-  async decode(s: Stream): Promise<Uint8Array | null> {
+  /**
+   * The stream's data with its /Filter chain applied in order, or null when a filter is unsupported
+   * or fails. `expected` is the size of the final data when the caller knows it (an image mask):
+   * decoding stops there. Otherwise every stage is capped at MAX_STREAM_BYTES.
+   */
+  async decode(s: Stream, expected?: number): Promise<Uint8Array | null> {
     const f = this.resolve(s.dict.Filter);
     const filters = !f ? [] : f.t === "arr" ? f.v.map((x) => this.name(x)) : [f.t === "name" ? f.v : undefined];
     let data: Uint8Array | null = s.data;
-    for (const name of filters) {
-      if (name === "FlateDecode" || name === "Fl") data = await inflate(data);
-      else if (name === "RunLengthDecode" || name === "RL") data = runLengthDecode(data);
+    for (const [k, name] of filters.entries()) {
+      // What a stage may hand on: the final size for the last one; for an earlier one, what could
+      // still turn into that size (run-length data is at most about twice its output).
+      const final = k === filters.length - 1;
+      const limit = expected === undefined ? undefined : final ? expected : 2 * expected + 1024;
+      if (name === "FlateDecode" || name === "Fl") data = await inflate(data, limit ?? MAX_STREAM_BYTES);
+      else if (name === "RunLengthDecode" || name === "RL") data = runLengthDecode(data, limit);
       else return null;
       if (!data) return null;
     }
     return data;
   }
 }
+
+/** Most bytes a content stream may inflate / run-length decode to. */
+const MAX_STREAM_BYTES = 32 * 1024 * 1024;
 
 interface PageInfo {
   dict: Dict;
@@ -423,13 +458,17 @@ interface GState {
 }
 
 const MAX_IMAGE_PIXELS = 16_000_000;
+const MAX_IMAGE_SIDE = 10_000;
+/** The most things (texts, lines, rectangles, images) one page may draw. */
+const MAX_ELEMENTS = 20_000;
 
 async function maskOf(file: PdfFile, stream: Stream): Promise<{ widthPx: number; heightPx: number; mask: Uint8Array } | null> {
   const d = stream.dict;
   const widthPx = file.num(d.Width) ?? 0;
   const heightPx = file.num(d.Height) ?? 0;
-  if (!(widthPx > 0 && heightPx > 0) || widthPx * heightPx > MAX_IMAGE_PIXELS) return null;
-  const data = await file.decode(stream);
+  const side = (n: number) => Number.isInteger(n) && n > 0 && n <= MAX_IMAGE_SIDE;
+  if (!side(widthPx) || !side(heightPx) || widthPx * heightPx > MAX_IMAGE_PIXELS) return null;
+  const data = await file.decode(stream, Math.ceil(widthPx / 8) * heightPx);
   if (!data) return null;
   const decode = file.numbersOf(d.Decode);
   // Default /Decode [0 1]: a 0 sample paints. [1 0] inverts that.
@@ -452,6 +491,12 @@ async function interpret(file: PdfFile, content: string, resources: Dict | undef
   const lines: DrawnLine[] = [];
   const rects: DrawnRect[] = [];
   const images: DrawnImage[] = [];
+  let elements = 0;
+  const counted = () => {
+    if (++elements > MAX_ELEMENTS) {
+      throw new PdfTextError(`This page has too many elements to draw (more than ${MAX_ELEMENTS.toLocaleString("en-GB")}).`);
+    }
+  };
 
   let gs: GState = { ctm: initial, lineWidth: 1, stroke: "#000000", fill: "#000000" };
   const saved: GState[] = [];
@@ -499,6 +544,7 @@ async function interpret(file: PdfFile, content: string, resources: Dict | undef
     const item: DrawnText = { x, y, size: Math.abs(fontSize) * Math.hypot(tm[2], tm[3]), font: family, text: decodeWin1252(raw) };
     if (wordSpace) item.wordSpacing = wordSpace * hScale;
     if (charSpace) item.charSpacing = charSpace * hScale;
+    counted();
     texts.push(item);
     let spaces = 0;
     for (const ch of raw) if (ch === " ") spaces++;
@@ -507,7 +553,10 @@ async function interpret(file: PdfFile, content: string, resources: Dict | undef
 
   const strokePath = () => {
     const w = gs.lineWidth * scaleOf(gs.ctm);
-    for (const [x1, y1, x2, y2] of segs) lines.push({ x1, y1, x2, y2, width: w, color: gs.stroke });
+    for (const [x1, y1, x2, y2] of segs) {
+      counted();
+      lines.push({ x1, y1, x2, y2, width: w, color: gs.stroke });
+    }
   };
   const closePath = () => {
     if (cur && start && (cur[0] !== start[0] || cur[1] !== start[1])) segs.push([cur[0], cur[1], start[0], start[1]]);
@@ -529,6 +578,7 @@ async function interpret(file: PdfFile, content: string, resources: Dict | undef
         rect.stroke = gs.stroke;
         rect.width = w;
       }
+      counted();
       rects.push(rect);
     }
     if (stroke) strokePath();
@@ -704,11 +754,15 @@ async function interpret(file: PdfFile, content: string, resources: Dict | undef
         if (Math.abs(b) > 1e-6 || Math.abs(c) > 1e-6) break;
         let img = imageCache.get(ref.v);
         if (img === undefined) {
-          const s = file.stream(ref.v);
-          img =
-            s && file.name(s.dict.Subtype) === "Image" && file.get(s.dict, "ImageMask")?.t === "bool" && (file.get(s.dict, "ImageMask") as { v: boolean }).v
-              ? await maskOf(file, s)
-              : null;
+          try {
+            const s = file.stream(ref.v);
+            img =
+              s && file.name(s.dict.Subtype) === "Image" && file.get(s.dict, "ImageMask")?.t === "bool" && (file.get(s.dict, "ImageMask") as { v: boolean }).v
+                ? await maskOf(file, s)
+                : null;
+          } catch {
+            img = null; // one image that cannot be decoded does not cost the page
+          }
           imageCache.set(ref.v, img);
         }
         if (!img) break;
@@ -724,6 +778,7 @@ async function interpret(file: PdfFile, content: string, resources: Dict | undef
           }
           mask = flipped;
         }
+        counted();
         images.push({ x: Math.min(e, e + a), y: Math.min(f, f + d), w: Math.abs(a), h: Math.abs(d), widthPx, heightPx, mask, color: gs.fill });
         break;
       }
@@ -737,17 +792,18 @@ async function interpret(file: PdfFile, content: string, resources: Dict | undef
 
 // ---------------------------------------------------------------------------------------------
 
-/** Draws page `pageIndex` (0-based) of a PDF. Throws when the file is not a PDF or has no such page. */
-export async function renderPdfPage(bytes: Uint8Array, pageIndex = 0): Promise<PageDrawing> {
+/** The parsed file and its pages, or why the PDF cannot be drawn. */
+function openPdf(bytes: Uint8Array): { file: PdfFile; pages: PageInfo[] } {
   const head = toBinaryString(bytes.subarray(0, 1024));
   if (!head.includes("%PDF-")) throw new PdfTextError("This file is not a PDF.");
   const file = new PdfFile(bytes);
   if (/\/Encrypt\b/.test(file.binary)) {
     throw new PdfTextError("This PDF is encrypted, so it cannot be drawn. Export an unprotected copy.");
   }
-  const page = pagesOf(file)[pageIndex];
-  if (!page) throw new PdfTextError(`This PDF has no page ${pageIndex + 1}.`);
+  return { file, pages: pagesOf(file) };
+}
 
+async function drawPage(file: PdfFile, page: PageInfo): Promise<PageDrawing> {
   const box = page.mediaBox && page.mediaBox.length >= 4 ? page.mediaBox : [0, 0, 595, 842];
   const [x0, y0, x1, y1] = [Math.min(box[0]!, box[2]!), Math.min(box[1]!, box[3]!), Math.max(box[0]!, box[2]!), Math.max(box[1]!, box[3]!)];
 
@@ -765,4 +821,21 @@ export async function renderPdfPage(bytes: Uint8Array, pageIndex = 0): Promise<P
 
   const drawn = await interpret(file, chunks.join("\n"), page.resources, [1, 0, 0, 1, -x0, -y0]);
   return { width: x1 - x0, height: y1 - y0, ...drawn };
+}
+
+/** Draws page `pageIndex` (0-based) of a PDF. Throws when the file is not a PDF or has no such page. */
+export async function renderPdfPage(bytes: Uint8Array, pageIndex = 0): Promise<PageDrawing> {
+  const { file, pages } = openPdf(bytes);
+  const page = pages[pageIndex];
+  if (!page) throw new PdfTextError(`This PDF has no page ${pageIndex + 1}.`);
+  return drawPage(file, page);
+}
+
+/** Draws every page of a PDF, in order. Throws when the file is not a PDF, has no page, or a page cannot be drawn. */
+export async function renderPdfPages(bytes: Uint8Array): Promise<PageDrawing[]> {
+  const { file, pages } = openPdf(bytes);
+  if (pages.length === 0) throw new PdfTextError("This PDF has no page 1.");
+  const drawings: PageDrawing[] = [];
+  for (const page of pages) drawings.push(await drawPage(file, page));
+  return drawings;
 }

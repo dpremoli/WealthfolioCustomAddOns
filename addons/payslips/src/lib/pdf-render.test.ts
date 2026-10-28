@@ -8,10 +8,11 @@ import {
   runLengthEncode,
   ruleContent,
   samplePayslipLines,
+  withXObject,
   withoutPageTree,
   writePdf,
 } from "../test-utils";
-import { renderPdfPage, runLengthDecode } from "./pdf-render";
+import { renderPdfPage, renderPdfPages, runLengthDecode } from "./pdf-render";
 
 const bytes = (...n: number[]) => Uint8Array.from(n);
 const render = (content: string, opts: Parameters<typeof rawPdf>[1] = {}) =>
@@ -32,6 +33,35 @@ describe("runLengthDecode", () => {
   it("tolerates a truncated run", () => {
     expect([...runLengthDecode(bytes(5, 1, 2))]).toEqual([1, 2]);
     expect([...runLengthDecode(bytes(255))]).toEqual([]);
+  });
+});
+
+/** RunLengthDecode data that expands to `pairs * 128` bytes of 0x00 (two bytes per 128). */
+const rleBomb = (pairs: number) => {
+  const out = new Uint8Array(pairs * 2 + 1);
+  for (let i = 0; i < pairs; i++) {
+    out[2 * i] = 129; // repeat the next byte 128 times
+    out[2 * i + 1] = 0;
+  }
+  out[out.length - 1] = 128;
+  return out;
+};
+const timed = async <T>(fn: () => T | Promise<T>) => {
+  const t0 = performance.now();
+  const value = await fn();
+  return { value, ms: performance.now() - t0 };
+};
+
+describe("runLengthDecode: bounded output", () => {
+  it("stops at the expected length, however much the data would expand to", async () => {
+    const { value, ms } = await timed(() => runLengthDecode(rleBomb(500_000), 8));
+    expect(value.length).toBeLessThanOrEqual(8);
+    expect(ms).toBeLessThan(1000);
+  });
+
+  it("still returns everything when it is below the expected length", () => {
+    expect([...runLengthDecode(bytes(2, 1, 2, 3, 128), 100)]).toEqual([1, 2, 3]);
+    expect([...runLengthDecode(bytes(2, 1, 2, 3, 254, 9, 128), 5)]).toEqual([1, 2, 3, 9, 9]);
   });
 });
 
@@ -293,5 +323,83 @@ describe("renderPdfPage: the sample payslip", () => {
     expect(page.texts.some((t) => t.text.startsWith("Net Pay"))).toBe(true);
     expect(page.lines).toHaveLength(1);
     expect(page.images).toHaveLength(1);
+  });
+});
+
+/** A mask XObject whose data is Flate(RunLength(zeros)): ~1 KB that expands to tens of megabytes. */
+const bombImage = (widthPx: number, heightPx: number, pairs = 500_000) =>
+  withXObject(
+    rawPdf([`${lineContent(["still drawn"])}\n${imageContent(0, 0, 16, 4)}\n${ruleContent([{ x1: 1, y1: 2, x2: 3, y2: 4 }])}`], { fonts: {} }),
+    "Im1",
+    `/Type /XObject /Subtype /Image /ImageMask true /BitsPerComponent 1 /Width ${widthPx} /Height ${heightPx} /Filter [/FlateDecode /RunLengthDecode]`,
+    new Uint8Array(deflateSync(rleBomb(pairs))),
+  );
+
+describe("renderPdfPage: hostile images", () => {
+  it("decodes a tiny stream that expands to megabytes quickly, to no more than the mask needs", async () => {
+    const pdf = bombImage(16, 4);
+    const { value: page, ms } = await timed(() => renderPdfPage(pdf));
+    expect(ms).toBeLessThan(2000);
+    expect(page.images).toHaveLength(1);
+    expect(page.images[0]!.mask).toHaveLength(64);
+  });
+
+  it("skips an image whose stream is corrupt and still draws the rest of the page", async () => {
+    const pdf = withXObject(
+      rawPdf([`${lineContent(["still drawn"])}\n${imageContent(0, 0, 16, 4)}\n${ruleContent([{ x1: 1, y1: 2, x2: 3, y2: 4 }])}`]),
+      "Im1",
+      "/Type /XObject /Subtype /Image /ImageMask true /BitsPerComponent 1 /Width 16 /Height 4 /Filter [/FlateDecode /RunLengthDecode]",
+      Uint8Array.from({ length: 40 }, (_, i) => (i * 37 + 11) % 256),
+    );
+    const page = await renderPdfPage(pdf);
+    expect(page.images).toEqual([]);
+    expect(page.texts.map((t) => t.text)).toEqual(["still drawn"]);
+    expect(page.lines).toHaveLength(1);
+  });
+
+  it.each([
+    ["a huge width and a fractional height", "/Width 400000000 /Height 0.01"],
+    ["a fractional size", "/Width 16.5 /Height 4"],
+    ["a size over 10 000", "/Width 10001 /Height 1"],
+    ["a zero height", "/Width 16 /Height 0"],
+  ])("skips an image with %s", async (_, size) => {
+    const pdf = withXObject(
+      rawPdf([`${imageContent(0, 0, 16, 4)}\n${ruleContent([{ x1: 1, y1: 2, x2: 3, y2: 4 }])}`]),
+      "Im1",
+      `/Type /XObject /Subtype /Image /ImageMask true /BitsPerComponent 1 ${size}`,
+      new Uint8Array(8),
+    );
+    const { value: page, ms } = await timed(() => renderPdfPage(pdf));
+    expect(page.images).toEqual([]);
+    expect(page.lines).toHaveLength(1);
+    expect(ms).toBeLessThan(1000);
+  });
+});
+
+describe("renderPdfPage: drawn element cap", () => {
+  const many = (n: number) => Array.from({ length: n }, () => "0 0 m 1 1 l S").join("\n");
+
+  it("draws a page right at the cap", async () => {
+    const page = await render(many(20_000));
+    expect(page.lines).toHaveLength(20_000);
+  });
+
+  it("throws a clear error above 20 000 elements of all kinds together", async () => {
+    await expect(render(many(20_001))).rejects.toThrow(/too many/i);
+    const mixed = `${many(10_000)}\n${Array.from({ length: 10_001 }, () => "BT /F1 8 Tf (x) Tj ET").join("\n")}`;
+    await expect(render(mixed)).rejects.toThrow(/too many/i);
+  });
+});
+
+describe("renderPdfPages", () => {
+  it("draws every page in order", async () => {
+    const pages = await renderPdfPages(writePdf([["first page"], ["second page"], ["third page"]]));
+    expect(pages.map((p) => p.texts.map((t) => t.text))).toEqual([["first page"], ["second page"], ["third page"]]);
+    expect(pages[0]).toMatchObject({ width: 595, height: 842 });
+  });
+
+  it("rejects what renderPdfPage rejects", async () => {
+    await expect(renderPdfPages(new TextEncoder().encode("hello"))).rejects.toThrow(/not a PDF/i);
+    await expect(renderPdfPages(withoutPageTree(rawPdf([""])))).rejects.toThrow(/no page 1/i);
   });
 });

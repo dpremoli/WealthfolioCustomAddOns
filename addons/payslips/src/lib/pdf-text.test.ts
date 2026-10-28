@@ -1,6 +1,7 @@
+import { deflateSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
 import { PDF_MARGIN_COLS, checkerImage, imageContent, lineContent, rawPdf, samplePayslipLines, writePdf } from "../test-utils";
-import { PdfTextError, extractPdfLines } from "./pdf-text";
+import { PdfTextError, extractPdfLines, inflate, tokenise } from "./pdf-text";
 
 const margin = " ".repeat(PDF_MARGIN_COLS);
 const withMargin = (lines: string[]) => lines.map((l) => margin + l.trimEnd());
@@ -174,5 +175,44 @@ describe("extractPdfLines", () => {
   it("reports a PDF without a text layer", async () => {
     await expect(extractPdfLines(rawPdf([""]))).rejects.toThrow(/no text layer/);
     await expect(extractPdfLines(writePdf([[]]))).rejects.toThrow(PdfTextError);
+  });
+});
+
+describe("inflate: output limit", () => {
+  it("stops reading once past maxBytes, returning no more than that", async () => {
+    const bomb = new Uint8Array(deflateSync(new Uint8Array(40_000_000)));
+    const t0 = performance.now();
+    const out = await inflate(bomb, 1000);
+    expect(out).not.toBeNull();
+    expect(out!.length).toBeLessThanOrEqual(1000);
+    expect(out!.length).toBeGreaterThan(0);
+    expect(performance.now() - t0).toBeLessThan(2000);
+  });
+
+  it("returns everything when the output is within the limit, and when there is none", async () => {
+    const data = new TextEncoder().encode("hello hello hello");
+    expect([...(await inflate(new Uint8Array(deflateSync(data)), 1000))!]).toEqual([...data]);
+    expect([...(await inflate(new Uint8Array(deflateSync(data))))!]).toEqual([...data]);
+  });
+});
+
+describe("tokenise: nesting", () => {
+  it("does not overflow the stack on a stream of 200 000 opening brackets", () => {
+    const tokens = [...tokenise(`1 2 m ${"[".repeat(200_000)}`)];
+    expect(tokens.slice(0, 3)).toEqual([
+      { t: "num", v: 1 },
+      { t: "num", v: 2 },
+      { t: "op", v: "m" },
+    ]);
+  });
+
+  it("still reads the text shown before the nesting starts", async () => {
+    const pdf = rawPdf([`BT 20 800 Td /F1 8 Tf (before) Tj ET\n${"[".repeat(200_000)}`]);
+    expect(await extractPdfLines(pdf)).toEqual([expect.stringContaining("before")]);
+  });
+
+  it("reads arrays nested a few levels, as before", () => {
+    const [arr] = [...tokenise("[1 [2 [3]]]")];
+    expect(arr).toEqual({ t: "arr", v: [{ t: "num", v: 1 }, { t: "arr", v: [{ t: "num", v: 2 }, { t: "arr", v: [{ t: "num", v: 3 }] }] }] });
   });
 });

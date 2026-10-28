@@ -17,7 +17,7 @@ import {
 import { useEffect, useState } from "react";
 import { QUERY_ROOT } from "../hooks/use-payslip-data";
 import { downloadPdf, loadPdf } from "../lib/pdf-store";
-import { renderPdfPage } from "../lib/pdf-render";
+import { renderPdfPages } from "../lib/pdf-render";
 import { extractPdfLines } from "../lib/pdf-text";
 import { PayslipPageView } from "./payslip-page-view";
 
@@ -49,14 +49,19 @@ export function PayslipViewer({ ctx, payDate, onClose }: { ctx: AddonContext; pa
     // A missing PDF will still be missing a second later: say so at once.
     retry: false,
   });
-  // The drawn page; when it cannot be drawn the Payslip tab shows the PDF's text instead.
+  // The drawn pages; when they cannot be drawn the Payslip tab shows the PDF's text instead.
   const drawing = useQuery({
     queryKey: [QUERY_ROOT, "pdf-render", payDate],
-    queryFn: () => renderPdfPage(data!.bytes),
+    queryFn: () => renderPdfPages(data!.bytes),
     enabled: !!data,
+    // The stored bytes of a pay date do not change while the dialog is open: draw them once.
+    staleTime: Infinity,
     gcTime: 0,
     retry: false,
   });
+  // Pages that drew no text at all (it sits where the renderer does not look, say in a form)
+  // would show a blank sheet while the PDF does have text: show that instead.
+  const drawn = drawing.data && !(data?.lines?.length && drawing.data.every((page) => page.texts.length === 0)) ? drawing.data : null;
   const download = useMutation({ mutationFn: () => downloadPdf(ctx, payDate) });
   const failure = error ?? download.error;
 
@@ -89,9 +94,11 @@ export function PayslipViewer({ ctx, payDate, onClose }: { ctx: AddonContext; pa
               </Button>
             </div>
             <TabsContent value="payslip" className="mt-3">
-              {drawing.data ? (
-                <div className="max-h-[70vh] overflow-y-auto rounded bg-neutral-200/60 p-3 dark:bg-neutral-800/60">
-                  <PayslipPageView drawing={drawing.data} />
+              {drawn ? (
+                <div className="flex max-h-[70vh] flex-col gap-4 overflow-y-auto rounded bg-neutral-200/60 p-3 dark:bg-neutral-800/60">
+                  {drawn.map((page, i) => (
+                    <PayslipPageView key={i} drawing={page} />
+                  ))}
                 </div>
               ) : drawing.isLoading ? (
                 <p className="text-muted-foreground text-sm">Drawing the payslip…</p>

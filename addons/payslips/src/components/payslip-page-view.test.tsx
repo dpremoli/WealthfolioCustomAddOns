@@ -68,6 +68,19 @@ describe("PayslipPageView", () => {
     expect(rect.getAttribute("stroke")).toBe("#0000ff");
   });
 
+  it("draws a zero-width line and a zero-width stroked rectangle hairline thin, not invisible", () => {
+    const { container } = render(
+      <PayslipPageView
+        drawing={drawing({
+          lines: [{ x1: 0, y1: 0, x2: 10, y2: 0, width: 0, color: "#000000" }],
+          rects: [{ x: 0, y: 0, w: 10, h: 10, stroke: "#000000", width: 0 }],
+        })}
+      />,
+    );
+    expect(container.querySelector("line")!.getAttribute("stroke-width")).toBe("0.25");
+    expect(container.querySelector("rect[stroke]")!.getAttribute("stroke-width")).toBe("0.25");
+  });
+
   it("sits on a white paper whatever the theme", () => {
     const { container } = render(<PayslipPageView drawing={drawing()} />);
     const paper = container.firstElementChild as HTMLElement;
@@ -96,6 +109,20 @@ describe("PayslipPageView", () => {
     expect(image.getAttribute("preserveAspectRatio")).toBe("none");
     const pixels = (putImageData.mock.calls[0]![0] as { data: Uint8ClampedArray }).data;
     expect([...pixels]).toEqual([255, 0, 0, 255, 0, 0, 0, 0]); // painted red, then transparent
+  });
+
+  it("fills the pixels by direct writes, without allocating an array per pixel", () => {
+    const set = vi.spyOn(Uint8ClampedArray.prototype, "set");
+    const ctx = { createImageData: (w: number, h: number) => ({ data: new Uint8ClampedArray(w * h * 4), width: w, height: h }), putImageData: vi.fn() };
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(ctx as unknown as CanvasRenderingContext2D);
+    vi.spyOn(HTMLCanvasElement.prototype, "toDataURL").mockReturnValue("data:image/png;base64,AAAA");
+    render(
+      <PayslipPageView
+        drawing={drawing({ images: [{ x: 0, y: 0, w: 10, h: 10, widthPx: 3, heightPx: 1, mask: Uint8Array.from([1, 0, 1]), color: "#010203" }] })}
+      />,
+    );
+    expect(set).not.toHaveBeenCalled();
+    expect([...(ctx.putImageData.mock.calls[0]![0] as { data: Uint8ClampedArray }).data]).toEqual([1, 2, 3, 255, 0, 0, 0, 0, 1, 2, 3, 255]);
   });
 
   it("skips images without crashing when there is no canvas", () => {

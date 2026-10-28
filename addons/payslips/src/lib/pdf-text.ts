@@ -30,17 +30,24 @@ export function toBytes(binary: string): Uint8Array {
   return out;
 }
 
-/** Inflates, retrying without the last one or two bytes (a stray EOL after the data). */
-export async function inflate(data: Uint8Array): Promise<Uint8Array | null> {
+/** Most bytes read from any one stream while extracting text: a Flate bomb is cut off here. */
+const MAX_CONTENT_BYTES = 32 * 1024 * 1024;
+
+/**
+ * Inflates, retrying without the last one or two bytes (a stray EOL after the data). With
+ * `maxBytes` it stops reading once the output passes that and returns its first `maxBytes`
+ * bytes, so a stream that expands a thousandfold cannot use up the memory.
+ */
+export async function inflate(data: Uint8Array, maxBytes = Infinity): Promise<Uint8Array | null> {
   for (const trim of [0, 1, 2]) {
     if (trim > data.length) break;
-    const out = await inflateOnce(data.subarray(0, data.length - trim));
+    const out = await inflateOnce(data.subarray(0, data.length - trim), maxBytes);
     if (out) return out;
   }
   return null;
 }
 
-async function inflateOnce(data: Uint8Array): Promise<Uint8Array | null> {
+async function inflateOnce(data: Uint8Array, maxBytes: number): Promise<Uint8Array | null> {
   try {
     const ds = new DecompressionStream("deflate");
     const writer = ds.writable.getWriter();
@@ -49,17 +56,26 @@ async function inflateOnce(data: Uint8Array): Promise<Uint8Array | null> {
     written.catch(() => undefined);
     const reader = ds.readable.getReader();
     const chunks: Uint8Array[] = [];
+    let size = 0;
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
       chunks.push(value);
+      size += value.length;
+      if (size > maxBytes) {
+        // Past the limit: stop reading (and so decompressing) and keep what fits.
+        await reader.cancel().catch(() => undefined);
+        break;
+      }
     }
-    await written;
-    const out = new Uint8Array(chunks.reduce((n, c) => n + c.length, 0));
+    if (size <= maxBytes) await written;
+    const out = new Uint8Array(Math.min(size, maxBytes));
     let at = 0;
     for (const c of chunks) {
-      out.set(c, at);
-      at += c.length;
+      if (at >= out.length) break;
+      const part = c.length > out.length - at ? c.subarray(0, out.length - at) : c;
+      out.set(part, at);
+      at += part.length;
     }
     return out;
   } catch {
@@ -117,7 +133,7 @@ async function contentStreams(binary: string, bytes: Uint8Array): Promise<Conten
     if (names.length === 0) {
       out.push({ obj, text: binary.slice(start, end) });
     } else if (names.length === 1 && names[0] === "/FlateDecode") {
-      const inflated = await inflate(bytes.subarray(start, end));
+      const inflated = await inflate(bytes.subarray(start, end), MAX_CONTENT_BYTES);
       if (inflated) out.push({ obj, text: toBinaryString(inflated) });
     }
   }
@@ -163,6 +179,9 @@ export type Token =
   | { t: "str"; v: string }
   | { t: "arr"; v: Token[] }
   | { t: "op"; v: string };
+
+/** Deepest array nesting `tokenise` follows. */
+const MAX_NESTING = 64;
 
 const WHITESPACE = new Set([0, 9, 10, 12, 13, 32]);
 const DELIMITERS = new Set("()<>[]{}/%".split("").map((c) => c.charCodeAt(0)));
@@ -223,8 +242,16 @@ export function* tokenise(s: string): Generator<Token> {
     return out;
   };
 
+  let depth = 0;
   const array = (): Token[] => {
     const items: Token[] = [];
+    // Arrays nested deeper than any real content stream write are malformed: give up on the rest
+    // of the stream (what was read so far stands) rather than recurse until the stack runs out.
+    if (++depth > MAX_NESTING) {
+      i = n;
+      depth--;
+      return items;
+    }
     while (i < n) {
       while (i < n && WHITESPACE.has(s.charCodeAt(i))) i++;
       if (s[i] === "]") {
@@ -235,6 +262,7 @@ export function* tokenise(s: string): Generator<Token> {
       if (!tok) break;
       items.push(tok);
     }
+    depth--;
     return items;
   };
 

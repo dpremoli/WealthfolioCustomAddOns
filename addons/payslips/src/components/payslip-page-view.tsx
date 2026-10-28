@@ -7,6 +7,9 @@ const FONT_FAMILY: Record<DrawnText["font"], string> = {
   sans: "Helvetica, Arial, sans-serif",
 };
 
+/** Thinnest stroke drawn: PDF's zero width means "the thinnest line the device can draw". */
+const MIN_STROKE = 0.25;
+
 /** A mask painted in `color` on a transparent canvas, as a PNG data URL; null where there is no canvas. */
 function maskToDataUrl(image: DrawnImage): string | null {
   try {
@@ -18,9 +21,14 @@ function maskToDataUrl(image: DrawnImage): string | null {
     const rgb = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(image.color);
     const [r, g, b] = rgb ? [parseInt(rgb[1]!, 16), parseInt(rgb[2]!, 16), parseInt(rgb[3]!, 16)] : [0, 0, 0];
     const data = ctx.createImageData(image.widthPx, image.heightPx);
+    const pixels = data.data;
     for (let i = 0; i < image.mask.length; i++) {
       if (!image.mask[i]) continue;
-      data.data.set([r, g, b, 255], i * 4);
+      const at = i * 4;
+      pixels[at] = r;
+      pixels[at + 1] = g;
+      pixels[at + 2] = b;
+      pixels[at + 3] = 255;
     }
     ctx.putImageData(data, 0, 0);
     return canvas.toDataURL();
@@ -63,7 +71,7 @@ export function PayslipPageView({ drawing }: { drawing: PageDrawing }) {
             height={r.h}
             fill={r.fill ?? "none"}
             stroke={r.stroke}
-            strokeWidth={r.stroke ? r.width : undefined}
+            strokeWidth={r.stroke ? Math.max(r.width ?? 0, MIN_STROKE) : undefined}
           />
         ))}
         {pictures.map(({ image, href }, i) => (
@@ -85,7 +93,7 @@ export function PayslipPageView({ drawing }: { drawing: PageDrawing }) {
             x2={l.x2}
             y2={height - l.y2}
             stroke={l.color}
-            strokeWidth={l.width}
+            strokeWidth={Math.max(l.width, MIN_STROKE)}
           />
         ))}
         {texts.map((t, i) => (

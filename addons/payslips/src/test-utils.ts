@@ -362,3 +362,21 @@ export function withoutPageTree(pdf: Uint8Array): Uint8Array {
   const broken = text.replace("/Type /Page ", "/Type /Pagx ").replace(/\/Kids \[[^\]]*\]/, (m) => "/Kids".padEnd(m.length, " "));
   return latin1(broken);
 }
+
+/**
+ * The same PDF with one more XObject, `/<name>`, in the resources of every page. `dict` is the
+ * object's dictionary entries (without `<<` `>>` and `/Length`); `body` its raw stream data. The
+ * xref table is not updated: readers that find objects by scanning (as this add-on's do) do not mind.
+ */
+export function withXObject(pdf: Uint8Array, name: string, dict: string, body: Uint8Array | string): Uint8Array {
+  const text = Array.from(pdf, (b) => String.fromCharCode(b)).join("");
+  const data = typeof body === "string" ? latin1(body) : body;
+  const number = Math.max(...[...text.matchAll(/(\d+) 0 obj/g)].map((m) => Number(m[1]))) + 1;
+  const ref = `/${name} ${number} 0 R`;
+  const patched = text.includes("/XObject << ")
+    ? text.replaceAll("/XObject << ", `/XObject << ${ref} `)
+    : text.replaceAll("/Resources << ", `/Resources << /XObject << ${ref} >> `);
+  const at = patched.lastIndexOf("xref\n0 ");
+  const object = concat([latin1(`${number} 0 obj\n<< ${dict} /Length ${data.length} >>\nstream\n`), data, latin1("\nendstream\nendobj\n")]);
+  return concat([latin1(patched.slice(0, at)), object, latin1(patched.slice(at))]);
+}

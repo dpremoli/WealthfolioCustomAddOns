@@ -60,11 +60,11 @@ export const isExpenseLine = (l: Line): boolean => l.amount > 0 && EXPENSE_RE.te
 
 /**
  * Expense refunds in Total Payments: whatever Total Payments has over This Period Gross Pay (the
- * taxable figure), else the sum of the expense lines (0 when there are none).
+ * taxable figure) when that is printed, never guessed from descriptions (a "Telephone Allowance"
+ * that Gross Pay counts is taxable pay). Only without Gross Pay: the sum of the expense lines.
  */
 export function expenseRefunds(p: Payslip): number {
-  const over = round2(p.totalPayments - p.thisPeriod.grossPay);
-  if (over > 0.005 && p.thisPeriod.grossPay > 0) return over;
+  if (p.thisPeriod.grossPay > 0) return Math.max(0, round2(p.totalPayments - p.thisPeriod.grossPay));
   return sum(p.payments, isExpenseLine);
 }
 

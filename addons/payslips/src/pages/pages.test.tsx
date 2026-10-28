@@ -11,6 +11,7 @@ import { recordPayroll } from "../lib/payroll";
 import { loadCandidateRows, matchSalaries } from "../lib/salary-match";
 import { getKeepPdfs, listPdfDates, loadPdf, savePdf, setKeepPdfs } from "../lib/pdf-store";
 import { loadLinks, loadPayslips, loadStatements, savePayslips } from "../lib/store";
+import { PayslipViewer } from "../components/payslip-viewer";
 import PayslipsPage from "./payslips-page";
 import PensionPage from "./pension-page";
 import SettingsPage from "./settings-page";
@@ -98,7 +99,12 @@ describe("payslips page", () => {
     expect(screen.getByText("£2,287.00")).toBeTruthy(); // net
     expect(screen.getByText("OK")).toBeTruthy();
     expect(screen.getByText("Current Account · 2026-10-31")).toBeTruthy();
-    expect(screen.getByText(/read on this device only and never uploaded/i)).toBeTruthy();
+    expect(screen.queryByText(/never uploaded/i)).toBeNull();
+    expect(
+      screen.getByText(
+        "Payslips are read by this add-on on this device, and nothing is sent to any outside service. What the add-on keeps is stored in Wealthfolio's add-on storage, which Wealthfolio syncs to your paired devices.",
+      ),
+    ).toBeTruthy();
     expect(
       screen.getByText(
         "A copy of each PDF is kept in Wealthfolio so you can view and download it. It includes your name and NI number; turn this off in Settings.",
@@ -112,6 +118,17 @@ describe("payslips page", () => {
     renderPage(PayslipsPage, ctx);
     expect(await screen.findByText(/Only figures, pay date, tax period and tax code are kept\./)).toBeTruthy();
     expect(screen.queryByText(/A copy of each PDF is kept/)).toBeNull();
+  });
+
+  it("says how many stored PDF copies remain when new imports no longer keep one", async () => {
+    const { ctx } = await setup();
+    await savePdf(ctx, "2026-10-31", pdfBytes());
+    await setKeepPdfs(ctx, false);
+    renderPage(PayslipsPage, ctx);
+    expect(
+      await screen.findByText("New imports keep figures only; 1 stored PDF copy remains (remove it in Settings)."),
+    ).toBeTruthy();
+    expect(screen.queryByText(/Only figures, pay date, tax period and tax code are kept\./)).toBeNull();
   });
 
   it("navigates with the nav buttons", async () => {
@@ -257,6 +274,45 @@ describe("payslips page: stored PDFs", () => {
     expect(screen.getByText("huge.pdf")).toBeTruthy();
     expect(screen.getByText(/too large to keep \(over ~150 KB\)/)).toBeTruthy();
     expect((screen.getByLabelText("View payslip 2026-10-31") as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("drops the old PDF copy when the re-imported payslip's copy is not kept", async () => {
+    const { ctx } = await setup();
+    await savePdf(ctx, "2026-10-31", new Uint8Array([1, 2, 3]));
+    await setKeepPdfs(ctx, false);
+    renderPage(PayslipsPage, ctx);
+    const input = (await screen.findByTestId("payslip-files")) as HTMLInputElement;
+    fireEvent.change(input, { target: { files: [new File([pdfBytes()], "october.pdf", { type: "application/pdf" })] } });
+    await waitFor(() => expect(screen.getByText("0 imported, 1 replaced")).toBeTruthy());
+    expect(await loadPdf(ctx, "2026-10-31")).toBeNull();
+    expect(await listPdfDates(ctx)).toEqual([]);
+    await waitFor(() => expect((screen.getByLabelText("View payslip 2026-10-31") as HTMLButtonElement).disabled).toBe(true));
+    expect((screen.getByLabelText("Download payslip 2026-10-31") as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("drops the old PDF copy when the re-imported file is too large to keep", async () => {
+    const { ctx } = await setup();
+    await savePdf(ctx, "2026-10-31", new Uint8Array([1, 2, 3]));
+    renderPage(PayslipsPage, ctx);
+    const input = (await screen.findByTestId("payslip-files")) as HTMLInputElement;
+    const big = new Uint8Array(rawPdf([`${lineContent(samplePayslipLines())}\n% ${"x".repeat(170_000)}\n`]));
+    fireEvent.change(input, { target: { files: [new File([big], "huge.pdf", { type: "application/pdf" })] } });
+    await waitFor(() => expect(screen.getByText("0 imported, 1 replaced")).toBeTruthy());
+    expect(screen.getByText(/too large to keep \(over ~150 KB\)/)).toBeTruthy();
+    expect(await loadPdf(ctx, "2026-10-31")).toBeNull();
+    expect(await listPdfDates(ctx)).toEqual([]);
+  });
+
+  it("shows that there is no stored PDF at once, without retrying the lookup", async () => {
+    const { ctx } = await setup();
+    // A default client retries a failing query three times, seconds apart.
+    const client = new QueryClient();
+    render(
+      <QueryClientProvider client={client}>
+        <PayslipViewer ctx={ctx} payDate="2026-10-31" onClose={() => {}} />
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByText(/There is no stored PDF for the 2026-10-31 payslip/, {}, { timeout: 500 })).toBeTruthy();
   });
 
   it("disables View and Download for a payslip with no stored PDF", async () => {

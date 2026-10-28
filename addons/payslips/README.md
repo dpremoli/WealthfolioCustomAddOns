@@ -10,8 +10,12 @@ Part of the [Wealthfolio custom add-ons monorepo](../../README.md). Requires **W
 
 ## Privacy
 
-- **Parsing happens in the add-on sandbox.** The PDF is read in the page (`File` bytes) and parsed
-  by a small hand-written text extractor in this add-on. Nothing is uploaded or sent anywhere.
+- **Parsing happens in the add-on, on this device.** The PDF is read in the page (`File` bytes) and
+  parsed by a small hand-written text extractor in this add-on. Nothing is sent to any outside
+  service.
+- **What the add-on keeps is synced by Wealthfolio.** The figures and, if *Keep a copy of each
+  payslip PDF* is on, the PDF copy (with your name and NI number) are stored in Wealthfolio's add-on
+  storage, which Wealthfolio replicates to your paired devices.
 - **No `network` and no `secrets` permission.** The manifest asks for neither, so the host would
   refuse any attempt.
 - **What is kept** (in the add-on's own storage): pay date, tax period, tax code, the payment and
@@ -68,6 +72,10 @@ Part of the [Wealthfolio custom add-ons monorepo](../../README.md). Requires **W
    settings. Linking turns the bank's salary deposit into a transfer, so Wealthfolio's spending
    report may no longer count it as income. (No add-on API sets that switch, and the host's exact
    behaviour here has not been verified.)
+
+   **Payslips recorded before 0.2.0.** One with expense lines (travel, telephone and the like)
+   shows as "changed" in the preview, and its rows are replaced when you record it again: its gross
+   pay is split into taxable gross pay plus a deposit per expense refund.
 
    **To undo:** delete the Payroll account's activities (or the account) in Wealthfolio, then open
    the bank account's former salary row and change it back from a transfer in to a deposit (unlink

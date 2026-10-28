@@ -13,6 +13,7 @@ import {
   type Payslip,
 } from "./model";
 import { parsePayslipLines } from "./payslip-parser";
+import { validatePayslip } from "./validate";
 
 const make = (over?: Parameters<typeof samplePayslipLines>[0]): Payslip => ({
   ...parsePayslipLines(samplePayslipLines(over)),
@@ -92,5 +93,17 @@ describe("expense refunds", () => {
     expect(expenseLines(p)).toHaveLength(2);
     expect(grossBeforeSacrifice(p)).toBe(3000);
     expect(expenseRefunds(make({ thisPeriod: ["0.00", "0.00", "380.00", "150.00"] }))).toBe(0);
+  });
+
+  it("never reads a taxable allowance as an expense refund when Gross Pay accounts for it", () => {
+    const p = make({
+      payments: ["Salary 3000.00", "Telephone Allowance 30.00"],
+      thisPeriod: ["3030.00", "3030.00", "380.00", "150.00"],
+    });
+    expect(p.totalPayments).toBe(3030);
+    expect(expenseRefunds(p)).toBe(0);
+    expect(expenseLines(p)).toEqual([]);
+    expect(grossBeforeSacrifice(p)).toBe(3030);
+    expect(validatePayslip(p)).toEqual([]);
   });
 });

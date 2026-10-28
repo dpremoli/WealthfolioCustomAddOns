@@ -140,6 +140,21 @@ describe("planPayroll with expense refunds", () => {
     expect(signedSum(rows)).toBe(0);
   });
 
+  it("keeps a taxable allowance in gross pay when Gross Pay already counts it", () => {
+    const rows = planPayroll(
+      payslip({ payments: ["Salary 3000.00", "Telephone Allowance 30.00"], thisPeriod: ["3030.00", "3030.00", "380.00", "150.00"] }),
+      "acc-1",
+    );
+    expect(rows.map((r) => r.id)).toEqual([
+      "payslip:2026-10-31:gross",
+      "payslip:2026-10-31:tax",
+      "payslip:2026-10-31:ni",
+      "payslip:2026-10-31:net",
+    ]);
+    expect(rows[0]).toMatchObject({ amount: 3030 });
+    expect(signedSum(rows)).toBe(0);
+  });
+
   it("leaves a payslip without expenses with exactly the same rows as before", () => {
     expect(planPayroll(payslip(), "acc-1").map((r) => r.id)).toEqual([
       "payslip:2026-10-31:gross",

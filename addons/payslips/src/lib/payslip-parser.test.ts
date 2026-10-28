@@ -179,6 +179,21 @@ describe("the real column layout", () => {
     expect(p.payments.map((l) => l.description)).not.toContain("Student Loan");
   });
 
+  it("reads a number in the Units column as units, never as the amount of a row with no payment", () => {
+    const lines = realLayout();
+    lines.splice(
+      lines.findIndex((l) => l.includes("Gen Trav")),
+      0,
+      at([6, "Overtime"], [29, "8.00"]),
+      at([6, "Standby"], [29, "8.00"], [48, "Student Loan"], [69, "45.00"]),
+    );
+    const p = parsePayslipLines(lines);
+    expect(p.payments.map((l) => l.description)).not.toContain("Overtime");
+    expect(p.payments.map((l) => l.description)).not.toContain("Standby");
+    expect(p.payments.every((l) => l.amount !== 8)).toBe(true);
+    expect(p.deductions.map((l) => l.description)).toEqual(["Tax paid", "Employee NIC", "Student Loan"]);
+  });
+
   it("falls back to the Deductions title when the second header is garbled", () => {
     const lines = realLayout().map((l) => (l.includes("Units") ? at([10, "Description"], [28, "Units"], [38, "Amount"], [51, "Descr."], [68, "Amt"]) : l));
     const p = parsePayslipLines(lines);

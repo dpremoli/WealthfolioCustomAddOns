@@ -55,16 +55,31 @@ function columnBoundary(header: string, titles: string): number {
 }
 
 /**
- * One table row as its payments half and its deductions half. The payments half is the text up to
- * and including the last amount that ends at or before `boundary` (a Units value before it stays in
- * the text); the deductions half is the rest, or the whole row when no amount ends that early.
+ * Where the payments "Amount" column ends (the end of the first "Amount" header), or undefined when
+ * the header has no such label.
  */
-function splitRow(row: string, boundary: number): [string, string] {
+function paymentAmountEnd(header: string): number | undefined {
+  const amount = header.indexOf("Amount");
+  return amount >= 0 ? amount + "Amount".length : undefined;
+}
+
+/** How far left of the "Amount" header's end a number may end and still be a payment amount. */
+const AMOUNT_COLUMN_SLACK = 3;
+
+/**
+ * One table row as its payments half and its deductions half. The payments half is the text up to
+ * and including the last number that ends at or before `boundary` (a Units value before it stays in
+ * the text); the deductions half is the rest, or the whole row when no number ends that early.
+ * When `amountEnd` is known, a last number that ends further left than the Amount column is a Units
+ * value, not a payment: the payments half is then empty and the number is dropped.
+ */
+function splitRow(row: string, boundary: number, amountEnd?: number): [string, string] {
   let cut = 0;
   for (const m of row.matchAll(AMOUNTS)) {
     const end = m.index + m[0].length;
     if (end <= boundary) cut = end;
   }
+  if (cut > 0 && amountEnd !== undefined && cut < amountEnd - AMOUNT_COLUMN_SLACK) return ["", row.slice(cut)];
   return [row.slice(0, cut), row.slice(cut)];
 }
 
@@ -141,8 +156,9 @@ export function parsePayslipLines(lines: string[]): Omit<Payslip, "warnings" | "
     const headerIdx = lines.findIndex((l, i) => i > payDedIdx && /\bDescription\b/.test(l));
     if (headerIdx >= 0 && headerIdx < totalsText) {
       const boundary = columnBoundary(lines[headerIdx]!, lines[payDedIdx]!);
+      const amountEnd = paymentAmountEnd(lines[headerIdx]!);
       for (const row of lines.slice(headerIdx + 1, totalsText)) {
-        const [left, right] = splitRow(row, boundary);
+        const [left, right] = splitRow(row, boundary, amountEnd);
         const payment = parseRow(left);
         const deduction = parseRow(right);
         if (payment) payments.push(payment);

@@ -27,7 +27,7 @@ import { useKeepPdfs, usePdfDates } from "../hooks/use-pdf-dates";
 import { gbp, isoDay } from "../lib/format";
 import { employeeNi, grossBeforeSacrifice, incomeTax, ussSacrifice, type Payslip } from "../lib/model";
 import { parsePayslipPdf } from "../lib/payslip-parser";
-import { downloadPdf, getKeepPdfs, savePdf } from "../lib/pdf-store";
+import { deletePdf, downloadPdf, getKeepPdfs, savePdf } from "../lib/pdf-store";
 import { readBytes } from "../lib/read-file";
 import { tagDeposit, type SalaryMatch } from "../lib/salary-match";
 import { deletePayslip, saveLink, savePayslips } from "../lib/store";
@@ -61,13 +61,24 @@ async function importFiles(ctx: AddonPageProps["ctx"], files: File[]): Promise<I
   }
   const { added, replaced } =
     parsed.length > 0 ? await savePayslips(ctx, parsed.map((p) => p.payslip)) : { added: 0, replaced: 0 };
-  // A copy that cannot be kept never fails the import: the payslip is already stored.
-  if (parsed.length > 0 && (await getKeepPdfs(ctx))) {
+  // A copy that cannot be kept never fails the import: the payslip is already stored. But a copy
+  // from an earlier import of this pay date must not outlive the figures it no longer matches.
+  if (parsed.length > 0) {
+    const keep = await getKeepPdfs(ctx);
     for (const { file, payslip, bytes } of parsed) {
       try {
-        await savePdf(ctx, payslip.payDate, bytes);
+        if (!keep) {
+          await deletePdf(ctx, payslip.payDate);
+          continue;
+        }
+        try {
+          await savePdf(ctx, payslip.payDate, bytes);
+        } catch (err) {
+          pdfErrors.push({ name: file.name, message: messageOf(err) });
+          await deletePdf(ctx, payslip.payDate);
+        }
       } catch (err) {
-        pdfErrors.push({ name: file.name, message: messageOf(err) });
+        pdfErrors.push({ name: file.name, message: `The earlier PDF copy could not be removed. ${messageOf(err)}` });
       }
     }
   }
@@ -84,6 +95,7 @@ export default function PayslipsPage({ ctx }: AddonPageProps) {
   const [viewing, setViewing] = useState<string | null>(null);
   const keepPdfs = useKeepPdfs(ctx).data ?? true;
   const pdfDates = new Set(usePdfDates(ctx).data ?? []);
+  const storedPdfs = pdfDates.size;
   const fileInput = useRef<HTMLInputElement>(null);
 
   const upload = useMutation({ mutationFn: (files: File[]) => importFiles(ctx, files), onSuccess: refresh });
@@ -205,9 +217,16 @@ export default function PayslipsPage({ ctx }: AddonPageProps) {
       </Card>
       <div className="text-muted-foreground -mt-3 space-y-1 text-xs">
         <p>
-          Payslips are read on this device only and never uploaded.
-          {!keepPdfs && " Only figures, pay date, tax period and tax code are kept."}
+          Payslips are read by this add-on on this device, and nothing is sent to any outside service. What the add-on keeps is
+          stored in Wealthfolio's add-on storage, which Wealthfolio syncs to your paired devices.
         </p>
+        {!keepPdfs && (
+          <p>
+            {storedPdfs > 0
+              ? `New imports keep figures only; ${storedPdfs} stored PDF ${storedPdfs === 1 ? "copy remains (remove it" : "copies remain (remove them"} in Settings).`
+              : "Only figures, pay date, tax period and tax code are kept."}
+          </p>
+        )}
         {keepPdfs && (
           <p>
             A copy of each PDF is kept in Wealthfolio so you can view and download it. It includes your name and NI number; turn

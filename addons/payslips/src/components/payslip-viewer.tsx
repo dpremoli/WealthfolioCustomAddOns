@@ -44,6 +44,8 @@ export function PayslipViewer({ ctx, payDate, onClose }: { ctx: AddonContext; pa
     queryKey: [QUERY_ROOT, "pdf-view", payDate],
     queryFn: () => loadViewed(ctx, payDate),
     gcTime: 0,
+    // A missing PDF will still be missing a second later: say so at once.
+    retry: false,
   });
   const download = useMutation({ mutationFn: () => downloadPdf(ctx, payDate) });
   const failure = error ?? download.error;

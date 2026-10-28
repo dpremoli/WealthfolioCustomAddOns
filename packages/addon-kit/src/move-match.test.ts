@@ -5,6 +5,7 @@ import {
   isTrading212Payee,
   linkMovesBetween,
   matchMoves,
+  matchNearest,
   moveLinkNote,
   trading212Refs,
   type MoveRow,
@@ -76,6 +77,35 @@ describe("matchMoves", () => {
     const equal = matchMoves([row("o1", "WITHDRAWAL", 300, -1), row("o2", "WITHDRAWAL", 300, 1)], ins);
     expect(equal.pairs).toEqual([]);
     expect(equal.ambiguous.map((l) => l.id).sort()).toEqual(["o1", "o2"]);
+  });
+});
+
+describe("matchNearest", () => {
+  // Keys and candidates are days; a candidate fits a key within 2 days.
+  const fits = (k: number, c: number) => Math.abs(k - c) <= 2;
+  const distance = (k: number, c: number) => Math.abs(k - c);
+
+  it("gives each key its closest fitting candidate", () => {
+    expect(matchNearest([10, 40], [9, 11.5, 41, 50], fits, distance)).toEqual({
+      pairs: [
+        { key: 10, match: 9 },
+        { key: 40, match: 41 },
+      ],
+      ambiguous: [],
+    });
+  });
+
+  it("leaves a key with two equally close candidates ambiguous", () => {
+    expect(matchNearest([10], [9, 11], fits, distance)).toEqual({ pairs: [], ambiguous: [10] });
+  });
+
+  it("gives a candidate wanted by two keys to the nearer one, or to neither on a tie", () => {
+    expect(matchNearest([10, 11.5], [11], fits, distance).pairs).toEqual([{ key: 11.5, match: 11 }]);
+    expect(matchNearest([10, 12], [11], fits, distance)).toEqual({ pairs: [], ambiguous: [10, 12] });
+  });
+
+  it("finds nothing for a key no candidate fits", () => {
+    expect(matchNearest([10], [20], fits, distance)).toEqual({ pairs: [], ambiguous: [] });
   });
 });
 

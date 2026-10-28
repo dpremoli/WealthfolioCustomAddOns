@@ -109,7 +109,7 @@
 
 **Interfaces:**
 - `PAYROLL_PROVIDER = "payslips-addon"`.
-- `planPayroll(p: Payslip, accountId: string): ActivityImport[]` — ids `payslip:<payDate>:<n>` and comments via `withSourceRef(text, id)`; signed sum (DEPOSIT +, others −) = 0.
+- `planPayroll(p: Payslip, accountId: string): ActivityImport[]` — ids `payslip:<payDate>:<role>` (gross, tax, ni, net, ded:<slug>) and comments via `withSourceRef(text, id)`; signed sum (DEPOSIT +, others −) = 0.
 - `findPayrollAccount(accounts)`, `ensurePayrollAccount(ctx): Promise<Account>`.
 - `recordPayroll(ctx, payslips: Payslip[], matches: SalaryMatch[]): Promise<{ stored: number; unsaved: UnsavedRow[]; linked: number; linkFailed: string[]; skipped: string[] }>` — skips payslips with warnings; refused-rows store `payroll-refused`; links each matched payslip's stored TRANSFER_OUT (found by `sourceRefOf`) with its deposit via `convertAndLinkMoves`.
 

@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { AddonContext, AddonRouteLocation } from "@wealthfolio/addon-sdk";
 import { FakeWealthfolio, type StoredActivity } from "@wf-addons/kit/testing";
 import type { ComponentType } from "react";
@@ -7,6 +7,8 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { samplePayslipLines, writePdf } from "../test-utils";
 import { parsePayslipLines } from "../lib/payslip-parser";
 import type { Payslip } from "../lib/model";
+import { recordPayroll } from "../lib/payroll";
+import { loadCandidateRows, matchSalaries } from "../lib/salary-match";
 import { loadLinks, loadPayslips, loadStatements, savePayslips } from "../lib/store";
 import PayslipsPage from "./payslips-page";
 import PensionPage from "./pension-page";
@@ -68,11 +70,12 @@ const pdfBytes = () => new Uint8Array(writePdf([samplePayslipLines()]));
 
 function renderPage(Page: Page, ctx: AddonContext) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return render(
+  const view = render(
     <QueryClientProvider client={client}>
       <Page ctx={ctx} location={{} as AddonRouteLocation} />
     </QueryClientProvider>,
   );
+  return Object.assign(view, { client });
 }
 
 describe("payslips page", () => {
@@ -295,5 +298,101 @@ describe("settings page", () => {
     expect(host.rows("acc-1")[0]?.activityType).toBe("TRANSFER_IN");
     expect(host.links).toHaveLength(1);
     expect(screen.getByText("Record in Wealthfolio").closest("button")?.disabled).toBe(true);
+  });
+
+  /** Switches the payroll tools on (the second checkbox) and returns the Preview / Record buttons. */
+  async function openPayrollTools() {
+    await screen.findByText("Current Account");
+    fireEvent.click(screen.getAllByRole("checkbox")[1]!);
+    const preview = await screen.findByText("Preview");
+    return { preview, record: () => screen.getByText("Record in Wealthfolio").closest("button")! };
+  }
+
+  // Same net pay as the sample payslip (2287), but another tax figure and a student loan line.
+  const corrected = (): Payslip => ({
+    ...parsePayslipLines(samplePayslipLines({ deductions: ["Tax paid 330.00", "Employee NIC 150.00", "Student Loan 50.00"] })),
+    warnings: [],
+    importedAt: "2026-11-03T09:00:00.000Z",
+  });
+
+  it("says each payslip is new, and after recording it unchanged", async () => {
+    const { ctx } = await setup();
+    renderPage(SettingsPage, ctx);
+    const { preview, record } = await openPayrollTools();
+    fireEvent.click(preview);
+    await screen.findByText("2026-10-31: new");
+    fireEvent.click(record());
+    await screen.findByText("Payroll recorded");
+
+    fireEvent.click(screen.getByText("Preview"));
+    await screen.findByText("2026-10-31: unchanged (already recorded)");
+  });
+
+  it("tells the user a corrected payslip will replace the rows already recorded", async () => {
+    const { host, ctx } = await setup();
+    const original = payslip();
+    const matches = matchSalaries([original], await loadCandidateRows(ctx, ["acc-1"]), 4, {});
+    await recordPayroll(ctx, [original], matches, 4);
+    await savePayslips(ctx, [corrected()]);
+
+    renderPage(SettingsPage, ctx);
+    const { preview, record } = await openPayrollTools();
+    fireEvent.click(preview);
+    await screen.findByText("2026-10-31: changed — 4 rows will be replaced");
+    expect(host.rows(host.accounts.find((a) => a.name === "Payroll")!.id)).toHaveLength(4); // nothing written by previewing
+
+    fireEvent.click(record());
+    await screen.findByText("Payroll recorded");
+    expect(screen.getByText("1 payslip replaced")).toBeTruthy();
+    const rows = host.rows(host.accounts.find((a) => a.name === "Payroll")!.id);
+    expect(rows).toHaveLength(5);
+    expect(rows.filter((r) => r.activityType === "TRANSFER_OUT")).toHaveLength(1);
+  });
+
+  it("warns that a deposit a penny off the net pay will not be linked", async () => {
+    const { ctx } = await setup({ deposits: [deposit({ amount: 2287.01 })] });
+    renderPage(SettingsPage, ctx);
+    const { preview } = await openPayrollTools();
+    fireEvent.click(preview);
+    await screen.findByText(/won't be linked \(amount differs by a penny\)/);
+    expect(screen.queryByText(/DEPOSIT becomes TRANSFER_IN/)).toBeNull();
+  });
+
+  it("reports why a matched deposit could not be linked after recording", async () => {
+    const { ctx } = await setup({ deposits: [deposit({ amount: 2287.01 })] });
+    renderPage(SettingsPage, ctx);
+    const { preview, record } = await openPayrollTools();
+    fireEvent.click(preview);
+    await screen.findByText(/won't be linked/);
+    fireEvent.click(record());
+    await screen.findByText(/deposit of £2,287\.01 differs from net pay £2,287\.00 by a penny; not linked/);
+    expect(screen.getByText("0 bank deposits linked")).toBeTruthy();
+  });
+
+  it("drops the preview, and disables Record, when the data changes after it", async () => {
+    const { host, ctx } = await setup();
+    const view = renderPage(SettingsPage, ctx);
+    const { preview, record } = await openPayrollTools();
+    fireEvent.click(preview);
+    await screen.findByText("2026-10-31: new");
+    expect(record().disabled).toBe(false);
+
+    // A payslip is corrected elsewhere and the page's data is refetched.
+    await savePayslips(ctx, [corrected()]);
+    await act(async () => {
+      await view.client.invalidateQueries({ queryKey: ["payslips"] });
+    });
+    await waitFor(() => expect(record().disabled).toBe(true));
+    expect(screen.queryByText("2026-10-31: new")).toBeNull();
+    expect(screen.getByText(/changed since the preview/i)).toBeTruthy();
+    expect(host.accounts).toHaveLength(1); // nothing was written
+
+    // A new preview shows what will be recorded now, and Record writes that.
+    fireEvent.click(screen.getByText("Preview"));
+    await screen.findByText("2026-10-31: new");
+    fireEvent.click(record());
+    await screen.findByText("Payroll recorded");
+    const rows = host.rows(host.accounts.find((a) => a.name === "Payroll")!.id);
+    expect(rows.map((r) => r.comment ?? "").some((c) => c.includes(":ded:student-loan]"))).toBe(true);
   });
 });

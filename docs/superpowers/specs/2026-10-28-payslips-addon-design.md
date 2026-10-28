@@ -81,7 +81,7 @@ All under `addons/payslips/src/lib/` unless noted.
   `tagDeposit(ctx, row, payDate)` writes `withSourceRef(comment, "payslip:<payDate>")` via
   `activities.saveMany` (opt-in button only).
 - **`payroll.ts`** — `planPayroll(payslip, accountId)` → `ActivityImport[]` with ids
-  `payslip:<payDate>:<n>` and refs in comments: `DEPOSIT` Total Payments ("Gross pay … after USS
+  `payslip:<payDate>:<role>` (`gross`, `tax`, `ni`, `net`, `ded:<slug>`; stable when a corrected payslip adds a line, which then replaces that payslip's rows) and refs in comments: `DEPOSIT` Total Payments ("Gross pay … after USS
   salary sacrifice £x"), `TAX` income tax, `TAX` employee NI, `WITHDRAWAL` each other deduction,
   `TRANSFER_OUT` net pay. Sums to 0. Only payslips with no warnings are offered.
   `ensurePayrollAccount(ctx)` reuses or creates `Payroll` (CASH, GBP, TRANSACTIONS, provider

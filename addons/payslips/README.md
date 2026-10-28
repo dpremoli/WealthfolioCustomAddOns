@@ -54,16 +54,26 @@ Part of the [Wealthfolio custom add-ons monorepo](../../README.md). Requires **W
    matches are recomputed each time; only your manual picks and tags are stored.
    *Tag deposit* (matched rows) adds `[ref:payslip:<pay date>]` to the bank row's comment so you
    can find it again. Nothing else about the row changes.
-3. **Tax.** Pick a tax year: gross before USS, USS sacrifice, taxable pay, income tax, employee NI,
-   student loan, expense refunds and net pay, effective rates, a month-by-month chart, the year-to-date figures from
-   the latest payslip and the months that have no payslip.
-4. **Pension.** USS contributions per tax year and in total, from your payslips. Add the figures
+3. **Period.** The Payslips and Tax pages share one period picker. *Tax year* (the default, newest
+   first) is 6 April to 5 April; *Calendar year* is 1 January to 31 December, taken from the years
+   that have payslips; *Custom range* has two date fields, *From* and *To*, and takes every payslip
+   paid from the first date to the last, both included (an empty date is open). Each page keeps its
+   own last choice while it is open.
+   **Payslips table.** Click a column header to sort by it (pay date, period, gross before USS, USS,
+   tax, NI, net, checks, salary deposit); click again to reverse. The sorted header shows ▲ or ▼.
+   The default is the pay date, newest first.
+4. **Tax.** For the chosen period: gross before USS, USS sacrifice, taxable pay, income tax, employee NI,
+   student loan, expense refunds and net pay, effective rates, a month-by-month chart (the tax
+   months, April to March, for a tax year; calendar months otherwise), and the months that have no
+   payslip (up to this month; for a custom range, only months the range covers whole). The
+   *year to date* figures from the latest payslip are shown for a single tax year only.
+5. **Pension.** USS contributions per tax year and in total, from your payslips. Add the figures
    from your USS statements (date, DB annual pension, DB lump sum, optional DC pot and employer
    contribution). The page shows an *illustrative* DB capital value (annual pension x 20 + lump
    sum); it is an estimate, is never written to Wealthfolio and is not part of your net worth. For
    projections use Wealthfolio's own retirement planner (*Add retirement income* / *Add pension
    fund*); this add-on does not rebuild it.
-5. **Payroll account (optional, off by default).** In **Settings**, tick *Enable the Payroll account
+6. **Payroll account (optional, off by default).** In **Settings**, tick *Enable the Payroll account
    tools*, press *Preview* to see every row that would be written and which bank deposits would be
    converted, then *Record in Wealthfolio*. Nothing is written before that click. Each payslip
    without warnings becomes, in a cash account named **Payroll**: gross pay in (a deposit), each

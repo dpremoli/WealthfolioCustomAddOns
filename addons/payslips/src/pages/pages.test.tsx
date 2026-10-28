@@ -756,3 +756,216 @@ describe("settings page: stored PDFs", () => {
     expect((screen.getByText("Remove all stored PDFs").closest("button") as HTMLButtonElement).disabled).toBe(true);
   });
 });
+
+/** Three payslips with different figures, in two tax years and two calendar years. */
+const sampleSlip = (payDate: string, period: string, salary: number, uss: number, tax: number, ni: number): Payslip => ({
+  ...parsePayslipLines(
+    samplePayslipLines({
+      payDate,
+      period,
+      payments: [`Salary ${salary.toFixed(2)}`, `USS(CRB) 16 SS ${uss.toFixed(2)}-`],
+      deductions: [`Tax paid ${tax.toFixed(2)}`, `Employee NIC ${ni.toFixed(2)}`],
+    }),
+  ),
+  warnings: [],
+  importedAt: "2026-11-02T09:00:00.000Z",
+});
+// net: 1500 - 100 - 300 - 90 = 1010 | 4000 - 200 - 700 - 250 = 2850 | 3000 - 183 - 380 - 150 = 2287
+const nov25 = () => sampleSlip("30.11.2025", "08/2025", 1500, 100, 300, 90); // tax 2025/26, calendar 2025
+const jan26 = () => sampleSlip("30.01.2026", "10/2025", 4000, 200, 700, 250); // tax 2025/26, calendar 2026
+const oct26 = () => sampleSlip("30.10.2026", "07/2026", 3000, 183, 380, 150); // tax 2026/27, calendar 2026
+const threeSlips = () => [oct26(), nov25(), jan26()];
+
+const tableOf = () => screen.getByRole("table") as HTMLTableElement;
+const bodyRows = () => [...tableOf().querySelectorAll("tbody tr")] as HTMLTableRowElement[];
+const payDates = () => bodyRows().map((r) => r.querySelector("td")!.textContent);
+
+describe("payslips page: table columns", () => {
+  it("gives every row one cell per header, and a header and its cells the same alignment", async () => {
+    const { ctx } = await setup({ payslips: threeSlips() });
+    renderPage(PayslipsPage, ctx);
+    await waitFor(() => expect(bodyRows()).toHaveLength(1)); // the default period is the latest tax year
+    fireEvent.change(screen.getByLabelText("Period"), { target: { value: "range" } });
+    fireEvent.change(screen.getByLabelText("From"), { target: { value: "2025-01-01" } });
+    await waitFor(() => expect(bodyRows()).toHaveLength(3));
+
+    const headers = [...tableOf().querySelectorAll("thead th")] as HTMLElement[];
+    const expected = ["left", "left", "right", "right", "right", "right", "right", "left", "left", "right"];
+    expect(headers).toHaveLength(expected.length);
+    for (const row of bodyRows()) expect(row.querySelectorAll("td")).toHaveLength(headers.length);
+
+    headers.forEach((th, i) => {
+      expect(th.style.textAlign, `header ${i} (${th.textContent})`).toBe(expected[i]);
+      for (const row of bodyRows()) {
+        const td = row.querySelectorAll("td")[i]!;
+        expect(td.style.textAlign, `cell ${i} of ${row.querySelector("td")!.textContent}`).toBe(expected[i]);
+        if (i >= 2 && i <= 6) {
+          expect(td.style.fontVariantNumeric).toBe("tabular-nums");
+          expect(td.style.whiteSpace).toBe("nowrap");
+        }
+      }
+    });
+  });
+});
+
+describe("payslips page: sorting", () => {
+  const netsShown = () => bodyRows().map((r) => r.querySelectorAll("td")[6]!.textContent);
+  const rangeAll = async () => {
+    fireEvent.change(screen.getByLabelText("Period"), { target: { value: "range" } });
+    fireEvent.change(screen.getByLabelText("From"), { target: { value: "2025-01-01" } });
+    await waitFor(() => expect(bodyRows()).toHaveLength(3));
+  };
+
+  it("starts with the newest pay date first, marked on its header", async () => {
+    const { ctx } = await setup({ payslips: threeSlips() });
+    renderPage(PayslipsPage, ctx);
+    await waitFor(() => expect(bodyRows()).toHaveLength(1));
+    await rangeAll();
+    expect(payDates()).toEqual(["2026-10-30", "2026-01-30", "2025-11-30"]);
+    const head = screen.getByRole("columnheader", { name: /Pay date/ });
+    expect(head.getAttribute("aria-sort")).toBe("descending");
+    expect(head.textContent).toContain("▼");
+    expect(screen.getByRole("columnheader", { name: /Net/ }).getAttribute("aria-sort")).toBe("none");
+  });
+
+  it("sorts by Net ascending on the first click and descending on the second", async () => {
+    const { ctx } = await setup({ payslips: threeSlips() });
+    renderPage(PayslipsPage, ctx);
+    await waitFor(() => expect(bodyRows()).toHaveLength(1));
+    await rangeAll();
+
+    fireEvent.click(screen.getByRole("button", { name: "Net" }));
+    expect(netsShown()).toEqual(["£1,010.00", "£2,287.00", "£2,850.00"]);
+    expect(screen.getByRole("columnheader", { name: /Net/ }).getAttribute("aria-sort")).toBe("ascending");
+    expect(screen.getByRole("columnheader", { name: /Net/ }).textContent).toContain("▲");
+    expect(screen.getByRole("columnheader", { name: /Pay date/ }).getAttribute("aria-sort")).toBe("none");
+    expect(screen.getByRole("columnheader", { name: /Pay date/ }).textContent).not.toMatch(/[▲▼]/);
+
+    fireEvent.click(screen.getByRole("button", { name: "Net" }));
+    expect(netsShown()).toEqual(["£2,850.00", "£2,287.00", "£1,010.00"]);
+    expect(screen.getByRole("columnheader", { name: /Net/ }).getAttribute("aria-sort")).toBe("descending");
+    expect(screen.getByRole("columnheader", { name: /Net/ }).textContent).toContain("▼");
+  });
+
+  it("sorts by the other columns too", async () => {
+    const { ctx } = await setup({ payslips: threeSlips() });
+    renderPage(PayslipsPage, ctx);
+    await waitFor(() => expect(bodyRows()).toHaveLength(1));
+    await rangeAll();
+
+    fireEvent.click(screen.getByRole("button", { name: "Gross before USS" }));
+    expect(payDates()).toEqual(["2025-11-30", "2026-10-30", "2026-01-30"]);
+    fireEvent.click(screen.getByRole("button", { name: "Pay date" })); // from another column: ascending
+    expect(payDates()).toEqual(["2025-11-30", "2026-01-30", "2026-10-30"]);
+    fireEvent.click(screen.getByRole("button", { name: "Pay date" }));
+    expect(payDates()).toEqual(["2026-10-30", "2026-01-30", "2025-11-30"]);
+  });
+});
+
+describe("period picker", () => {
+  const pick = (mode: string) => fireEvent.change(screen.getByLabelText("Period"), { target: { value: mode } });
+
+  it("shows the latest tax year first, and picks another tax year", async () => {
+    const { ctx } = await setup({ payslips: threeSlips() });
+    renderPage(PayslipsPage, ctx);
+    await waitFor(() => expect(payDates()).toEqual(["2026-10-30"]));
+    expect((screen.getByLabelText("Tax year") as HTMLSelectElement).value).toBe("2026");
+    fireEvent.change(screen.getByLabelText("Tax year"), { target: { value: "2025" } });
+    expect(payDates()).toEqual(["2026-01-30", "2025-11-30"]);
+  });
+
+  it("switches to a calendar year, listing the years that have payslips", async () => {
+    const { ctx } = await setup({ payslips: threeSlips() });
+    renderPage(PayslipsPage, ctx);
+    await waitFor(() => expect(bodyRows()).toHaveLength(1));
+    pick("calendar");
+    const year = screen.getByLabelText("Calendar year") as HTMLSelectElement;
+    expect([...year.options].map((o) => o.value)).toEqual(["2026", "2025"]);
+    expect(year.value).toBe("2026");
+    expect(payDates()).toEqual(["2026-10-30", "2026-01-30"]); // two tax years in one calendar year
+    fireEvent.change(year, { target: { value: "2025" } });
+    expect(payDates()).toEqual(["2025-11-30"]);
+  });
+
+  it("filters by a custom range, both dates included, starting from the dates of the period it replaces", async () => {
+    const { ctx } = await setup({ payslips: threeSlips() });
+    renderPage(PayslipsPage, ctx);
+    await waitFor(() => expect(bodyRows()).toHaveLength(1));
+    pick("range");
+    expect((screen.getByLabelText("From") as HTMLInputElement).value).toBe("2026-04-06");
+    expect((screen.getByLabelText("To") as HTMLInputElement).value).toBe("2027-04-05");
+    expect((screen.getByLabelText("From") as HTMLInputElement).type).toBe("date");
+
+    fireEvent.change(screen.getByLabelText("From"), { target: { value: "2025-11-30" } });
+    fireEvent.change(screen.getByLabelText("To"), { target: { value: "2026-01-30" } });
+    expect(payDates()).toEqual(["2026-01-30", "2025-11-30"]);
+    fireEvent.change(screen.getByLabelText("From"), { target: { value: "2025-12-01" } });
+    expect(payDates()).toEqual(["2026-01-30"]);
+  });
+
+  it("says so when the range holds no payslip", async () => {
+    const { ctx } = await setup({ payslips: threeSlips() });
+    renderPage(PayslipsPage, ctx);
+    await waitFor(() => expect(bodyRows()).toHaveLength(1));
+    pick("range");
+    fireEvent.change(screen.getByLabelText("From"), { target: { value: "2030-01-01" } });
+    fireEvent.change(screen.getByLabelText("To"), { target: { value: "2030-12-31" } });
+    expect(screen.getByText(/No payslips in 2030-01-01 to 2030-12-31/)).toBeTruthy();
+    expect(screen.getByLabelText("From")).toBeTruthy(); // the picker stays, so the dates can be changed
+  });
+});
+
+describe("tax page: period", () => {
+  const pick = (mode: string) => fireEvent.change(screen.getByLabelText("Period"), { target: { value: mode } });
+  const today = () => vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-11-10T09:00:00Z") });
+
+  it("keeps the year to date for a tax year only", async () => {
+    today();
+    const { ctx } = await setup({ payslips: threeSlips() });
+    renderPage(TaxPage, ctx);
+    await waitFor(() => expect(screen.getByText("1 payslip in 2026/27")).toBeTruthy());
+    expect(screen.getByText("Year to date")).toBeTruthy();
+
+    pick("calendar");
+    expect(screen.getByText("2 payslips in 2026")).toBeTruthy();
+    expect(screen.queryByText("Year to date")).toBeNull();
+    pick("range");
+    expect(screen.queryByText("Year to date")).toBeNull();
+  });
+
+  it("totals a calendar year over two tax years and lists its missing months", async () => {
+    today();
+    const { ctx } = await setup({ payslips: threeSlips() });
+    renderPage(TaxPage, ctx);
+    await waitFor(() => expect(screen.getByText("1 payslip in 2026/27")).toBeTruthy());
+    pick("calendar");
+
+    expect(screen.getByText("£7,000.00")).toBeTruthy(); // gross before USS: 4000 + 3000
+    expect(screen.getByText("£383.00")).toBeTruthy(); // USS: 200 + 183
+    expect(screen.getByText("£1,080.00")).toBeTruthy(); // tax: 700 + 380
+    expect(screen.getByText("£5,137.00")).toBeTruthy(); // net: 2850 + 2287
+    // To 10 November 2026: Feb-Sep and Nov have no payslip; January and October do.
+    for (const m of ["Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Nov"]) expect(screen.getByText(`${m} 2026`)).toBeTruthy();
+    expect(screen.queryByText("Jan 2026")).toBeNull();
+    expect(screen.queryByText("Oct 2026")).toBeNull();
+    expect(screen.queryByText("Dec 2026")).toBeNull();
+  });
+
+  it("totals a custom range", async () => {
+    today();
+    const { ctx } = await setup({ payslips: threeSlips() });
+    renderPage(TaxPage, ctx);
+    await waitFor(() => expect(screen.getByText("1 payslip in 2026/27")).toBeTruthy());
+    pick("range");
+    fireEvent.change(screen.getByLabelText("From"), { target: { value: "2025-11-01" } });
+    fireEvent.change(screen.getByLabelText("To"), { target: { value: "2026-01-31" } });
+
+    expect(screen.getByText("2 payslips in 2025-11-01 to 2026-01-31")).toBeTruthy();
+    expect(screen.getByText("£5,500.00")).toBeTruthy(); // gross before USS: 1500 + 4000
+    expect(screen.getByText("£3,860.00")).toBeTruthy(); // net: 1010 + 2850
+    // Nov, Dec and Jan are whole months in the range; only December has no payslip.
+    expect(screen.getByText("Dec 2025")).toBeTruthy();
+    expect(screen.queryByText("Nov 2025")).toBeNull();
+    expect(screen.queryByText("Jan 2026")).toBeNull();
+  });
+});

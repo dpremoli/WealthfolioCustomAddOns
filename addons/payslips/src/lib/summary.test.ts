@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { samplePayslipLines } from "../test-utils";
 import type { Payslip } from "./model";
 import { parsePayslipLines } from "./payslip-parser";
-import { summariseYear } from "./summary";
+import { summarise, summariseYear } from "./summary";
 
 /** Default sample: salary 3000, USS sacrifice 183 → payments 2817, tax 380 + NI 150, net 2287. */
 const slip = (payDate: string, period: string, over: Parameters<typeof samplePayslipLines>[0] = {}): Payslip => ({
@@ -113,6 +113,128 @@ describe("summariseYear", () => {
       const stacked = s.months.reduce((n, m) => n + m.netFromPay + m.expenseRefunds + m.tax + m.ni + m.studentLoan + m.uss + m.other, 0);
       expect(stacked).toBeCloseTo(s.grossBeforeUss + s.expenseRefunds, 2);
       expect(s.months.reduce((n, m) => n + m.netFromPay + m.expenseRefunds, 0)).toBeCloseTo(s.net, 2);
+    });
+  });
+});
+
+describe("summarise", () => {
+  const dec = slip("31.12.2025", "09/2025");
+  const jan = slip("30.01.2026", "10/2025");
+  const feb = slip("27.02.2026", "11/2025");
+  const next = slip("29.01.2027", "10/2026");
+  const all = [dec, jan, feb, old, apr, may, next];
+
+  describe("a tax year", () => {
+    it("gives what summariseYear gives, with the month keys and the missing months by tax month", () => {
+      const s = summarise([apr, may, old], { kind: "tax", year: 2026 }, "2026-06-10");
+      expect(s).toMatchObject({ taxYear: 2026, label: "2026/27", count: 2, grossBeforeUss: 6000, net: 4534, missingMonths: [3] });
+      expect(s.period).toEqual({ kind: "tax", year: 2026 });
+      expect(s.months.map((m) => m.key)).toEqual(
+        ["2026-04", "2026-05", "2026-06", "2026-07", "2026-08", "2026-09", "2026-10", "2026-11", "2026-12", "2027-01", "2027-02", "2027-03"],
+      );
+      expect(s.missing).toEqual([{ key: "2026-06", month: 3, label: "Jun" }]);
+      expect(s.ytd).toEqual({ payDate: "2026-05-29", grossPay: 5634, taxablePay: 5634, tax: 760, eeNic: 300 });
+    });
+
+    it("is what summariseYear returns", () => {
+      expect(summariseYear(all, 2026, "2026-06-10")).toEqual(summarise(all, { kind: "tax", year: 2026 }, "2026-06-10"));
+    });
+  });
+
+  describe("a calendar year", () => {
+    it("takes payslips of two tax years and nothing outside the year", () => {
+      const s = summarise(all, { kind: "calendar", year: 2026 }, "2026-06-10");
+      expect(s.label).toBe("2026");
+      expect(s.taxYear).toBeUndefined();
+      expect(s.count).toBe(5); // Jan, Feb, Mar (tax year 2025) and Apr, May (2026)
+      expect(s.grossBeforeUss).toBe(15000);
+      expect(s.ussSacrifice).toBe(915);
+      expect(s.incomeTax).toBe(1900);
+      expect(s.employeeNi).toBe(750);
+      expect(s.studentLoan).toBe(40);
+      expect(s.net).toBe(4 * 2287 + 2247);
+      expect(s.rates.incomeTax).toBeCloseTo(1900 / 15000, 6);
+    });
+
+    it("buckets by calendar month, January first", () => {
+      const s = summarise(all, { kind: "calendar", year: 2026 }, "2026-06-10");
+      expect(s.months).toHaveLength(12);
+      expect(s.months.map((m) => m.key)).toEqual(Array.from({ length: 12 }, (_, i) => `2026-${String(i + 1).padStart(2, "0")}`));
+      expect(s.months.map((m) => m.label).slice(0, 5)).toEqual(["Jan", "Feb", "Mar", "Apr", "May"]);
+      expect(s.months[0]).toMatchObject({ hasPayslip: true, net: 2287, tax: 380, uss: 183 });
+      expect(s.months[4]).toMatchObject({ hasPayslip: true, net: 2247, studentLoan: 40 });
+      expect(s.months[5]).toMatchObject({ hasPayslip: false, net: 0 });
+      const stacked = s.months.reduce((n, m) => n + m.netFromPay + m.expenseRefunds + m.tax + m.ni + m.studentLoan + m.uss + m.other, 0);
+      expect(stacked).toBeCloseTo(s.grossBeforeUss, 2);
+    });
+
+    it("lists the months with no payslip up to the current month, and has no year to date", () => {
+      const s = summarise(all, { kind: "calendar", year: 2026 }, "2026-06-10");
+      expect(s.missing).toEqual([{ key: "2026-06", month: 6, label: "Jun 2026" }]);
+      expect(s.missingMonths).toEqual([6]);
+      expect(s.ytd).toBeUndefined();
+    });
+
+    it("lists every month of a past year without a payslip, and none of a future year", () => {
+      expect(summarise(all, { kind: "calendar", year: 2025 }, "2026-06-10").missingMonths).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+      expect(summarise(all, { kind: "calendar", year: 2027 }, "2026-06-10").missing).toEqual([]);
+    });
+  });
+
+  describe("a custom range", () => {
+    const range = (from: string, to: string) => ({ kind: "range", from, to }) as const;
+
+    it("takes the payslips from the first date to the last, both included", () => {
+      expect(summarise(all, range("2026-02-27", "2026-04-30"), "2026-06-10").count).toBe(3); // Feb, Mar, Apr
+      expect(summarise(all, range("2026-02-28", "2026-04-29"), "2026-06-10").count).toBe(1); // Mar
+      const s = summarise(all, range("2026-02-27", "2026-04-30"), "2026-06-10");
+      expect(s.label).toBe("2026-02-27 to 2026-04-30");
+      expect(s.grossBeforeUss).toBe(9000);
+      expect(s.net).toBe(3 * 2287);
+      expect(s.taxYear).toBeUndefined();
+      expect(s.ytd).toBeUndefined();
+    });
+
+    it("buckets by calendar month over the range, labelled with the year", () => {
+      const s = summarise(all, range("2026-02-10", "2026-05-31"), "2026-06-10");
+      expect(s.months.map((m) => [m.key, m.label, m.hasPayslip])).toEqual([
+        ["2026-02", "Feb 26", true],
+        ["2026-03", "Mar 26", true],
+        ["2026-04", "Apr 26", true],
+        ["2026-05", "May 26", true],
+      ]);
+      expect(s.months[3]).toMatchObject({ net: 2247, studentLoan: 40 });
+    });
+
+    it("runs a range across years month by month", () => {
+      const s = summarise(all, range("2025-12-01", "2026-01-31"), "2026-06-10");
+      expect(s.months.map((m) => m.key)).toEqual(["2025-12", "2026-01"]);
+      expect(s.months.map((m) => m.label)).toEqual(["Dec 25", "Jan 26"]);
+      expect(s.count).toBe(2);
+    });
+
+    it("counts a month as missing only when the range covers it whole and it has begun", () => {
+      // February starts on the 10th, so it is not judged; March and May are whole and have no payslip.
+      expect(summarise([apr], range("2026-02-10", "2026-05-31"), "2026-06-10").missing.map((m) => m.key)).toEqual(["2026-03", "2026-05"]);
+      // Whole months, up to the month of today (June), none paid in June.
+      const s = summarise([apr, may], range("2026-04-01", "2026-12-31"), "2026-06-10");
+      expect(s.missing.map((m) => m.key)).toEqual(["2026-06"]);
+      expect(s.missing[0]!.label).toBe("Jun 2026");
+    });
+
+    it("spans the payslips for an open end", () => {
+      const s = summarise([apr, may], range("", ""), "2026-06-10");
+      expect(s.months.map((m) => m.key)).toEqual(["2026-04", "2026-05"]);
+      expect(s.count).toBe(2);
+      expect(summarise([apr, may], range("2026-05-01", ""), "2026-06-10").count).toBe(1);
+    });
+
+    it("is empty for a range that ends before it starts", () => {
+      const s = summarise(all, range("2026-06-01", "2026-05-01"), "2026-06-10");
+      expect(s.count).toBe(0);
+      expect(s.months).toEqual([]);
+      expect(s.missing).toEqual([]);
+      expect(s.rates).toEqual({ incomeTax: 0, employeeNi: 0, deductions: 0 });
     });
   });
 });

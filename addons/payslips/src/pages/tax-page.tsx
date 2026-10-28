@@ -16,11 +16,11 @@ import type { AddonPageProps } from "@wf-addons/kit";
 import { PageShell, StatTiles, type Stat } from "@wf-addons/kit/ui";
 import { useState } from "react";
 import { PayslipsNav } from "../components/nav";
-import { TaxYearSelect } from "../components/tax-year-select";
+import { PeriodSelect } from "../components/period-select";
 import { usePayslipData } from "../hooks/use-payslip-data";
 import { gbp, pct, todayIso } from "../lib/format";
-import { summariseYear } from "../lib/summary";
-import { periodLabel } from "../lib/tax-year";
+import { resolvePeriod, type Period } from "../lib/period";
+import { summarise } from "../lib/summary";
 
 const CHART_CONFIG: ChartConfig = {
   netFromPay: { label: "Net pay", color: "#2f9e6e" },
@@ -34,11 +34,11 @@ const CHART_CONFIG: ChartConfig = {
 
 export default function TaxPage({ ctx }: AddonPageProps) {
   const { data, isLoading } = usePayslipData(ctx);
-  const [year, setYear] = useState<number | null>(null);
+  const [chosen, setChosen] = useState<Period | null>(null);
 
-  const years = data?.years ?? [];
-  const selected = year !== null && years.includes(year) ? year : years[years.length - 1];
-  const summary = data && selected !== undefined ? summariseYear(data.payslips, selected, todayIso()) : undefined;
+  const period = data ? resolvePeriod(chosen, data.payslips) : undefined;
+  const summary = data && period ? summarise(data.payslips, period, todayIso()) : undefined;
+  const isTaxYear = period?.kind === "tax";
 
   // The refunds are a series of their own, and the net pay series is what is left without them.
   const hasRefunds = (summary?.expenseRefunds ?? 0) > 0;
@@ -52,13 +52,13 @@ export default function TaxPage({ ctx }: AddonPageProps) {
     <PageShell
       iconName="BarChart"
       heading="Tax"
-      description="Income tax, National Insurance and pension per UK tax year (6 April to 5 April)."
+      description="Income tax, National Insurance and pension for a UK tax year (6 April to 5 April), a calendar year or any range of pay dates."
       actions={<PayslipsNav ctx={ctx} current="tax" />}
       className="max-w-5xl"
     >
       {isLoading ? (
         <p className="text-muted-foreground text-sm">Loading…</p>
-      ) : !summary || selected === undefined ? (
+      ) : !summary || !period || !data ? (
         <Card>
           <CardContent className="text-muted-foreground pt-6 text-sm">
             No payslips yet. Import some on the Payslips page to see your tax figures.
@@ -66,8 +66,8 @@ export default function TaxPage({ ctx }: AddonPageProps) {
         </Card>
       ) : (
         <>
-          <div className="flex items-center justify-between gap-4">
-            <TaxYearSelect years={years} value={selected} onChange={setYear} />
+          <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 16 }}>
+            <PeriodSelect payslips={data.payslips} value={period} onChange={setChosen} />
             <span className="text-muted-foreground text-sm">
               {summary.count} {summary.count === 1 ? "payslip" : "payslips"} in {summary.label}
             </span>
@@ -96,7 +96,10 @@ export default function TaxPage({ ctx }: AddonPageProps) {
           <Card>
             <CardHeader>
               <CardTitle className="text-base">Month by month</CardTitle>
-              <CardDescription>Where each month's gross pay went, April to March{hasRefunds ? ", with the expense refunds paid on top" : ""}.</CardDescription>
+              <CardDescription>
+                Where each month's gross pay went, {isTaxYear ? "April to March" : "by calendar month"}
+                {hasRefunds ? ", with the expense refunds paid on top" : ""}.
+              </CardDescription>
             </CardHeader>
             <CardContent>
               <ChartContainer config={chartConfig} className="h-72 w-full">
@@ -125,42 +128,44 @@ export default function TaxPage({ ctx }: AddonPageProps) {
             </CardContent>
           </Card>
 
-          <div className="grid gap-4 sm:grid-cols-2">
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-base">Year to date</CardTitle>
-                <CardDescription>
-                  {summary.ytd ? `From the latest payslip, paid ${summary.ytd.payDate}` : "No payslip in this tax year"}
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                {summary.ytd && (
-                  <dl className="grid grid-cols-2 gap-y-1 text-sm">
-                    <dt className="text-muted-foreground">Gross pay</dt>
-                    <dd className="text-right tabular-nums">{gbp(summary.ytd.grossPay)}</dd>
-                    <dt className="text-muted-foreground">Taxable pay</dt>
-                    <dd className="text-right tabular-nums">{gbp(summary.ytd.taxablePay)}</dd>
-                    <dt className="text-muted-foreground">Tax paid</dt>
-                    <dd className="text-right tabular-nums">{gbp(summary.ytd.tax)}</dd>
-                    <dt className="text-muted-foreground">Employee NI</dt>
-                    <dd className="text-right tabular-nums">{gbp(summary.ytd.eeNic)}</dd>
-                  </dl>
-                )}
-              </CardContent>
-            </Card>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(18rem, 1fr))", gap: 16 }}>
+            {isTaxYear && (
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base">Year to date</CardTitle>
+                  <CardDescription>
+                    {summary.ytd ? `From the latest payslip, paid ${summary.ytd.payDate}` : "No payslip in this tax year"}
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  {summary.ytd && (
+                    <dl style={{ display: "grid", gridTemplateColumns: "1fr auto", rowGap: 4, columnGap: 16 }} className="text-sm">
+                      <dt className="text-muted-foreground">Gross pay</dt>
+                      <dd style={{ textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{gbp(summary.ytd.grossPay)}</dd>
+                      <dt className="text-muted-foreground">Taxable pay</dt>
+                      <dd style={{ textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{gbp(summary.ytd.taxablePay)}</dd>
+                      <dt className="text-muted-foreground">Tax paid</dt>
+                      <dd style={{ textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{gbp(summary.ytd.tax)}</dd>
+                      <dt className="text-muted-foreground">Employee NI</dt>
+                      <dd style={{ textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{gbp(summary.ytd.eeNic)}</dd>
+                    </dl>
+                  )}
+                </CardContent>
+              </Card>
+            )}
 
             <Card>
               <CardHeader>
                 <CardTitle className="text-base">Months with no payslip</CardTitle>
               </CardHeader>
               <CardContent className="text-sm">
-                {summary.missingMonths.length === 0 ? (
+                {summary.missing.length === 0 ? (
                   <p className="text-muted-foreground">None: every month so far has a payslip.</p>
                 ) : (
-                  <ul className="flex flex-wrap gap-x-4 gap-y-1">
-                    {summary.missingMonths.map((m) => (
-                      <li key={m}>
-                        {periodLabel(m)} <span className="text-muted-foreground">(month {m})</span>
+                  <ul style={{ display: "flex", flexWrap: "wrap", gap: "4px 16px", listStyle: "none", margin: 0, padding: 0 }}>
+                    {summary.missing.map((m) => (
+                      <li key={m.key}>
+                        {m.label} {isTaxYear && <span className="text-muted-foreground">(month {m.month})</span>}
                       </li>
                     ))}
                   </ul>

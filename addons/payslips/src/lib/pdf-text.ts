@@ -30,7 +30,17 @@ function toBytes(binary: string): Uint8Array {
   return out;
 }
 
+/** Inflates, retrying without the last one or two bytes (a stray EOL after the data). */
 async function inflate(data: Uint8Array): Promise<Uint8Array | null> {
+  for (const trim of [0, 1, 2]) {
+    if (trim > data.length) break;
+    const out = await inflateOnce(data.subarray(0, data.length - trim));
+    if (out) return out;
+  }
+  return null;
+}
+
+async function inflateOnce(data: Uint8Array): Promise<Uint8Array | null> {
   try {
     const ds = new DecompressionStream("deflate");
     const writer = ds.writable.getWriter();
@@ -57,9 +67,15 @@ async function inflate(data: Uint8Array): Promise<Uint8Array | null> {
   }
 }
 
+interface ContentStream {
+  /** Object number of the stream, or 0 when its `N G obj` header was not found. */
+  obj: number;
+  text: string;
+}
+
 /** Content streams of the file (decoded to binary strings) in document order. */
-async function contentStreams(binary: string, bytes: Uint8Array): Promise<string[]> {
-  const out: string[] = [];
+async function contentStreams(binary: string, bytes: Uint8Array): Promise<ContentStream[]> {
+  const out: ContentStream[] = [];
   const re = /stream\r?\n/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(binary))) {
@@ -67,13 +83,24 @@ async function contentStreams(binary: string, bytes: Uint8Array): Promise<string
     const start = m.index + m[0].length;
     const dictStart = Math.max(binary.lastIndexOf("obj", m.index), 0);
     const dict = binary.slice(dictStart, m.index);
+    const obj = Number(/(\d+)\s+\d+\s+$/.exec(binary.slice(Math.max(0, dictStart - 24), dictStart))?.[1] ?? 0);
 
     let end = binary.indexOf("endstream", start);
     if (end < 0) break;
-    const declared = /\/Length\s+(\d+)(?!\s+\d+\s+R)/.exec(dict);
+    const declared = /\/Length\s+(\d+)(?!\d)(?!\s+\d+\s+R)/.exec(dict);
+    let exact = false;
     if (declared) {
       const at = start + Number(declared[1]);
-      if (/^\s*endstream/.test(binary.slice(at, at + 12))) end = at;
+      if (/^\s*endstream/.test(binary.slice(at, at + 12))) {
+        end = at;
+        exact = true;
+      }
+    }
+    // Without a usable direct /Length the data runs to `endstream`, which the spec lets follow
+    // an end-of-line marker that is not part of the data.
+    if (!exact) {
+      if (binary.startsWith("\r\n", end - 2)) end -= 2;
+      else if (end > start && (binary[end - 1] === "\n" || binary[end - 1] === "\r")) end -= 1;
     }
     re.lastIndex = end;
 
@@ -88,13 +115,46 @@ async function contentStreams(binary: string, bytes: Uint8Array): Promise<string
     const filters = /\/Filter\s*(\[[^\]]*\]|\/\w+)/.exec(dict)?.[1];
     const names = filters ? (filters.match(/\/\w+/g) ?? []) : [];
     if (names.length === 0) {
-      out.push(binary.slice(start, end));
+      out.push({ obj, text: binary.slice(start, end) });
     } else if (names.length === 1 && names[0] === "/FlateDecode") {
       const inflated = await inflate(bytes.subarray(start, end));
-      if (inflated) out.push(toBinaryString(inflated));
+      if (inflated) out.push({ obj, text: toBinaryString(inflated) });
     }
   }
   return out;
+}
+
+/**
+ * The content streams of each page, in file order of the page objects: a page's `/Contents` is
+ * one stream or an array of them, read as a single stream. Falls back to one page per stream when
+ * the file has no readable page objects; streams no page refers to follow as pages of their own.
+ */
+function pagesOf(binary: string, streams: ContentStream[]): string[] {
+  const byObj = new Map<number, string>();
+  for (const s of streams) if (s.obj > 0 && !byObj.has(s.obj)) byObj.set(s.obj, s.text);
+  const used = new Set<number>();
+  const pages: string[] = [];
+  const objRe = /(\d+)\s+\d+\s+obj\b([\s\S]*?)endobj/g;
+  let m: RegExpExecArray | null;
+  while ((m = objRe.exec(binary))) {
+    const body = m[2]!;
+    if (!/\/Type\s*\/Page(?![A-Za-z])/.test(body)) continue;
+    const contents = /\/Contents\s*(\[[^\]]*\]|\d+\s+\d+\s+R)/.exec(body)?.[1];
+    if (!contents) continue;
+    const parts: string[] = [];
+    for (const ref of contents.matchAll(/(\d+)\s+\d+\s+R/g)) {
+      const n = Number(ref[1]);
+      const text = byObj.get(n);
+      if (text === undefined) continue;
+      used.add(n);
+      parts.push(text);
+    }
+    // Operators never span streams, but a newline keeps the last token of one apart from the next.
+    if (parts.length > 0) pages.push(parts.join("\n"));
+  }
+  if (pages.length === 0) return streams.map((s) => s.text);
+  for (const s of streams) if (!used.has(s.obj)) pages.push(s.text);
+  return pages;
 }
 
 type Token =
@@ -235,10 +295,26 @@ interface Shown {
   text: string;
 }
 
+/** Glyph width of the fixed-width fonts this reads, in 1/1000 em. */
+const GLYPH_WIDTH = 600;
+
+/**
+ * The text of a shown-string operand. In a TJ array a number n moves the next glyph by
+ * -n/1000 of the font size, so a large negative one is a gap: it becomes round(-n / 600) spaces
+ * (one glyph width each). Small adjustments (kerning) and positive ones add nothing.
+ */
 function textOf(tok: Token | undefined): string {
   if (!tok) return "";
   if (tok.t === "str") return tok.v;
-  if (tok.t === "arr") return tok.v.map((t) => (t.t === "str" ? t.v : "")).join("");
+  if (tok.t === "arr") {
+    return tok.v
+      .map((t) => {
+        if (t.t === "str") return t.v;
+        if (t.t === "num" && t.v < 0) return " ".repeat(Math.max(0, Math.round(-t.v / GLYPH_WIDTH)));
+        return "";
+      })
+      .join("");
+  }
   return "";
 }
 
@@ -328,10 +404,10 @@ export async function extractPdfLines(bytes: Uint8Array): Promise<string[]> {
     throw new PdfTextError("This PDF is encrypted, so its text cannot be read. Export an unprotected copy.");
   }
 
-  const streams = await contentStreams(binary, bytes);
+  const pages = pagesOf(binary, await contentStreams(binary, bytes));
   const lines: string[] = [];
   const dec = decoder();
-  streams.forEach((stream, page) => {
+  pages.forEach((stream, page) => {
     const rows = new Map<number, Shown[]>();
     for (const s of showStrings(stream, page)) {
       const y = Math.round(s.y * 2) / 2;

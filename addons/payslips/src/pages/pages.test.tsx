@@ -4,7 +4,7 @@ import type { AddonContext, AddonRouteLocation } from "@wealthfolio/addon-sdk";
 import { FakeWealthfolio, type StoredActivity } from "@wf-addons/kit/testing";
 import type { ComponentType } from "react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { lineContent, rawPdf, samplePayslipLines, writePdf } from "../test-utils";
+import { lineContent, rawPdf, samplePayslipLines, withoutPageTree, writePdf } from "../test-utils";
 import { parsePayslipLines } from "../lib/payslip-parser";
 import type { Payslip } from "../lib/model";
 import { recordPayroll } from "../lib/payroll";
@@ -323,7 +323,7 @@ describe("payslips page: stored PDFs", () => {
     expect((screen.getByLabelText("Download payslip 2026-10-31") as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it("shows the payslip text in a monospace block, then the original PDF tab", async () => {
+  it("draws the payslip page as an SVG, then shows the original PDF tab", async () => {
     const { ctx } = await withStoredPdf();
     renderPage(PayslipsPage, ctx);
     const view = await screen.findByLabelText("View payslip 2026-10-31");
@@ -331,11 +331,13 @@ describe("payslips page: stored PDFs", () => {
     fireEvent.click(view);
 
     const dialog = await screen.findByRole("dialog");
-    const text = await within(dialog).findByText(NET_PAY);
-    expect(text.tagName).toBe("PRE");
-    expect(text.className).toMatch(/font-mono/);
-    expect(text.textContent).toContain("Total Payments");
-    expect(text.textContent).toContain("ZZNAME TESTPERSON");
+    const net = await within(dialog).findByText(NET_PAY, { selector: "svg text" });
+    const svg = net.closest("svg")!;
+    expect(svg.getAttribute("viewBox")).toBe("0 0 595 842");
+    expect(net.getAttribute("font-family")).toMatch(/Courier/);
+    expect(svg.textContent).toContain("Total Payments");
+    expect(svg.textContent).toContain("ZZNAME TESTPERSON");
+    expect(dialog.querySelector("pre")).toBeNull();
     expect(within(dialog).getByRole("tab", { name: "Payslip" }).getAttribute("aria-selected")).toBe("true");
 
     fireEvent.click(within(dialog).getByRole("tab", { name: "Original PDF" }));
@@ -347,6 +349,23 @@ describe("payslips page: stored PDFs", () => {
     const blob = vi.mocked(URL.createObjectURL).mock.calls.at(-1)![0] as Blob;
     expect(blob.type).toBe("application/pdf");
     expect(blob.size).toBe(pdfBytes().length);
+  });
+
+  it("falls back to the text view when the page cannot be drawn", async () => {
+    const { ctx } = await setup();
+    // Readable text, but no page tree for the renderer to walk.
+    await savePdf(ctx, "2026-10-31", withoutPageTree(pdfBytes()));
+    renderPage(PayslipsPage, ctx);
+    const view = await screen.findByLabelText("View payslip 2026-10-31");
+    await waitFor(() => expect((view as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(view);
+
+    const dialog = await screen.findByRole("dialog");
+    const text = await within(dialog).findByText(NET_PAY);
+    expect(text.tagName).toBe("PRE");
+    expect(text.className).toMatch(/font-mono/);
+    expect(text.textContent).toContain("Total Payments");
+    expect(dialog.querySelector("svg text")).toBeNull();
   });
 
   it("revokes the PDF's blob URL when the viewer closes", async () => {

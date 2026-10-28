@@ -1,11 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { PDF_MARGIN_COLS, lineContent, rawPdf, samplePayslipLines, writePdf } from "../test-utils";
+import { PDF_MARGIN_COLS, checkerImage, imageContent, lineContent, rawPdf, samplePayslipLines, writePdf } from "../test-utils";
 import { PdfTextError, extractPdfLines } from "./pdf-text";
 
 const margin = " ".repeat(PDF_MARGIN_COLS);
 const withMargin = (lines: string[]) => lines.map((l) => margin + l.trimEnd());
 
 describe("extractPdfLines", () => {
+  it("reads the text of a page that also draws an image mask with indirect filters", async () => {
+    const sample = samplePayslipLines();
+    const content = `${lineContent(sample)}\n${imageContent(30, 738, 100, 20)}`;
+    const lines = await extractPdfLines(rawPdf([content], { image: checkerImage() }));
+    expect(lines).toEqual(withMargin(sample));
+  });
+
   it("round-trips the sample payslip with its column layout", async () => {
     const sample = samplePayslipLines();
     const lines = await extractPdfLines(writePdf([sample]));

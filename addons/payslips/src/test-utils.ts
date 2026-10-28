@@ -52,6 +52,85 @@ export interface RawPdfOptions {
   /** Page layout: each entry lists the indexes of the `contents` that make up that page
    *  (one stream = `/Contents n 0 R`, several = `/Contents [a b]`). Default: one page per stream. */
   pages?: number[][];
+  /** Extra Type1 fonts: resource name → `/BaseFont` (e.g. `{ F2: "Times-Roman" }`), after `/F1` Courier. */
+  fonts?: Record<string, string>;
+  /** An image-mask XObject `/Im1` on every page, with an indirect `[/FlateDecode/RunLengthDecode]`
+   *  filter array and an indirect `/Length`, as the real SAP payslips write their logos. */
+  image?: ImageMaskOptions;
+}
+
+export interface ImageMaskOptions {
+  widthPx: number;
+  heightPx: number;
+  /** Packed 1-bit samples, rows padded to whole bytes: the image data before it is encoded. */
+  samples: Uint8Array;
+  /** Writes `/Decode [1 0]` (a 1 sample paints). */
+  invert?: boolean;
+}
+
+/** Run-length encodes (PDF RunLengthDecode): literal runs of up to 128 bytes, repeats of 2..128. */
+export function runLengthEncode(data: Uint8Array): Uint8Array {
+  const out: number[] = [];
+  let i = 0;
+  while (i < data.length) {
+    let run = 1;
+    while (i + run < data.length && run < 128 && data[i + run] === data[i]) run++;
+    if (run >= 2) {
+      out.push(257 - run, data[i]!);
+      i += run;
+      continue;
+    }
+    const start = i;
+    i++;
+    while (i < data.length && i - start < 128 && !(i + 1 < data.length && data[i] === data[i + 1])) i++;
+    out.push(i - start - 1, ...data.subarray(start, i));
+  }
+  out.push(128);
+  return Uint8Array.from(out);
+}
+
+/**
+ * A tiny synthetic image mask: a checkerboard of `cell`-pixel squares whose top-left cell paints.
+ * `mask` is what a reader must produce (1 = paint, row-major); `samples` is the packed 1-bit data
+ * as PDF stores it, where 0 paints under the default `/Decode [0 1]`.
+ */
+export function checkerImage(widthPx = 16, heightPx = 4, cell = 2) {
+  const mask = new Uint8Array(widthPx * heightPx);
+  const rowBytes = Math.ceil(widthPx / 8);
+  const samples = new Uint8Array(rowBytes * heightPx).fill(0xff);
+  for (let y = 0; y < heightPx; y++) {
+    for (let x = 0; x < widthPx; x++) {
+      const paint = (Math.floor(x / cell) + Math.floor(y / cell)) % 2 === 0;
+      mask[y * widthPx + x] = paint ? 1 : 0;
+      if (paint) samples[y * rowBytes + (x >> 3)]! &= ~(0x80 >> (x & 7));
+    }
+  }
+  return { widthPx, heightPx, mask, samples };
+}
+
+export interface RuledLine {
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+  width?: number;
+  /** `[r, g, b]` 0..1; default black. */
+  rgb?: [number, number, number];
+}
+
+/** Content-stream text for ruled lines, as the SAP payslips write them: `q 0 0 0 RG 0.75 w x y m x y l S Q`. */
+export function ruleContent(rules: RuledLine[]): string {
+  return rules
+    .map((r) => {
+      const [cr, cg, cb] = r.rgb ?? [0, 0, 0];
+      return `q ${cr} ${cg} ${cb} RG ${r.width ?? 0.75} w ${r.x1} ${r.y1} m ${r.x2} ${r.y2} l S Q`;
+    })
+    .join("\n");
+}
+
+/** Content-stream text that paints the `/Im1` mask into the box at (x, y), w × h, in `rgb` (default black). */
+export function imageContent(x: number, y: number, w: number, h: number, rgb: [number, number, number] = [0, 0, 0]): string {
+  return `q ${rgb.join(" ")} rg ${w} 0 0 ${h} ${x} ${y} cm /Im1 Do Q`;
 }
 
 /**
@@ -65,9 +144,15 @@ export function rawPdf(contents: (string | Uint8Array)[], opts: RawPdfOptions = 
   const pageCount = pages.length;
   const streamEol = opts.streamEol ?? "\n";
   const endEol = opts.endEol ?? "\n";
-  // 1 catalog, 2 pages, 3 font, pages from 4, then the content streams, then /Length integers.
+  // 1 catalog, 2 pages, 3 font, pages from 4, then the content streams, then /Length integers,
+  // then the extra fonts and the image (filter array, length, stream).
   const firstContent = 4 + pageCount;
   const firstLength = firstContent + contents.length;
+  const extraFonts = Object.entries(opts.fonts ?? {});
+  const firstExtra = firstLength + (opts.indirectLength ? contents.length : 0);
+  const fontRefs = ["/F1 3 0 R", ...extraFonts.map(([name], i) => `/${name} ${firstExtra + i} 0 R`)].join(" ");
+  const imageObj = firstExtra + extraFonts.length + 2; // after the filter array and the length
+  const xobjects = opts.image ? ` /XObject << /Im1 ${imageObj} 0 R >>` : "";
   const objects: Uint8Array[] = [];
   const kids = pages.map((_, i) => `${4 + i} 0 R`).join(" ");
   objects.push(latin1("<< /Type /Catalog /Pages 2 0 R >>"));
@@ -78,7 +163,7 @@ export function rawPdf(contents: (string | Uint8Array)[], opts: RawPdfOptions = 
     const ref = refs.length === 1 ? refs[0]! : `[${refs.join(" ")}]`;
     objects.push(
       latin1(
-        `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents ${ref} >>`,
+        `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << ${fontRefs} >>${xobjects} >> /Contents ${ref} >>`,
       ),
     );
   }
@@ -98,6 +183,25 @@ export function rawPdf(contents: (string | Uint8Array)[], opts: RawPdfOptions = 
     );
   });
   if (opts.indirectLength) for (const n of lengths) objects.push(latin1(String(n)));
+  for (const [, baseFont] of extraFonts) {
+    objects.push(latin1(`<< /Type /Font /Subtype /Type1 /BaseFont /${baseFont} /Encoding /WinAnsiEncoding >>`));
+  }
+  if (opts.image) {
+    const img = opts.image;
+    const encoded = new Uint8Array(deflateSync(runLengthEncode(img.samples)));
+    objects.push(latin1("[/FlateDecode/RunLengthDecode]"));
+    objects.push(latin1(String(encoded.length)));
+    const decode = img.invert ? " /Decode [1 0]" : "";
+    objects.push(
+      concat([
+        latin1(
+          `<< /Type /XObject /Subtype /Image /ImageMask true /BitsPerComponent 1 /Width ${img.widthPx} /Height ${img.heightPx}${decode} /Filter ${imageObj - 2} 0 R /Length ${imageObj - 1} 0 R >>\nstream\n`,
+        ),
+        encoded,
+        latin1("\nendstream"),
+      ]),
+    );
+  }
 
   const chunks: Uint8Array[] = [latin1("%PDF-1.3\n%\xe2\xe3\xcf\xd3\n")];
   let offset = chunks[0]!.length;
@@ -246,4 +350,15 @@ export function samplePayslipLines(over: SampleOptions = {}): string[] {
   lines.push(`${" ".repeat(48)}Net Pay${rightAt(netPay, 15)}`);
   lines.push("      Notes:");
   return lines;
+}
+
+/**
+ * The same PDF with its page tree broken (the page object loses its `/Type /Page`, the page-tree
+ * root its `/Kids`), keeping every byte offset. A reader that walks pages cannot find one; a
+ * reader that only scans content streams still reads the text.
+ */
+export function withoutPageTree(pdf: Uint8Array): Uint8Array {
+  const text = Array.from(pdf, (b) => String.fromCharCode(b)).join("");
+  const broken = text.replace("/Type /Page ", "/Type /Pagx ").replace(/\/Kids \[[^\]]*\]/, (m) => "/Kids".padEnd(m.length, " "));
+  return latin1(broken);
 }

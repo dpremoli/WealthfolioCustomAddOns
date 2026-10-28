@@ -15,7 +15,7 @@ const NO_TEXT =
   "This PDF has no text layer (is it a scan?). Only text PDFs from the payroll system can be read.";
 
 /** One byte per char, so offsets in the string are offsets in the file. */
-function toBinaryString(bytes: Uint8Array): string {
+export function toBinaryString(bytes: Uint8Array): string {
   let out = "";
   const CHUNK = 0x8000;
   for (let i = 0; i < bytes.length; i += CHUNK) {
@@ -24,14 +24,14 @@ function toBinaryString(bytes: Uint8Array): string {
   return out;
 }
 
-function toBytes(binary: string): Uint8Array {
+export function toBytes(binary: string): Uint8Array {
   const out = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i) & 0xff;
   return out;
 }
 
 /** Inflates, retrying without the last one or two bytes (a stray EOL after the data). */
-async function inflate(data: Uint8Array): Promise<Uint8Array | null> {
+export async function inflate(data: Uint8Array): Promise<Uint8Array | null> {
   for (const trim of [0, 1, 2]) {
     if (trim > data.length) break;
     const out = await inflateOnce(data.subarray(0, data.length - trim));
@@ -157,7 +157,7 @@ function pagesOf(binary: string, streams: ContentStream[]): string[] {
   return pages;
 }
 
-type Token =
+export type Token =
   | { t: "num"; v: number }
   | { t: "name"; v: string }
   | { t: "str"; v: string }
@@ -172,7 +172,7 @@ function isRegular(code: number): boolean {
 }
 
 /** Tokenises a content stream (a binary string). Dictionaries and inline data are skipped. */
-function* tokenise(s: string): Generator<Token> {
+export function* tokenise(s: string): Generator<Token> {
   let i = 0;
   const n = s.length;
 
@@ -393,6 +393,11 @@ function showStrings(stream: string, page: number): Shown[] {
 }
 
 const decoder = () => new TextDecoder("windows-1252");
+
+/** A shown string (one byte per char) decoded as windows-1252. */
+export function decodeWin1252(binary: string): string {
+  return decoder().decode(toBytes(binary));
+}
 
 /** Text lines of a PDF, page by page, top to bottom, with columns kept by fixed-width position. */
 export async function extractPdfLines(bytes: Uint8Array): Promise<string[]> {

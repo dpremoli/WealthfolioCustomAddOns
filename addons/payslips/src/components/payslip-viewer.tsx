@@ -17,7 +17,9 @@ import {
 import { useEffect, useState } from "react";
 import { QUERY_ROOT } from "../hooks/use-payslip-data";
 import { downloadPdf, loadPdf } from "../lib/pdf-store";
+import { renderPdfPage } from "../lib/pdf-render";
 import { extractPdfLines } from "../lib/pdf-text";
+import { PayslipPageView } from "./payslip-page-view";
 
 interface Loaded {
   bytes: Uint8Array;
@@ -38,7 +40,7 @@ async function loadViewed(ctx: AddonContext, payDate: string): Promise<Loaded> {
 
 const messageOf = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
-/** A dialog with the stored PDF of one payslip: its text (always works) and the original PDF (may not render in a sandboxed frame). */
+/** A dialog with the stored PDF of one payslip: the page drawn from its content (text as a fallback) and the original PDF (may not render in a sandboxed frame). */
 export function PayslipViewer({ ctx, payDate, onClose }: { ctx: AddonContext; payDate: string; onClose: () => void }) {
   const { data, error, isLoading } = useQuery({
     queryKey: [QUERY_ROOT, "pdf-view", payDate],
@@ -47,12 +49,20 @@ export function PayslipViewer({ ctx, payDate, onClose }: { ctx: AddonContext; pa
     // A missing PDF will still be missing a second later: say so at once.
     retry: false,
   });
+  // The drawn page; when it cannot be drawn the Payslip tab shows the PDF's text instead.
+  const drawing = useQuery({
+    queryKey: [QUERY_ROOT, "pdf-render", payDate],
+    queryFn: () => renderPdfPage(data!.bytes),
+    enabled: !!data,
+    gcTime: 0,
+    retry: false,
+  });
   const download = useMutation({ mutationFn: () => downloadPdf(ctx, payDate) });
   const failure = error ?? download.error;
 
   return (
     <Dialog open onOpenChange={(open: boolean) => !open && onClose()}>
-      <DialogContent className="max-w-3xl">
+      <DialogContent className="max-w-4xl">
         <DialogHeader>
           <DialogTitle>Payslip {payDate}</DialogTitle>
           <DialogDescription>The copy of the PDF kept in Wealthfolio.</DialogDescription>
@@ -79,7 +89,13 @@ export function PayslipViewer({ ctx, payDate, onClose }: { ctx: AddonContext; pa
               </Button>
             </div>
             <TabsContent value="payslip" className="mt-3">
-              {data.lines ? (
+              {drawing.data ? (
+                <div className="max-h-[70vh] overflow-y-auto rounded bg-neutral-200/60 p-3 dark:bg-neutral-800/60">
+                  <PayslipPageView drawing={drawing.data} />
+                </div>
+              ) : drawing.isLoading ? (
+                <p className="text-muted-foreground text-sm">Drawing the payslip…</p>
+              ) : data.lines ? (
                 <pre className="bg-muted/40 max-h-[60vh] overflow-auto rounded border p-3 font-mono text-xs leading-tight whitespace-pre">
                   {data.lines.join("\n")}
                 </pre>

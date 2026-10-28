@@ -1,7 +1,7 @@
 {
   "id": "payslips-addon",
   "name": "Payslips & Pension",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Read SAP payslip PDFs entirely inside Wealthfolio, match net pay to your salary deposits, and track income tax, NI and USS pension contributions per tax year.",
   "author": "dpremoli",
   "license": "GPL-3.0-only",

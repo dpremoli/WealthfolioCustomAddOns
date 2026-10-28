@@ -1,6 +1,7 @@
 import type { AddonContext } from "@wealthfolio/addon-sdk";
 import { jsonStore } from "@wf-addons/kit";
 import type { Link, Payslip, Settings, UssStatement } from "./model";
+import { deletePdf } from "./pdf-store";
 import { taxYearOf } from "./tax-year";
 
 /**
@@ -55,7 +56,7 @@ export async function savePayslips(ctx: AddonContext, list: Payslip[]): Promise<
   return { added, replaced };
 }
 
-/** Removes a payslip and its link; an emptied year disappears from the index and storage. */
+/** Removes a payslip, its link and its stored PDF; an emptied year disappears from the index and storage. */
 export async function deletePayslip(ctx: AddonContext, payDate: string): Promise<void> {
   const years = await taxYears(ctx);
   for (const y of years) {
@@ -70,6 +71,7 @@ export async function deletePayslip(ctx: AddonContext, payDate: string): Promise
     break;
   }
   await saveLink(ctx, payDate, null);
+  await deletePdf(ctx, payDate);
 }
 
 /** All years merged means the years that have payslips (the index): a link only matters for a stored payslip. */

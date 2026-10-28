@@ -16,7 +16,7 @@ import {
   type UnsavedRow,
 } from "@wf-addons/kit";
 import { gbp as pounds, isoDay } from "./format";
-import { employeeNi, incomeTax, isNi, isTax, ussSacrifice, type Link, type Payslip } from "./model";
+import { employeeNi, expenseLines, expenseRefunds, incomeTax, isNi, isTax, ussSacrifice, type Link, type Payslip } from "./model";
 import type { SalaryMatch } from "./salary-match";
 import { loadLinks, loadSettings, saveLink } from "./store";
 import { taxYearOf } from "./tax-year";
@@ -39,13 +39,25 @@ const slugOf = (text: string): string =>
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "") || "item";
 
+/** Role suffixes for lines of one payslip: the slug of the description, `-2`, `-3` for a repeat. */
+const slugger = () => {
+  const seen = new Map<string, number>();
+  return (description: string): string => {
+    const slug = slugOf(description);
+    const nth = (seen.get(slug) ?? 0) + 1;
+    seen.set(slug, nth);
+    return nth > 1 ? `${slug}-${nth}` : slug;
+  };
+};
+
 /**
- * The rows that record one payslip in the payroll account: gross pay in, income tax, employee NI,
- * each other deduction, and the net pay out as a transfer (the bank side of it is the salary
- * deposit). A row's id is its role, also the `[ref:…]` of its comment: `payslip:<payDate>:gross`,
- * `:tax`, `:ni`, `:net` and `:ded:<description slug>` (`-2`, `-3` for a repeat on one payslip), so
- * it does not move when a line is added to a corrected payslip. Deposits minus everything else is
- * 0 for a payslip that validates.
+ * The rows that record one payslip in the payroll account: taxable gross pay in, each expense
+ * refund in (non-taxable, paid with the salary), income tax, employee NI, each other deduction, and
+ * the net pay out as a transfer (the bank side of it is the salary deposit). A row's id is its
+ * role, also the `[ref:…]` of its comment: `payslip:<payDate>:gross`, `:exp:<description slug>` (or
+ * `:exp` for a refund no line explains), `:tax`, `:ni`, `:net` and `:ded:<description slug>` (`-2`,
+ * `-3` for a repeat on one payslip), so it does not move when a line is added to a corrected
+ * payslip. Deposits minus everything else is 0 for a payslip that validates.
  */
 export function planPayroll(p: Payslip, accountId: string): ActivityImport[] {
   const date = `${p.payDate}T12:00:00.000Z`;
@@ -65,20 +77,23 @@ export function planPayroll(p: Payslip, accountId: string): ActivityImport[] {
     };
   };
   const sacrifice = ussSacrifice(p);
+  const refunds = expenseRefunds(p);
+  // Gross Pay (This Period) when it is there; either way what Total Payments has beyond the refunds.
   const rows: ActivityImport[] = [
-    row("gross", "DEPOSIT", p.totalPayments, `Gross pay ${p.payDate}${sacrifice > 0 ? `, after USS salary sacrifice ${gbp(sacrifice)}` : ""}`),
+    row("gross", "DEPOSIT", p.totalPayments - refunds, `Gross pay ${p.payDate}${sacrifice > 0 ? `, after USS salary sacrifice ${gbp(sacrifice)}` : ""}`),
   ];
+  const explained = expenseLines(p);
+  const expSlug = slugger();
+  for (const l of explained) rows.push(row(`exp:${expSlug(l.description)}`, "DEPOSIT", l.amount, `${l.description} ${p.payDate} (expense refund)`));
+  if (refunds > 0.005 && explained.length === 0) rows.push(row("exp", "DEPOSIT", refunds, `Expense refunds ${p.payDate}`));
   const tax = incomeTax(p);
   if (tax !== 0) rows.push(row("tax", "TAX", tax, `Income tax ${p.payDate}`));
   const ni = employeeNi(p);
   if (ni !== 0) rows.push(row("ni", "TAX", ni, `Employee NI ${p.payDate}`));
-  const seen = new Map<string, number>();
+  const dedSlug = slugger();
   for (const l of p.deductions) {
     if (isTax(l.description) || isNi(l.description) || l.amount === 0) continue;
-    const slug = slugOf(l.description);
-    const nth = (seen.get(slug) ?? 0) + 1;
-    seen.set(slug, nth);
-    rows.push(row(`ded:${nth > 1 ? `${slug}-${nth}` : slug}`, "WITHDRAWAL", l.amount, `${l.description} ${p.payDate}`));
+    rows.push(row(`ded:${dedSlug(l.description)}`, "WITHDRAWAL", l.amount, `${l.description} ${p.payDate}`));
   }
   rows.push(row("net", "TRANSFER_OUT", p.netPay, `Net pay ${p.payDate}`));
   return rows;

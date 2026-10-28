@@ -89,6 +89,82 @@ describe("planPayroll", () => {
   });
 });
 
+const EXPENSE_PAYMENTS = ["Salary 3000.00", "USS(CRB) 16 SS 183.00-", "Gen Trav & Sub 45.50", "Telephone Costs 20.00"];
+
+describe("planPayroll with expense refunds", () => {
+  const expensePayslip = (over: Parameters<typeof samplePayslipLines>[0] = {}) => payslip({ payments: EXPENSE_PAYMENTS, ...over });
+
+  it("deposits the taxable Gross Pay, then each expense line, and still sums to zero", () => {
+    const rows = planPayroll(expensePayslip(), "acc-1");
+    expect(rows.map((r) => [r.id, r.activityType, r.amount])).toEqual([
+      ["payslip:2026-10-31:gross", "DEPOSIT", 2817],
+      ["payslip:2026-10-31:exp:gen-trav-sub", "DEPOSIT", 45.5],
+      ["payslip:2026-10-31:exp:telephone-costs", "DEPOSIT", 20],
+      ["payslip:2026-10-31:tax", "TAX", 380],
+      ["payslip:2026-10-31:ni", "TAX", 150],
+      ["payslip:2026-10-31:net", "TRANSFER_OUT", 2352.5],
+    ]);
+    expect(signedSum(rows)).toBe(0);
+    expect(rows[0]!.comment).toMatch(/^Gross pay 2026-10-31, after USS salary sacrifice £183\.00/);
+    expect(rows[1]!.comment).toMatch(/^Gen Trav & Sub 2026-10-31 \(expense refund\) \[ref:payslip:2026-10-31:exp:gen-trav-sub\]$/);
+    for (const r of rows) expect(sourceRefOf(r.comment)).toBe(r.id);
+  });
+
+  it("numbers a repeated expense description like a repeated deduction", () => {
+    const rows = planPayroll(expensePayslip({ payments: [...EXPENSE_PAYMENTS, "Telephone Costs 5.00"] }), "acc-1");
+    expect(rows.map((r) => r.id).filter((id) => id?.includes(":exp:"))).toEqual([
+      "payslip:2026-10-31:exp:gen-trav-sub",
+      "payslip:2026-10-31:exp:telephone-costs",
+      "payslip:2026-10-31:exp:telephone-costs-2",
+    ]);
+    expect(signedSum(rows)).toBe(0);
+  });
+
+  it("records an unexplained refund as one deposit, so the rows still sum to zero", () => {
+    const p = payslip({ payments: ["Salary 3000.00", "USS(CRB) 16 SS 183.00-", "Bonus 83.00"], thisPeriod: ["2817.00", "2817.00", "380.00", "150.00"] });
+    const rows = planPayroll(p, "acc-1");
+    expect(rows.map((r) => [r.id, r.activityType, r.amount])).toEqual([
+      ["payslip:2026-10-31:gross", "DEPOSIT", 2817],
+      ["payslip:2026-10-31:exp", "DEPOSIT", 83],
+      ["payslip:2026-10-31:tax", "TAX", 380],
+      ["payslip:2026-10-31:ni", "TAX", 150],
+      ["payslip:2026-10-31:net", "TRANSFER_OUT", 2370],
+    ]);
+    expect(rows[1]!.comment).toMatch(/^Expense refunds 2026-10-31 \[ref:/);
+    expect(signedSum(rows)).toBe(0);
+  });
+
+  it("falls back to Total Payments less the expense lines when Gross Pay is not printed", () => {
+    const rows = planPayroll(expensePayslip({ thisPeriod: ["0.00", "0.00", "380.00", "150.00"] }), "acc-1");
+    expect(rows[0]).toMatchObject({ id: "payslip:2026-10-31:gross", amount: 2817 });
+    expect(signedSum(rows)).toBe(0);
+  });
+
+  it("keeps a taxable allowance in gross pay when Gross Pay already counts it", () => {
+    const rows = planPayroll(
+      payslip({ payments: ["Salary 3000.00", "Telephone Allowance 30.00"], thisPeriod: ["3030.00", "3030.00", "380.00", "150.00"] }),
+      "acc-1",
+    );
+    expect(rows.map((r) => r.id)).toEqual([
+      "payslip:2026-10-31:gross",
+      "payslip:2026-10-31:tax",
+      "payslip:2026-10-31:ni",
+      "payslip:2026-10-31:net",
+    ]);
+    expect(rows[0]).toMatchObject({ amount: 3030 });
+    expect(signedSum(rows)).toBe(0);
+  });
+
+  it("leaves a payslip without expenses with exactly the same rows as before", () => {
+    expect(planPayroll(payslip(), "acc-1").map((r) => r.id)).toEqual([
+      "payslip:2026-10-31:gross",
+      "payslip:2026-10-31:tax",
+      "payslip:2026-10-31:ni",
+      "payslip:2026-10-31:net",
+    ]);
+  });
+});
+
 describe("recordPayroll", () => {
   const bankRow = (): StoredActivity => ({
     id: "salary",
@@ -115,6 +191,20 @@ describe("recordPayroll", () => {
     const acc = host.accounts.find((a) => a.name === PAYROLL_ACCOUNT_NAME);
     return acc ? host.rows(acc.id) : [];
   };
+
+  it("records an expense payslip: gross, one deposit per expense line, tax, NI and the net transfer, balanced and linked", async () => {
+    const host = newHost();
+    host.stored.set("bank", [{ ...bankRow(), amount: 2352.5 }]);
+    const p = payslip({ payments: EXPENSE_PAYMENTS });
+    const out = await recordPayroll(host.ctx, [p], await matchesFor(host, [p]));
+    expect(out).toMatchObject({ stored: 6, unsaved: [], linked: 1, linkFailed: [], skipped: [] });
+    const account = host.accounts.find((a) => a.name === PAYROLL_ACCOUNT_NAME)!;
+    expect(payrollRows(host).map((r) => r.activityType).sort()).toEqual(["DEPOSIT", "DEPOSIT", "DEPOSIT", "TAX", "TAX", "TRANSFER_OUT"]);
+    expect(host.cash(account.id)).toBe(0);
+    const again = await recordPayroll(host.ctx, [p], await matchesFor(host, [p]));
+    expect(again).toMatchObject({ stored: 0, replaced: 0 });
+    expect(payrollRows(host)).toHaveLength(6);
+  });
 
   it("creates the Payroll account, stores the rows and links the bank deposit", async () => {
     const host = newHost();

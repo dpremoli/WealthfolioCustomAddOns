@@ -13,7 +13,7 @@ import {
   type ChartConfig,
 } from "@wealthfolio/ui/chart";
 import type { AddonPageProps } from "@wf-addons/kit";
-import { PageShell, StatTiles } from "@wf-addons/kit/ui";
+import { PageShell, StatTiles, type Stat } from "@wf-addons/kit/ui";
 import { useState } from "react";
 import { PayslipsNav } from "../components/nav";
 import { TaxYearSelect } from "../components/tax-year-select";
@@ -23,7 +23,8 @@ import { summariseYear } from "../lib/summary";
 import { periodLabel } from "../lib/tax-year";
 
 const CHART_CONFIG: ChartConfig = {
-  net: { label: "Net pay", color: "#2f9e6e" },
+  netFromPay: { label: "Net pay", color: "#2f9e6e" },
+  expenseRefunds: { label: "Expense refunds", color: "#2aa5a0" },
   tax: { label: "Income tax", color: "#d6545a" },
   ni: { label: "Employee NI", color: "#e0a030" },
   studentLoan: { label: "Student loan", color: "#8a6bbe" },
@@ -38,6 +39,14 @@ export default function TaxPage({ ctx }: AddonPageProps) {
   const years = data?.years ?? [];
   const selected = year !== null && years.includes(year) ? year : years[years.length - 1];
   const summary = data && selected !== undefined ? summariseYear(data.payslips, selected, todayIso()) : undefined;
+
+  // The refunds are a series of their own, and the net pay series is what is left without them.
+  const hasRefunds = (summary?.expenseRefunds ?? 0) > 0;
+  const chartConfig: ChartConfig = {
+    ...CHART_CONFIG,
+    netFromPay: { ...CHART_CONFIG.netFromPay, label: hasRefunds ? "Net pay (without refunds)" : "Net pay" },
+  };
+  const seriesKeys = Object.keys(CHART_CONFIG).filter((key) => key !== "expenseRefunds" || hasRefunds);
 
   return (
     <PageShell
@@ -69,6 +78,9 @@ export default function TaxPage({ ctx }: AddonPageProps) {
               { label: "Gross before USS", value: gbp(summary.grossBeforeUss), icon: "Banknote" },
               { label: "USS sacrifice", value: gbp(summary.ussSacrifice), icon: "PiggyBank" },
               { label: "Taxable pay", value: gbp(summary.taxablePay), icon: "FileText" },
+              ...(summary.expenseRefunds > 0
+                ? [{ label: "Expense refunds", value: gbp(summary.expenseRefunds), icon: "Receipt" } satisfies Stat]
+                : []),
               { label: "Income tax", value: gbp(summary.incomeTax), icon: "Receipt" },
               { label: "Employee NI", value: gbp(summary.employeeNi), icon: "Receipt" },
               { label: "Student loan", value: gbp(summary.studentLoan), icon: "Receipt" },
@@ -84,10 +96,10 @@ export default function TaxPage({ ctx }: AddonPageProps) {
           <Card>
             <CardHeader>
               <CardTitle className="text-base">Month by month</CardTitle>
-              <CardDescription>Where each month's gross pay went, April to March.</CardDescription>
+              <CardDescription>Where each month's gross pay went, April to March{hasRefunds ? ", with the expense refunds paid on top" : ""}.</CardDescription>
             </CardHeader>
             <CardContent>
-              <ChartContainer config={CHART_CONFIG} className="h-72 w-full">
+              <ChartContainer config={chartConfig} className="h-72 w-full">
                 <BarChart data={summary.months} margin={{ left: 4, right: 4 }}>
                   <CartesianGrid vertical={false} />
                   <XAxis dataKey="label" tickLine={false} axisLine={false} />
@@ -97,7 +109,7 @@ export default function TaxPage({ ctx }: AddonPageProps) {
                       <ChartTooltipContent
                         formatter={(value, name) => (
                           <div className="flex w-full justify-between gap-4">
-                            <span className="text-muted-foreground">{CHART_CONFIG[String(name)]?.label ?? name}</span>
+                            <span className="text-muted-foreground">{chartConfig[String(name)]?.label ?? name}</span>
                             <span className="tabular-nums">{gbp(Number(value))}</span>
                           </div>
                         )}
@@ -105,7 +117,7 @@ export default function TaxPage({ ctx }: AddonPageProps) {
                     }
                   />
                   <ChartLegend content={<ChartLegendContent />} />
-                  {Object.keys(CHART_CONFIG).map((key) => (
+                  {seriesKeys.map((key) => (
                     <Bar key={key} dataKey={key} stackId="pay" fill={`var(--color-${key})`} />
                   ))}
                 </BarChart>

@@ -1,7 +1,7 @@
 {
   "id": "payslips-addon",
   "name": "Payslips & Pension",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Read SAP payslip PDFs entirely inside Wealthfolio, match net pay to your salary deposits, and track income tax, NI and USS pension contributions per tax year.",
   "author": "dpremoli",
   "license": "GPL-3.0-only",
@@ -46,6 +46,11 @@
       "category": "activities",
       "functions": ["getAll", "import", "saveMany", "getTransferPair", "linkTransfer"],
       "purpose": "Find the salary deposit matching each payslip's net pay, tag it on request, and (only if you opt in) record payroll in its own account and link the net-pay transfer to your bank deposit"
+    },
+    {
+      "category": "files",
+      "functions": ["openSaveDialog"],
+      "purpose": "Save a copy of a payslip PDF you choose to download"
     },
     {
       "category": "ui",

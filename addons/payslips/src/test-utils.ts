@@ -1,4 +1,5 @@
 import { deflateSync } from "node:zlib";
+import { EXPENSE_RE } from "./lib/model";
 
 /**
  * Test helpers: a tiny PDF 1.3 writer and a synthetic SAP payslip text builder.
@@ -159,6 +160,7 @@ const PAY_COL = 6;
 const PAY_AMOUNT_END = 46; // exclusive; a trailing '-' sits in the last column
 const DED_COL = 48;
 const DED_AMOUNT_END = 75;
+const ADDRESS_COL = 64;
 
 function parseRow(row: string): { desc: string; amount: string } {
   const m = /^(.*\S)\s+(\d[\d,]*\.\d{2}-?)$/.exec(row.trim());
@@ -192,7 +194,10 @@ export function samplePayslipLines(over: SampleOptions = {}): string[] {
   const totalPayments = over.totalPayments ?? money(sumP);
   const totalDeductions = over.totalDeductions ?? money(sumD);
   const netPay = over.netPay ?? money(sumP - sumD);
-  const thisPeriod = over.thisPeriod ?? [totalPayments, totalPayments, "380.00", "150.00"];
+  // Expense refunds are paid but are not taxable Gross Pay.
+  const expenses = payments.filter((r) => EXPENSE_RE.test(r.desc) && signed(r.amount) > 0).reduce((s, r) => s + signed(r.amount), 0);
+  const gross = money(Number(totalPayments.replace(/,/g, "")) - expenses);
+  const thisPeriod = over.thisPeriod ?? [gross, gross, "380.00", "150.00"];
   const toDate = over.toDate ?? ["19719.00", "19719.00", "2660.00", "1050.00"];
 
   const lines: string[] = [];
@@ -200,9 +205,15 @@ export function samplePayslipLines(over: SampleOptions = {}): string[] {
   lines.push(`      Employee Number: 99999999                   Tax Period: ${period}`);
   lines.push(`      NI Number      : QQ123456C                  Tax Ref   : 123/AB456`);
   lines.push(`      Tax Code/Basis : ${taxCode.padEnd(27)}Tax Office: Faketown`);
+  // The employer's address, printed at the right of the page above the table.
+  for (const part of ["Example House", "1 Sample Road", "Faketown", "ZZ1 1ZZ"]) lines.push(" ".repeat(ADDRESS_COL) + part);
   lines.push(`                      Payments                          Deductions`);
-  const headerLeft = " ".repeat(PAY_COL) + "Description       Units     Amount";
-  lines.push(headerLeft.padEnd(DED_COL) + "Description      Amount");
+  // Column spans of the real layout: Description (10,21) Units (28,33) Amount (38,44), then
+  // Description (51,62) Amount (68,74).
+  lines.push(
+    " ".repeat(10) + "Description" + " ".repeat(7) + "Units" + " ".repeat(5) + "Amount" +
+      " ".repeat(7) + "Description" + " ".repeat(6) + "Amount",
+  );
 
   const rows = Math.max(payments.length, deductions.length);
   for (let i = 0; i < rows; i++) {
@@ -233,5 +244,6 @@ export function samplePayslipLines(over: SampleOptions = {}): string[] {
   lines.push(figures("This Period", thisPeriod));
   lines.push(figures("To date", toDate));
   lines.push(`${" ".repeat(48)}Net Pay${rightAt(netPay, 15)}`);
+  lines.push("      Notes:");
   return lines;
 }

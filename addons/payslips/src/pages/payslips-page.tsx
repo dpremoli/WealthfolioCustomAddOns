@@ -20,11 +20,14 @@ import { sourceRefOf, type AddonPageProps } from "@wf-addons/kit";
 import { PageShell } from "@wf-addons/kit/ui";
 import { useRef, useState, type DragEvent } from "react";
 import { PayslipsNav } from "../components/nav";
+import { PayslipViewer } from "../components/payslip-viewer";
 import { TaxYearSelect } from "../components/tax-year-select";
 import { QUERY_ROOT, useSalaryMatches } from "../hooks/use-payslip-data";
+import { useKeepPdfs, usePdfDates } from "../hooks/use-pdf-dates";
 import { gbp, isoDay } from "../lib/format";
 import { employeeNi, grossBeforeSacrifice, incomeTax, ussSacrifice, type Payslip } from "../lib/model";
 import { parsePayslipPdf } from "../lib/payslip-parser";
+import { deletePdf, downloadPdf, getKeepPdfs, savePdf } from "../lib/pdf-store";
 import { readBytes } from "../lib/read-file";
 import { tagDeposit, type SalaryMatch } from "../lib/salary-match";
 import { deletePayslip, saveLink, savePayslips } from "../lib/store";
@@ -38,20 +41,48 @@ interface ImportResult {
   added: number;
   replaced: number;
   errors: FileError[];
+  /** Imported payslips whose PDF copy could not be kept (the payslip itself is stored). */
+  pdfErrors: FileError[];
 }
 
+const messageOf = (err: unknown) => (err instanceof Error ? err.message : String(err));
+
 async function importFiles(ctx: AddonPageProps["ctx"], files: File[]): Promise<ImportResult> {
-  const parsed: Payslip[] = [];
+  const parsed: { file: File; payslip: Payslip; bytes: Uint8Array }[] = [];
   const errors: FileError[] = [];
+  const pdfErrors: FileError[] = [];
   for (const file of files) {
     try {
-      parsed.push(await parsePayslipPdf(await readBytes(file)));
+      const bytes = await readBytes(file);
+      parsed.push({ file, payslip: await parsePayslipPdf(bytes), bytes });
     } catch (err) {
-      errors.push({ name: file.name, message: err instanceof Error ? err.message : String(err) });
+      errors.push({ name: file.name, message: messageOf(err) });
     }
   }
-  const { added, replaced } = parsed.length > 0 ? await savePayslips(ctx, parsed) : { added: 0, replaced: 0 };
-  return { added, replaced, errors };
+  const { added, replaced } =
+    parsed.length > 0 ? await savePayslips(ctx, parsed.map((p) => p.payslip)) : { added: 0, replaced: 0 };
+  // A copy that cannot be kept never fails the import: the payslip is already stored. But a copy
+  // from an earlier import of this pay date must not outlive the figures it no longer matches.
+  if (parsed.length > 0) {
+    const keep = await getKeepPdfs(ctx);
+    for (const { file, payslip, bytes } of parsed) {
+      try {
+        if (!keep) {
+          await deletePdf(ctx, payslip.payDate);
+          continue;
+        }
+        try {
+          await savePdf(ctx, payslip.payDate, bytes);
+        } catch (err) {
+          pdfErrors.push({ name: file.name, message: messageOf(err) });
+          await deletePdf(ctx, payslip.payDate);
+        }
+      } catch (err) {
+        pdfErrors.push({ name: file.name, message: `The earlier PDF copy could not be removed. ${messageOf(err)}` });
+      }
+    }
+  }
+  return { added, replaced, errors, pdfErrors };
 }
 
 export default function PayslipsPage({ ctx }: AddonPageProps) {
@@ -61,6 +92,10 @@ export default function PayslipsPage({ ctx }: AddonPageProps) {
   const [year, setYear] = useState<number | null>(null);
   const [dragging, setDragging] = useState(false);
   const [confirming, setConfirming] = useState<string | null>(null);
+  const [viewing, setViewing] = useState<string | null>(null);
+  const keepPdfs = useKeepPdfs(ctx).data ?? true;
+  const pdfDates = new Set(usePdfDates(ctx).data ?? []);
+  const storedPdfs = pdfDates.size;
   const fileInput = useRef<HTMLInputElement>(null);
 
   const upload = useMutation({ mutationFn: (files: File[]) => importFiles(ctx, files), onSuccess: refresh });
@@ -82,6 +117,7 @@ export default function PayslipsPage({ ctx }: AddonPageProps) {
     },
     onSuccess: refresh,
   });
+  const download = useMutation({ mutationFn: (payDate: string) => downloadPdf(ctx, payDate) });
   const remove = useMutation({
     mutationFn: (payDate: string) => deletePayslip(ctx, payDate),
     onSuccess: () => {
@@ -108,7 +144,7 @@ export default function PayslipsPage({ ctx }: AddonPageProps) {
   };
 
   const result = upload.data;
-  const failure = upload.error ?? tag.error ?? choose.error ?? remove.error ?? loadError;
+  const failure = upload.error ?? tag.error ?? choose.error ?? download.error ?? remove.error ?? loadError;
 
   return (
     <PageShell
@@ -166,13 +202,38 @@ export default function PayslipsPage({ ctx }: AddonPageProps) {
                   ))}
                 </ul>
               )}
+              {result.pdfErrors.length > 0 && (
+                <ul className="space-y-1 text-destructive">
+                  {result.pdfErrors.map((e, i) => (
+                    <li key={`${e.name}-${i}`}>
+                      <span className="font-medium">{e.name}</span>: imported, but its PDF copy was not kept. {e.message}
+                    </li>
+                  ))}
+                </ul>
+              )}
             </div>
           )}
         </CardContent>
       </Card>
-      <p className="text-muted-foreground -mt-3 text-xs">
-        Payslips are read on this device only and never uploaded. Only figures, pay date, tax period and tax code are kept.
-      </p>
+      <div className="text-muted-foreground -mt-3 space-y-1 text-xs">
+        <p>
+          Payslips are read by this add-on on this device, and nothing is sent to any outside service. What the add-on keeps is
+          stored in Wealthfolio's add-on storage, which Wealthfolio syncs to your paired devices.
+        </p>
+        {!keepPdfs && (
+          <p>
+            {storedPdfs > 0
+              ? `New imports keep figures only; ${storedPdfs} stored PDF ${storedPdfs === 1 ? "copy remains (remove it" : "copies remain (remove them"} in Settings).`
+              : "Only figures, pay date, tax period and tax code are kept."}
+          </p>
+        )}
+        {keepPdfs && (
+          <p>
+            A copy of each PDF is kept in Wealthfolio so you can view and download it. It includes your name and NI number; turn
+            this off in Settings.
+          </p>
+        )}
+      </div>
 
       {failure && (
         <AlertFeedback variant="error" title="Something went wrong">
@@ -249,6 +310,28 @@ export default function PayslipsPage({ ctx }: AddonPageProps) {
                           />
                         </TableCell>
                         <TableCell className="whitespace-nowrap text-right">
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            aria-label={`View payslip ${p.payDate}`}
+                            disabled={!pdfDates.has(p.payDate)}
+                            title={pdfDates.has(p.payDate) ? "View this payslip in Wealthfolio" : "No PDF is stored for this payslip"}
+                            onClick={() => setViewing(p.payDate)}
+                          >
+                            <Icons.Eye size={14} className="mr-1" />
+                            View
+                          </Button>{" "}
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            aria-label={`Download payslip ${p.payDate}`}
+                            disabled={!pdfDates.has(p.payDate) || download.isPending}
+                            title={pdfDates.has(p.payDate) ? "Save the PDF to your computer" : "No PDF is stored for this payslip"}
+                            onClick={() => download.mutate(p.payDate)}
+                          >
+                            <Icons.Download size={14} className="mr-1" />
+                            Download
+                          </Button>{" "}
                           {match?.status === "matched" && match.activity && !tagged && (
                             <Button
                               size="sm"
@@ -296,6 +379,7 @@ export default function PayslipsPage({ ctx }: AddonPageProps) {
           )}
         </CardContent>
       </Card>
+      {viewing && <PayslipViewer ctx={ctx} payDate={viewing} onClose={() => setViewing(null)} />}
     </PageShell>
   );
 }

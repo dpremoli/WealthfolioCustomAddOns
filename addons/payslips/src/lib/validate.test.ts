@@ -55,4 +55,19 @@ describe("validatePayslip", () => {
     );
     expect(validatePayslip({ ...p, warnings: [], importedAt: "" })).toEqual([]);
   });
+
+  it("has no warning when expense lines explain what Total Payments has over Gross Pay", () => {
+    const p = parsePayslipLines(
+      samplePayslipLines({ payments: ["Salary 3000.00", "USS(CRB) 16 SS 183.00-", "Gen Trav & Sub 45.50", "Telephone Costs 20.00"] }),
+    );
+    expect(p.totalPayments).toBe(2882.5);
+    expect(validatePayslip({ ...p, warnings: [], importedAt: "" })).toEqual([]);
+  });
+
+  it("warns when Total Payments is more than Gross Pay and no expense line explains it", () => {
+    const p = parsePayslipLines(samplePayslipLines({ payments: ["Salary 3000.00", "USS(CRB) 16 SS 183.00-", "Bonus 83.00"] }));
+    // Bonus is taxable: its Gross Pay should have included it. Here it does not.
+    const w = validatePayslip({ ...p, thisPeriod: { ...p.thisPeriod, grossPay: 2817 }, warnings: [], importedAt: "" });
+    expect(w).toEqual(["Total Payments is £83.00 more than Gross Pay, but no expense line explains it."]);
+  });
 });

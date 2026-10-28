@@ -1,5 +1,5 @@
 import { round2 } from "@wf-addons/kit";
-import { employeeNi, incomeTax, type Line, type Payslip } from "./model";
+import { employeeNi, expenseLines, expenseRefunds, incomeTax, type Line, type Payslip } from "./model";
 
 const TOLERANCE = 0.005;
 const gbp = (n: number) => n.toFixed(2);
@@ -23,5 +23,9 @@ export function validatePayslip(p: Payslip): string[] {
   );
   check("Tax lines add up to", incomeTax(p), "This Period tax says", p.thisPeriod.tax);
   check("NI lines add up to", employeeNi(p), "This Period EE's NIC says", p.thisPeriod.eeNic);
+  const refunds = expenseRefunds(p);
+  if (refunds > TOLERANCE && expenseLines(p).length === 0) {
+    warnings.push(`Total Payments is £${gbp(refunds)} more than Gross Pay, but no expense line explains it.`);
+  }
   return warnings;
 }

@@ -54,8 +54,9 @@ describe("summariseYear", () => {
     expect(s.months[0]).toMatchObject({ month: 1, hasPayslip: true, net: 2287, tax: 380, ni: 150, studentLoan: 0, uss: 183, other: 0 });
     expect(s.months[1]).toMatchObject({ month: 2, net: 2247, studentLoan: 40 });
     expect(s.months[2]).toMatchObject({ month: 3, hasPayslip: false, net: 0, tax: 0 });
-    const stacked = s.months.reduce((n, m) => n + m.net + m.tax + m.ni + m.studentLoan + m.uss + m.other, 0);
+    const stacked = s.months.reduce((n, m) => n + m.netFromPay + m.expenseRefunds + m.tax + m.ni + m.studentLoan + m.uss + m.other, 0);
     expect(stacked).toBeCloseTo(s.grossBeforeUss, 2);
+    expect(s.expenseRefunds).toBe(0);
   });
 
   it("adds two payslips of one tax month into one bucket", () => {
@@ -89,5 +90,29 @@ describe("summariseYear", () => {
   it("sums This Period taxable pay, not gross", () => {
     const s = summariseYear([slip("30.04.2026", "01/2026", { thisPeriod: ["2817.00", "2500.00", "380.00", "150.00"] })], 2026, "2026-06-10");
     expect(s.taxablePay).toBe(2500);
+  });
+
+  describe("expense refunds", () => {
+    const EXPENSES = ["Salary 3000.00", "USS(CRB) 16 SS 183.00-", "Gen Trav & Sub 45.50", "Telephone Costs 20.00"];
+    // Total Payments 2882.50 = Gross Pay 2817.00 + refunds 65.50; net 2352.50.
+    const jun = slip("30.06.2026", "03/2026", { payments: EXPENSES });
+
+    it("totals them per year and month, leaving gross before USS and the rates to taxable pay", () => {
+      const s = summariseYear([apr, jun], 2026, "2026-07-10");
+      expect(s.expenseRefunds).toBe(65.5);
+      expect(s.months[0]!.expenseRefunds).toBe(0);
+      expect(s.months[2]).toMatchObject({ expenseRefunds: 65.5, net: 2352.5, netFromPay: 2287 });
+      expect(s.grossBeforeUss).toBe(6000);
+      expect(s.net).toBe(2287 + 2352.5);
+      expect(s.rates.incomeTax).toBeCloseTo(760 / 6000, 6);
+      expect(s.rates.deductions).toBeCloseTo(1060 / 6000, 6);
+    });
+
+    it("keeps the monthly stack adding up: net from pay and the refunds, with the rest, are gross plus refunds", () => {
+      const s = summariseYear([apr, jun], 2026, "2026-07-10");
+      const stacked = s.months.reduce((n, m) => n + m.netFromPay + m.expenseRefunds + m.tax + m.ni + m.studentLoan + m.uss + m.other, 0);
+      expect(stacked).toBeCloseTo(s.grossBeforeUss + s.expenseRefunds, 2);
+      expect(s.months.reduce((n, m) => n + m.netFromPay + m.expenseRefunds, 0)).toBeCloseTo(s.net, 2);
+    });
   });
 });

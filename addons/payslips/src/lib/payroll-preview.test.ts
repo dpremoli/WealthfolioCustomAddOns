@@ -30,6 +30,22 @@ describe("previewPayroll", () => {
     expect(p.skipped).toEqual(["2026-11-30: Payments do not add up to Total Payments"]);
   });
 
+  it("lists the expense deposits of an expense payslip and the rows still sum to zero", () => {
+    const withExpenses = slip({ payments: ["Salary 3000.00", "USS(CRB) 16 SS 183.00-", "Gen Trav & Sub 45.50", "Telephone Costs 20.00"] });
+    const p = previewPayroll([withExpenses], [], "acc-p", []);
+    expect(p.rows.map((r) => r.id)).toEqual([
+      "payslip:2026-10-31:gross",
+      "payslip:2026-10-31:exp:gen-trav-sub",
+      "payslip:2026-10-31:exp:telephone-costs",
+      "payslip:2026-10-31:tax",
+      "payslip:2026-10-31:ni",
+      "payslip:2026-10-31:net",
+    ]);
+    expect(p.rows.find((r) => r.id.endsWith(":exp:gen-trav-sub"))).toMatchObject({ activityType: "DEPOSIT", amount: 45.5 });
+    expect(p.rows.reduce((n, r) => n + (r.activityType === "DEPOSIT" ? r.amount : -r.amount), 0)).toBeCloseTo(0, 2);
+    expect(p.payslips).toEqual([{ payDate: "2026-10-31", status: "new", replaces: 0, adds: 6 }]);
+  });
+
   it("calls a payslip new, unchanged or changed by comparing its rows with the Payroll account's", () => {
     const fresh = previewPayroll([good], [], "acc-p", []);
     expect(fresh.payslips).toEqual([{ payDate: "2026-10-31", status: "new", replaces: 0, adds: 4 }]);

@@ -9,6 +9,8 @@ import {
   incomeTax,
   otherDeductions,
   studentLoan,
+  ussContribution,
+  ussDeducted,
   ussSacrifice,
   type Payslip,
 } from "./model";
@@ -105,5 +107,43 @@ describe("expense refunds", () => {
     expect(expenseLines(p)).toEqual([]);
     expect(grossBeforeSacrifice(p)).toBe(3030);
     expect(validatePayslip(p)).toEqual([]);
+  });
+});
+
+describe("USS as a deduction", () => {
+  // The contribution taken as a deduction line (no "SS"), not as a negative payment.
+  const deducted = () =>
+    make({ payments: ["Salary 3000.00"], deductions: ["Tax paid 380.00", "Employee NIC 150.00", "USS(CRB) 16 183.00"] });
+
+  it("counts a USS deduction line as the contribution, not as salary sacrifice", () => {
+    const p = deducted();
+    expect(ussSacrifice(p)).toBe(0);
+    expect(ussDeducted(p)).toBe(183);
+    expect(ussContribution(p)).toBe(183);
+  });
+
+  it("leaves gross unchanged: a deducted contribution is not taken off the pay", () => {
+    expect(grossBeforeSacrifice(deducted())).toBe(3000);
+  });
+
+  it("keeps the USS deduction an ordinary deduction, and the payslip valid", () => {
+    const p = deducted();
+    expect(otherDeductions(p)).toBe(183);
+    expect(validatePayslip(p)).toEqual([]);
+  });
+
+  it("is the sacrifice for a sacrificed payslip, and the two added together for a mixed one", () => {
+    const sacrificed = make();
+    expect(ussDeducted(sacrificed)).toBe(0);
+    expect(ussContribution(sacrificed)).toBe(183);
+    const mixed = make({ deductions: ["Tax paid 380.00", "Employee NIC 150.00", "USS(CRB) 16 50.25"] });
+    expect(ussSacrifice(mixed)).toBe(183);
+    expect(ussDeducted(mixed)).toBe(50.25);
+    expect(ussContribution(mixed)).toBe(233.25);
+  });
+
+  it("does not count a USS-like word or another deduction", () => {
+    const p = make({ payments: ["Salary 3000.00"], deductions: ["Tax paid 380.00", "Employee NIC 150.00", "USSR levy 10.00", "Cycle scheme 20.00"] });
+    expect(ussDeducted(p)).toBe(0);
   });
 });

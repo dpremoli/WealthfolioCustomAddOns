@@ -1,13 +1,13 @@
 import { round2 } from "@wf-addons/kit";
-import { ussSacrifice, type Line, type Payslip, type UssStatement } from "./model";
+import { USS_RE, ussContribution, type Line, type Payslip, type UssStatement } from "./model";
 
 /** A payslip line that belongs to the USS pension ("USS(CRB) 16 SS"). */
-export const isUssLine = (l: Line): boolean => /^USS\b/i.test(l.description);
+export const isUssLine = (l: Line): boolean => USS_RE.test(l.description);
 
-/** Salary sacrificed into USS, per tax year (ascending) and in total. */
+/** USS contributions (salary sacrificed or deducted), per tax year (ascending) and in total. */
 export function ussContributions(payslips: Payslip[]): { byYear: { taxYear: number; amount: number }[]; total: number } {
   const years = new Map<number, number>();
-  for (const p of payslips) years.set(p.taxYear, (years.get(p.taxYear) ?? 0) + ussSacrifice(p));
+  for (const p of payslips) years.set(p.taxYear, (years.get(p.taxYear) ?? 0) + ussContribution(p));
   const byYear = [...years]
     .map(([taxYear, amount]) => ({ taxYear, amount: round2(amount) }))
     .sort((a, b) => a.taxYear - b.taxYear);

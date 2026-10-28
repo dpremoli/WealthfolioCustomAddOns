@@ -83,8 +83,55 @@ function splitRow(row: string, boundary: number, amountEnd?: number): [string, s
   return [row.slice(0, cut), row.slice(cut)];
 }
 
-function figures(line: string | undefined): Ytd {
-  const [grossPay = 0, taxablePay = 0, tax = 0, eeNic = 0] = line ? allAmounts(line) : [];
+/** The figures header's labels, in print order, each with the pattern that finds it. */
+const FIGURE_LABELS: [keyof Ytd, RegExp][] = [
+  ["grossPay", /Gross Pay/],
+  ["taxablePay", /Taxable Pay/],
+  ["tax", /\bTax\b/],
+  ["eeNic", /EE's NIC/],
+];
+
+/** The end column of each figure's label on the figures header line; undefined when a label is missing. */
+function figureColumns(header: string | undefined): number[] | undefined {
+  if (!header) return undefined;
+  const ends: number[] = [];
+  for (const [, label] of FIGURE_LABELS) {
+    const m = label.exec(header);
+    if (!m) return undefined;
+    ends.push(m.index + m[0].length);
+  }
+  return ends;
+}
+
+/**
+ * The four figures of a "This Period" / "To date" line. By column when the header's label ends are
+ * known: each amount goes to the label whose end is nearest the amount's end (amounts are
+ * right-aligned under their label), so a blank Tax column leaves tax 0 and does not push the NIC
+ * amount into it. Otherwise, or when two amounts claim one label, in order of appearance.
+ */
+function figures(line: string | undefined, columns?: number[]): Ytd {
+  const out: Ytd = { grossPay: 0, taxablePay: 0, tax: 0, eeNic: 0 };
+  if (!line) return out;
+  if (columns) {
+    const taken = new Set<number>();
+    const byColumn = { ...out };
+    for (const m of line.matchAll(AMOUNTS)) {
+      const end = m.index + m[0].length;
+      let nearest = 0;
+      columns.forEach((col, i) => {
+        if (Math.abs(col - end) < Math.abs(columns[nearest]! - end)) nearest = i;
+      });
+      if (taken.has(nearest)) return orderFigures(line);
+      taken.add(nearest);
+      byColumn[FIGURE_LABELS[nearest]![0]] = toNumber(m[1]!, m[2]!, m[3]!);
+    }
+    return byColumn;
+  }
+  return orderFigures(line);
+}
+
+function orderFigures(line: string): Ytd {
+  const [grossPay = 0, taxablePay = 0, tax = 0, eeNic = 0] = allAmounts(line);
   return { grossPay, taxablePay, tax, eeNic };
 }
 
@@ -167,8 +214,10 @@ export function parsePayslipLines(lines: string[]): Omit<Payslip, "warnings" | "
     }
   }
 
-  const thisPeriod = figures(lines.find((l) => /^\s*This Period\b/.test(l)));
-  const toDate = figures(lines.find((l) => /^\s*To date\b/i.test(l)));
+  const figuresIdx = lines.findIndex((l) => /Gross Pay/.test(l) && /Taxable Pay/.test(l) && /EE's NIC/.test(l));
+  const columns = figureColumns(lines[figuresIdx]);
+  const thisPeriod = figures(lines.find((l) => /^\s*This Period\b/.test(l)), columns);
+  const toDate = figures(lines.find((l) => /^\s*To date\b/i.test(l)), columns);
 
   return {
     payDate,

@@ -103,6 +103,7 @@ async function contentStreams(binary: string, bytes: Uint8Array): Promise<Conten
 
     let end = binary.indexOf("endstream", start);
     if (end < 0) break;
+    const rawEnd = end;
     const declared = /\/Length\s+(\d+)(?!\d)(?!\s+\d+\s+R)/.exec(dict);
     let exact = false;
     if (declared) {
@@ -133,7 +134,10 @@ async function contentStreams(binary: string, bytes: Uint8Array): Promise<Conten
     if (names.length === 0) {
       out.push({ obj, text: binary.slice(start, end) });
     } else if (names.length === 1 && names[0] === "/FlateDecode") {
-      const inflated = await inflate(bytes.subarray(start, end), MAX_CONTENT_BYTES);
+      // The EOL guess above can eat the last data byte (data ending in CR, then LF): retry from the raw end.
+      const inflated =
+        (await inflate(bytes.subarray(start, end), MAX_CONTENT_BYTES)) ??
+        (rawEnd > end ? await inflate(bytes.subarray(start, rawEnd), MAX_CONTENT_BYTES) : null);
       if (inflated) out.push({ obj, text: toBinaryString(inflated) });
     }
   }

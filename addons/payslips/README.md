@@ -62,12 +62,14 @@ Part of the [Wealthfolio custom add-ons monorepo](../../README.md). Requires **W
    **Payslips table.** Click a column header to sort by it (pay date, period, gross before USS, USS,
    tax, NI, net, checks, salary deposit); click again to reverse. The sorted header shows ▲ or ▼.
    The default is the pay date, newest first.
-4. **Tax.** For the chosen period: gross before USS, USS sacrifice, taxable pay, income tax, employee NI,
+4. **Tax.** For the chosen period: gross before USS, USS contributions, taxable pay, income tax, employee NI,
    student loan, expense refunds and net pay, effective rates, a month-by-month chart (the tax
    months, April to March, for a tax year; calendar months otherwise), and the months that have no
    payslip (up to this month; for a custom range, only months the range covers whole). The
    *year to date* figures from the latest payslip are shown for a single tax year only.
-5. **Pension.** USS contributions per tax year and in total, from your payslips. Add the figures
+5. **Pension.** USS contributions per tax year and in total, from your payslips. USS may appear as
+   salary sacrifice (a negative payment line, "USS(CRB) 16 SS") or as a deduction ("USS(CRB) 16");
+   both count as your contribution on the Payslips, Tax and Pension pages. Add the figures
    from your USS statements (date, DB annual pension, DB lump sum, optional DC pot and employer
    contribution). The page shows an *illustrative* DB capital value (annual pension x 20 + lump
    sum); it is an estimate, is never written to Wealthfolio and is not part of your net worth. For

@@ -6,6 +6,8 @@ import {
   incomeTax,
   otherDeductions,
   studentLoan,
+  ussContribution,
+  ussDeducted,
   ussSacrifice,
   type Payslip,
 } from "./model";
@@ -32,9 +34,9 @@ export interface MonthBucket {
   tax: number;
   ni: number;
   studentLoan: number;
-  /** Deductions that are neither tax, NI nor student loan. */
+  /** Deductions that are neither tax, NI, student loan nor USS. */
   other: number;
-  /** USS salary sacrifice. */
+  /** USS contributions: salary sacrificed (taken off gross) plus any deducted (part of the deductions). */
   uss: number;
 }
 
@@ -55,7 +57,10 @@ export interface PeriodSummary {
   /** Payslips in the period. */
   count: number;
   grossBeforeUss: number;
+  /** USS salary sacrifice only: taken off gross before it is taxed. */
   ussSacrifice: number;
+  /** USS contributions, salary sacrificed or deducted. */
+  ussContribution: number;
   /** Sum of the payslips' "This Period" taxable pay. */
   taxablePay: number;
   incomeTax: number;
@@ -110,8 +115,9 @@ const bucketOf = (inMonth: Payslip[]) => ({
   tax: sum(inMonth, incomeTax),
   ni: sum(inMonth, employeeNi),
   studentLoan: sum(inMonth, studentLoan),
-  other: sum(inMonth, otherDeductions),
-  uss: sum(inMonth, ussSacrifice),
+  // A deducted USS contribution is in `uss`, not also in `other`, so the segments add up to gross.
+  other: sum(inMonth, (p) => otherDeductions(p) - ussDeducted(p)),
+  uss: sum(inMonth, ussContribution),
 });
 
 /** The 12 tax months of a tax year, April first, with the payslips of each by tax period. */
@@ -184,6 +190,7 @@ export function summarise(payslips: Payslip[], period: Period, today: string): P
     count: list.length,
     grossBeforeUss: gross,
     ussSacrifice: sum(list, ussSacrifice),
+    ussContribution: sum(list, ussContribution),
     taxablePay: sum(list, (p) => p.thisPeriod.taxablePay),
     incomeTax: tax,
     employeeNi: ni,

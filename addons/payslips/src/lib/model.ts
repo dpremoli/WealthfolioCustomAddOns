@@ -48,9 +48,21 @@ export type Settings = {
 const sum = (lines: Line[], test: (l: Line) => boolean): number =>
   round2(lines.filter(test).reduce((s, l) => s + l.amount, 0));
 
+/** A payslip line that belongs to the USS pension ("USS(CRB) 16 SS", "USS(CRB) 16"). */
+export const USS_RE = /^USS\b/i;
+
 /** USS salary sacrifice as a positive number: the negative "USS…" payment lines, negated. */
 export const ussSacrifice = (p: Payslip): number =>
-  round2(-sum(p.payments, (l) => /^USS\b/i.test(l.description) && l.amount < 0));
+  round2(-sum(p.payments, (l) => USS_RE.test(l.description) && l.amount < 0));
+
+/**
+ * USS contribution taken as a deduction (not sacrificed): the "USS…" deduction lines. It is an
+ * ordinary deduction out of gross pay, so it changes neither gross nor `otherDeductions`.
+ */
+export const ussDeducted = (p: Payslip): number => sum(p.deductions, (l) => USS_RE.test(l.description));
+
+/** The employee's USS contribution, however it is paid: sacrificed from pay, or deducted. */
+export const ussContribution = (p: Payslip): number => round2(ussSacrifice(p) + ussDeducted(p));
 
 /** Descriptions of expense refunds: "Gen Trav & Sub", "Telephone Costs", mileage, claims. */
 export const EXPENSE_RE = /trav|subsist|\bsub\b|telephone|phone|mileage|expense|reimburs|\bclaim/i;

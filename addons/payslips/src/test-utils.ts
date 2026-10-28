@@ -258,6 +258,11 @@ export interface SampleOptions {
   /** gross, taxable, tax, NIC (strings, as printed). */
   thisPeriod?: [string, string, string, string];
   toDate?: [string, string, string, string];
+  /**
+   * A month with no tax due: the Tax figures (This Period and To date) are left blank, in their
+   * columns, and the default deductions have no "Tax paid" line.
+   */
+  noTax?: boolean;
 }
 
 const PAY_COL = 6;
@@ -292,7 +297,7 @@ export function samplePayslipLines(over: SampleOptions = {}): string[] {
   const period = over.period ?? "07/2026";
   const taxCode = over.taxCode ?? "1257L  0";
   const payments = (over.payments ?? ["Salary 3000.00", "USS(CRB) 16 SS 183.00-"]).map(parseRow);
-  const deductions = (over.deductions ?? ["Tax paid 380.00", "Employee NIC 150.00"]).map(parseRow);
+  const deductions = (over.deductions ?? (over.noTax ? ["Employee NIC 150.00"] : ["Tax paid 380.00", "Employee NIC 150.00"])).map(parseRow);
   const sumP = payments.reduce((s, r) => s + signed(r.amount), 0);
   const sumD = deductions.reduce((s, r) => s + signed(r.amount), 0);
   const totalPayments = over.totalPayments ?? money(sumP);
@@ -301,8 +306,8 @@ export function samplePayslipLines(over: SampleOptions = {}): string[] {
   // Expense refunds are paid but are not taxable Gross Pay.
   const expenses = payments.filter((r) => EXPENSE_RE.test(r.desc) && signed(r.amount) > 0).reduce((s, r) => s + signed(r.amount), 0);
   const gross = money(Number(totalPayments.replace(/,/g, "")) - expenses);
-  const thisPeriod = over.thisPeriod ?? [gross, gross, "380.00", "150.00"];
-  const toDate = over.toDate ?? ["19719.00", "19719.00", "2660.00", "1050.00"];
+  const thisPeriod = over.thisPeriod ?? [gross, gross, over.noTax ? "" : "380.00", "150.00"];
+  const toDate = over.toDate ?? ["19719.00", "19719.00", over.noTax ? "" : "2660.00", "1050.00"];
 
   const lines: string[] = [];
   lines.push(`      Employee Name  : ZZNAME TESTPERSON          Pay Date  : ${payDate}`);
@@ -343,8 +348,10 @@ export function samplePayslipLines(over: SampleOptions = {}): string[] {
   lines.push(totals);
 
   lines.push(`                         Gross Pay    Taxable Pay      Tax        EE's NIC`);
+  // Amounts end at columns 32, 46, 60 and 74, right-aligned under their labels (which end at 34, 49,
+  // 58 and 74); a blank figure leaves its column empty.
   const figures = (label: string, v: string[]) =>
-    `      ${label.padEnd(11)}${rightAt(v[0]!, 12)}${rightAt(v[1]!, 15)}${rightAt(v[2]!, 14)}${rightAt(v[3]!, 14)}`;
+    `      ${label.padEnd(11)}${rightAt(v[0]!, 15)}${rightAt(v[1]!, 14)}${rightAt(v[2]!, 14)}${rightAt(v[3]!, 14)}`;
   lines.push(figures("This Period", thisPeriod));
   lines.push(figures("To date", toDate));
   lines.push(`${" ".repeat(48)}Net Pay${rightAt(netPay, 15)}`);

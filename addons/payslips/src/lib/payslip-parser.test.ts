@@ -285,3 +285,49 @@ describe("parsePayslipPdf", () => {
     expect(p.warnings.length).toBeGreaterThan(0);
   });
 });
+
+describe("the figures by column", () => {
+  const noTaxLines = () =>
+    samplePayslipLines({
+      noTax: true,
+      payments: ["Salary 3000.00"],
+      deductions: ["Employee NIC 150.00", "USS(CRB) 16 183.00"],
+    });
+
+  it("reads the real column spans when the Tax figures are blank", () => {
+    const lines = noTaxLines();
+    // The layout under test: header ends at 34, 49, 58, 74; amounts end at 32, 46, 60 (tax), 74.
+    const header = lines.find((l) => l.includes("Gross Pay"))!;
+    expect(header.indexOf("EE's NIC") + "EE's NIC".length).toBe(74);
+    const thisPeriod = lines.find((l) => l.trimStart().startsWith("This Period"))!;
+    expect(thisPeriod.length).toBe(74);
+    expect(thisPeriod.slice(48).trim()).toBe("150.00");
+
+    const p = parsePayslipLines(lines);
+    expect(p.thisPeriod).toEqual({ grossPay: 3000, taxablePay: 3000, tax: 0, eeNic: 150 });
+    expect(p.toDate).toEqual({ grossPay: 19719, taxablePay: 19719, tax: 0, eeNic: 1050 });
+  });
+
+  it("imports a month with no tax due without warnings", async () => {
+    const p = await parsePayslipPdf(writePdf([noTaxLines()]), new Date("2026-11-01T00:00:00Z"));
+    expect(p.warnings).toEqual([]);
+    expect(p.deductions).toEqual([
+      { description: "Employee NIC", amount: 150 },
+      { description: "USS(CRB) 16", amount: 183 },
+    ]);
+  });
+
+  it("reads a blank NIC figure too, and the tax figure wherever it ends within its column", () => {
+    const lines = samplePayslipLines({ thisPeriod: ["3000.00", "3000.00", "380.00", ""], toDate: ["19719.00", "19719.00", "2660.00", ""] });
+    const p = parsePayslipLines(lines);
+    expect(p.thisPeriod).toEqual({ grossPay: 3000, taxablePay: 3000, tax: 380, eeNic: 0 });
+    expect(p.toDate).toEqual({ grossPay: 19719, taxablePay: 19719, tax: 2660, eeNic: 0 });
+  });
+
+  it("falls back to reading the figures in order when there is no figures header", () => {
+    const lines = samplePayslipLines().filter((l) => !l.includes("Gross Pay"));
+    const p = parsePayslipLines(lines);
+    expect(p.thisPeriod).toEqual({ grossPay: 2817, taxablePay: 2817, tax: 380, eeNic: 150 });
+    expect(p.toDate).toEqual({ grossPay: 19719, taxablePay: 19719, tax: 2660, eeNic: 1050 });
+  });
+});

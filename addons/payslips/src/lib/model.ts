@@ -55,8 +55,8 @@ export const ussSacrifice = (p: Payslip): number =>
 /** Pay before the USS sacrifice was taken off. */
 export const grossBeforeSacrifice = (p: Payslip): number => round2(p.totalPayments + ussSacrifice(p));
 
-const isNi = (d: string) => /\bNIC?\b|national insurance/i.test(d);
-const isTax = (d: string) => /\btax\b/i.test(d) && !isNi(d) && !/insurance/i.test(d);
+export const isNi = (d: string) => /\bNIC?\b|national insurance/i.test(d);
+export const isTax = (d: string) => /\btax\b/i.test(d) && !isNi(d) && !/insurance/i.test(d);
 const isStudentLoan = (d: string) => /student loan|\bSLC\b|\bPGL\b|postgrad/i.test(d);
 
 export const incomeTax = (p: Payslip): number => sum(p.deductions, (l) => isTax(l.description));

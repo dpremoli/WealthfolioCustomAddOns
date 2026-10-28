@@ -52,8 +52,33 @@ const sum = (lines: Line[], test: (l: Line) => boolean): number =>
 export const ussSacrifice = (p: Payslip): number =>
   round2(-sum(p.payments, (l) => /^USS\b/i.test(l.description) && l.amount < 0));
 
-/** Pay before the USS sacrifice was taken off. */
-export const grossBeforeSacrifice = (p: Payslip): number => round2(p.totalPayments + ussSacrifice(p));
+/** Descriptions of expense refunds: "Gen Trav & Sub", "Telephone Costs", mileage, claims. */
+export const EXPENSE_RE = /trav|subsist|\bsub\b|telephone|phone|mileage|expense|reimburs|\bclaim/i;
+
+/** A positive payment line that reimburses an expense: paid out, but not taxable pay. */
+export const isExpenseLine = (l: Line): boolean => l.amount > 0 && EXPENSE_RE.test(l.description);
+
+/**
+ * Expense refunds in Total Payments: whatever Total Payments has over This Period Gross Pay (the
+ * taxable figure), else the sum of the expense lines (0 when there are none).
+ */
+export function expenseRefunds(p: Payslip): number {
+  const over = round2(p.totalPayments - p.thisPeriod.grossPay);
+  if (over > 0.005 && p.thisPeriod.grossPay > 0) return over;
+  return sum(p.payments, isExpenseLine);
+}
+
+/** The expense lines when they add up to `expenseRefunds`; none when the refund is unexplained. */
+export function expenseLines(p: Payslip): Line[] {
+  const refunds = expenseRefunds(p);
+  if (refunds <= 0.005) return [];
+  const lines = p.payments.filter(isExpenseLine);
+  return Math.abs(round2(lines.reduce((s, l) => s + l.amount, 0)) - refunds) <= 0.005 ? lines : [];
+}
+
+/** Taxable pay before the USS sacrifice was taken off (expense refunds left out). */
+export const grossBeforeSacrifice = (p: Payslip): number =>
+  round2((p.thisPeriod.grossPay > 0 ? p.thisPeriod.grossPay : p.totalPayments - expenseRefunds(p)) + ussSacrifice(p));
 
 export const isNi = (d: string) => /\bNIC?\b|national insurance/i.test(d);
 export const isTax = (d: string) => /\btax\b/i.test(d) && !isNi(d) && !/insurance/i.test(d);

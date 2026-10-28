@@ -1,6 +1,7 @@
 import { round2 } from "@wf-addons/kit";
 import {
   employeeNi,
+  expenseRefunds,
   grossBeforeSacrifice,
   incomeTax,
   otherDeductions,
@@ -15,7 +16,12 @@ export interface MonthBucket {
   month: number;
   label: string;
   hasPayslip: boolean;
+  /** Net Pay, expense refunds included. */
   net: number;
+  /** Net Pay less the expense refunds: what is left of the taxable pay. */
+  netFromPay: number;
+  /** Non-taxable expense refunds paid with the salary. */
+  expenseRefunds: number;
   tax: number;
   ni: number;
   studentLoan: number;
@@ -38,6 +44,9 @@ export interface YearSummary {
   employeeNi: number;
   studentLoan: number;
   otherDeductions: number;
+  /** Non-taxable expense refunds in Total Payments (not part of gross before USS). */
+  expenseRefunds: number;
+  /** Sum of the payslips' Net Pay (expense refunds included). */
   net: number;
   /** Shares (0..1) of gross before USS; 0 when there is no gross pay. */
   rates: { incomeTax: number; employeeNi: number; deductions: number };
@@ -65,6 +74,8 @@ export function summariseYear(payslips: Payslip[], taxYear: number, today: strin
       label: periodLabel(i + 1),
       hasPayslip: inMonth.length > 0,
       net: sum(inMonth, (p) => p.netPay),
+      netFromPay: sum(inMonth, (p) => p.netPay - expenseRefunds(p)),
+      expenseRefunds: sum(inMonth, expenseRefunds),
       tax: sum(inMonth, incomeTax),
       ni: sum(inMonth, employeeNi),
       studentLoan: sum(inMonth, studentLoan),
@@ -90,6 +101,7 @@ export function summariseYear(payslips: Payslip[], taxYear: number, today: strin
     employeeNi: ni,
     studentLoan: sum(list, studentLoan),
     otherDeductions: sum(list, otherDeductions),
+    expenseRefunds: sum(list, expenseRefunds),
     net: sum(list, (p) => p.netPay),
     rates: {
       incomeTax: share(tax),

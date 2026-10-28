@@ -377,6 +377,31 @@ describe("tax page", () => {
     expect(screen.queryByText("(month 9)")).toBeNull();
   });
 
+  it("shows expense refunds as their own tile, apart from gross before USS, only when there are some", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-11-10T09:00:00Z") });
+    const withExpenses: Payslip = {
+      ...parsePayslipLines(
+        samplePayslipLines({ payments: ["Salary 3000.00", "USS(CRB) 16 SS 183.00-", "Gen Trav & Sub 45.50", "Telephone Costs 20.00"] }),
+      ),
+      warnings: [],
+      importedAt: "2026-11-02T09:00:00.000Z",
+    };
+    const { ctx } = await setup({ payslips: [withExpenses] });
+    renderPage(TaxPage, ctx);
+    await waitFor(() => expect(screen.getByText("Expense refunds")).toBeTruthy());
+    expect(screen.getByText("£65.50")).toBeTruthy();
+    expect(screen.getByText("£3,000.00")).toBeTruthy(); // gross before USS, without the refunds
+    expect(screen.getByText("£2,352.50")).toBeTruthy(); // net pay, with them
+  });
+
+  it("has no expense refunds tile without any", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-11-10T09:00:00Z") });
+    const { ctx } = await setup();
+    renderPage(TaxPage, ctx);
+    await waitFor(() => expect(screen.getByText("Gross before USS")).toBeTruthy());
+    expect(screen.queryByText("Expense refunds")).toBeNull();
+  });
+
   it("explains an empty add-on", async () => {
     const { ctx } = await setup({ payslips: [] });
     renderPage(TaxPage, ctx);

@@ -9,12 +9,8 @@ import {
   DialogHeader,
   DialogTitle,
   Icons,
-  Tabs,
-  TabsContent,
-  TabsList,
-  TabsTrigger,
 } from "@wealthfolio/ui";
-import { useEffect, useState } from "react";
+import { useState, type CSSProperties } from "react";
 import { QUERY_ROOT } from "../hooks/use-payslip-data";
 import { downloadPdf, loadPdf } from "../lib/pdf-store";
 import { renderPdfPages } from "../lib/pdf-render";
@@ -40,7 +36,22 @@ async function loadViewed(ctx: AddonContext, payDate: string): Promise<Loaded> {
 
 const messageOf = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
-/** A dialog with the stored PDF of one payslip: the page drawn from its content (text as a fallback) and the original PDF (may not render in a sandboxed frame). */
+/** Space the dialog's header, buttons and padding take; "Fit page" leaves it free so a whole page is visible. */
+const HEADER_HEIGHT = "12rem";
+
+const DIALOG_STYLE: CSSProperties = {
+  width: "min(900px, calc(100vw - 2rem))",
+  maxWidth: "calc(100vw - 2rem)",
+  maxHeight: "calc(100vh - 2rem)",
+  display: "flex",
+  flexDirection: "column",
+  overflow: "hidden",
+};
+
+/** The only part of the dialog that scrolls. */
+const PAGES_STYLE: CSSProperties = { flex: "1 1 auto", minHeight: 0, overflowY: "auto" };
+
+/** A dialog with the stored PDF of one payslip: the pages drawn from its content, or its text when they cannot be drawn. */
 export function PayslipViewer({ ctx, payDate, onClose }: { ctx: AddonContext; payDate: string; onClose: () => void }) {
   const { data, error, isLoading } = useQuery({
     queryKey: [QUERY_ROOT, "pdf-view", payDate],
@@ -62,48 +73,56 @@ export function PayslipViewer({ ctx, payDate, onClose }: { ctx: AddonContext; pa
   // Pages that drew no text at all (it sits where the renderer does not look, say in a form)
   // would show a blank sheet while the PDF does have text: show that instead.
   const drawn = drawing.data && !(data?.lines?.length && drawing.data.every((page) => page.texts.length === 0)) ? drawing.data : null;
+  const [fit, setFit] = useState<"width" | "page">("width");
   const download = useMutation({ mutationFn: () => downloadPdf(ctx, payDate) });
   const failure = error ?? download.error;
 
   return (
     <Dialog open onOpenChange={(open: boolean) => !open && onClose()}>
-      <DialogContent className="max-w-4xl">
-        <DialogHeader>
+      {/* Layout is inline on purpose: the add-on ships no stylesheet, so only classes the host's own CSS happens to contain would apply. */}
+      <DialogContent style={DIALOG_STYLE}>
+        <DialogHeader style={{ flexShrink: 0 }}>
           <DialogTitle>Payslip {payDate}</DialogTitle>
           <DialogDescription>The copy of the PDF kept in Wealthfolio.</DialogDescription>
         </DialogHeader>
 
         {failure && (
-          <AlertFeedback variant="error" title="Something went wrong">
-            {messageOf(failure)}
-          </AlertFeedback>
+          <div style={{ flexShrink: 0 }}>
+            <AlertFeedback variant="error" title="Something went wrong">
+              {messageOf(failure)}
+            </AlertFeedback>
+          </div>
         )}
 
         {isLoading ? (
           <p className="text-muted-foreground text-sm">Loading…</p>
         ) : data ? (
-          <Tabs defaultValue="payslip">
-            <div className="flex items-center justify-between gap-3">
-              <TabsList>
-                <TabsTrigger value="payslip">Payslip</TabsTrigger>
-                <TabsTrigger value="pdf">Original PDF</TabsTrigger>
-              </TabsList>
+          <>
+            <div style={{ flexShrink: 0, display: "flex", justifyContent: "flex-end", gap: "0.5rem" }}>
+              {drawn && (
+                <Button size="sm" variant="outline" onClick={() => setFit(fit === "width" ? "page" : "width")}>
+                  {fit === "width" ? "Fit page" : "Fit width"}
+                </Button>
+              )}
               <Button size="sm" variant="outline" disabled={download.isPending} onClick={() => download.mutate()}>
                 <Icons.Download size={14} className="mr-1" />
                 Download
               </Button>
             </div>
-            <TabsContent value="payslip" className="mt-3">
+            <div data-testid="payslip-pages" style={PAGES_STYLE}>
               {drawn ? (
-                <div className="flex max-h-[70vh] flex-col gap-4 overflow-y-auto rounded bg-neutral-200/60 p-3 dark:bg-neutral-800/60">
+                <div style={{ display: "flex", flexDirection: "column", gap: "1rem", padding: "0.75rem", borderRadius: "0.25rem", background: "rgba(128,128,128,0.2)" }}>
                   {drawn.map((page, i) => (
-                    <PayslipPageView key={i} drawing={page} />
+                    <PayslipPageView key={i} drawing={page} fit={fit} headerHeight={HEADER_HEIGHT} />
                   ))}
                 </div>
               ) : drawing.isLoading ? (
                 <p className="text-muted-foreground text-sm">Drawing the payslip…</p>
               ) : data.lines ? (
-                <pre className="bg-muted/40 max-h-[60vh] overflow-auto rounded border p-3 font-mono text-xs leading-tight whitespace-pre">
+                <pre
+                  className="bg-muted/40 rounded border p-3 font-mono text-xs leading-tight"
+                  style={{ overflow: "auto", maxHeight: `calc(100vh - ${HEADER_HEIGHT})`, whiteSpace: "pre", margin: 0 }}
+                >
                   {data.lines.join("\n")}
                 </pre>
               ) : (
@@ -111,29 +130,10 @@ export function PayslipViewer({ ctx, payDate, onClose }: { ctx: AddonContext; pa
                   The text of this PDF could not be read ({data.textError}). Use Download to open the PDF.
                 </p>
               )}
-            </TabsContent>
-            <TabsContent value="pdf" className="mt-3">
-              <OriginalPdf bytes={data.bytes} />
-            </TabsContent>
-          </Tabs>
+            </div>
+          </>
         ) : null}
       </DialogContent>
     </Dialog>
-  );
-}
-
-/** The PDF in an `<object>` fed from a blob URL that lives only as long as the tab does. */
-function OriginalPdf({ bytes }: { bytes: Uint8Array }) {
-  const [url, setUrl] = useState<string | null>(null);
-  useEffect(() => {
-    const made = URL.createObjectURL(new Blob([bytes as BlobPart], { type: "application/pdf" }));
-    setUrl(made);
-    return () => URL.revokeObjectURL(made);
-  }, [bytes]);
-  if (!url) return null;
-  return (
-    <object data={url} type="application/pdf" aria-label="Original payslip PDF" className="h-[60vh] w-full rounded border">
-      <p className="text-muted-foreground p-3 text-sm">Wealthfolio can't show the PDF inline here — use Download.</p>
-    </object>
   );
 }

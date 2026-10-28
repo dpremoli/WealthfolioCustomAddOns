@@ -40,8 +40,8 @@ Part of the [Wealthfolio custom add-ons monorepo](../../README.md). Requires **W
    **Expense refunds** (lines such as *Gen Trav & Sub* or *Telephone Costs*: in Total Payments but
    not in Gross Pay) are told apart from pay and shown separately.
    **View** opens the payslip inside Wealthfolio (drawn as the page itself — rules, logos and text
-   where the PDF puts them — falling back to its text, and an
-   *Original PDF* tab, which Wealthfolio may not be able to display inside an add-on);
+   where the PDF puts them — falling back to its text when it cannot be drawn; the dialog fits the window and the pages scroll
+   inside it, with a *Fit page* / *Fit width* toggle);
    **Download** saves the PDF through Wealthfolio's save dialog.
    **Refresh** (page header) re-reads every payslip whose PDF is kept, with the current version of
    the parser, and reloads the bank deposits for matching. Payslips imported by an older version

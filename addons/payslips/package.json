@@ -1,6 +1,6 @@
 {
   "name": "payslips-addon",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "description": "Read SAP payslip PDFs in the sandbox: tax, NI and USS pension tracking per tax year",
   "type": "module",

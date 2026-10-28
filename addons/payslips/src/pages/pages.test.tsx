@@ -28,9 +28,6 @@ beforeAll(() => {
     unobserve() {}
     disconnect() {}
   };
-  // jsdom has no blob URLs; the PDF viewer makes one for the inline <object>.
-  URL.createObjectURL = vi.fn(() => "blob:payslip-pdf");
-  URL.revokeObjectURL = vi.fn();
 });
 afterEach(() => vi.useRealTimers());
 
@@ -323,7 +320,7 @@ describe("payslips page: stored PDFs", () => {
     expect((screen.getByLabelText("Download payslip 2026-10-31") as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it("draws the payslip page as an SVG, then shows the original PDF tab", async () => {
+  it("draws the payslip page as an SVG, with no Original PDF tab or object", async () => {
     const { ctx } = await withStoredPdf();
     renderPage(PayslipsPage, ctx);
     const view = await screen.findByLabelText("View payslip 2026-10-31");
@@ -338,17 +335,41 @@ describe("payslips page: stored PDFs", () => {
     expect(svg.textContent).toContain("Total Payments");
     expect(svg.textContent).toContain("ZZNAME TESTPERSON");
     expect(dialog.querySelector("pre")).toBeNull();
-    expect(within(dialog).getByRole("tab", { name: "Payslip" }).getAttribute("aria-selected")).toBe("true");
+    expect(within(dialog).queryByRole("tab")).toBeNull();
+    expect(within(dialog).queryByText("Original PDF")).toBeNull();
+    expect(dialog.querySelector("object")).toBeNull();
+  });
 
-    fireEvent.click(within(dialog).getByRole("tab", { name: "Original PDF" }));
-    await waitFor(() => expect(dialog.querySelector("object")).toBeTruthy());
-    const object = dialog.querySelector("object")!;
-    expect(object.getAttribute("type")).toBe("application/pdf");
-    expect(object.getAttribute("data")).toBe("blob:payslip-pdf");
-    expect(object.textContent).toContain("Wealthfolio can't show the PDF inline here — use Download.");
-    const blob = vi.mocked(URL.createObjectURL).mock.calls.at(-1)![0] as Blob;
-    expect(blob.type).toBe("application/pdf");
-    expect(blob.size).toBe(pdfBytes().length);
+  it("fits the dialog to the window with inline styles: a fixed header and a scrolling page area", async () => {
+    const { dialog } = await openViewer(writePdf([["Page one text"], ["Page two text"]]));
+    const svg = (await within(dialog).findByText("Page one text", { selector: "svg text" })).closest("svg")!;
+    expect(dialog.style.maxHeight).toBe("calc(100vh - 2rem)");
+    expect(dialog.style.maxWidth).toBe("calc(100vw - 2rem)");
+    expect(dialog.style.overflow).toBe("hidden");
+    expect(dialog.style.display).toBe("flex");
+    const area = dialog.querySelector<HTMLElement>("[data-testid='payslip-pages']")!;
+    expect(area.style.overflowY).toBe("auto");
+    expect(parseFloat(area.style.minHeight)).toBe(0);
+    expect(area.contains(svg)).toBe(true);
+    expect(area.style.flex).toMatch(/^1 1 auto/);
+    // The title and the buttons are outside the scrolling area.
+    expect(area.contains(within(dialog).getByRole("button", { name: "Download" }))).toBe(false);
+    expect(svg.style.width).toBe("100%");
+    expect(svg.style.height).toBe("auto");
+    expect(svg.style.display).toBe("block");
+  });
+
+  it("switches between fitting the page width and the whole page", async () => {
+    const { dialog } = await openViewer(writePdf([["Page one text"]]));
+    const svg = (await within(dialog).findByText("Page one text", { selector: "svg text" })).closest("svg")!;
+    const toggle = within(dialog).getByRole("button", { name: "Fit page" });
+    expect(svg.style.width).toBe("100%");
+    fireEvent.click(toggle);
+    expect(svg.style.width).toBe("auto");
+    expect(svg.style.height).toMatch(/^calc\(100vh/);
+    fireEvent.click(within(dialog).getByRole("button", { name: "Fit width" }));
+    expect(svg.style.width).toBe("100%");
+    expect(svg.style.height).toBe("auto");
   });
 
   it("falls back to the text view when the page cannot be drawn", async () => {
@@ -364,6 +385,8 @@ describe("payslips page: stored PDFs", () => {
     const text = await within(dialog).findByText(NET_PAY);
     expect(text.tagName).toBe("PRE");
     expect(text.className).toMatch(/font-mono/);
+    expect(text.style.overflow).toBe("auto");
+    expect(text.style.maxHeight).not.toBe("");
     expect(text.textContent).toContain("Total Payments");
     expect(dialog.querySelector("svg text")).toBeNull();
   });
@@ -405,23 +428,6 @@ describe("payslips page: stored PDFs", () => {
     const drawing = client.getQueryCache().getAll().find((q) => q.queryKey.includes("pdf-render"));
     expect(drawing!.isStale()).toBe(false);
     expect(drawing!.options.retry).toBe(false);
-  });
-
-  it("revokes the PDF's blob URL when the viewer closes", async () => {
-    const { ctx } = await withStoredPdf();
-    vi.mocked(URL.revokeObjectURL).mockClear();
-    renderPage(PayslipsPage, ctx);
-    const view = await screen.findByLabelText("View payslip 2026-10-31");
-    await waitFor(() => expect((view as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(view);
-    const dialog = await screen.findByRole("dialog");
-    fireEvent.click(await within(dialog).findByRole("tab", { name: "Original PDF" }));
-    await waitFor(() => expect(dialog.querySelector("object")).toBeTruthy());
-    expect(URL.revokeObjectURL).not.toHaveBeenCalled();
-
-    fireEvent.click(within(dialog).getByRole("button", { name: "Close" }));
-    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:payslip-pdf");
   });
 
   it("downloads from the row with the stored bytes and the file name", async () => {

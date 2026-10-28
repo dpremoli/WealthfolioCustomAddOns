@@ -1,20 +1,17 @@
 import type { AddonEnableFunction } from "@wealthfolio/addon-sdk";
-import { registerPages, type AddonPageProps } from "@wf-addons/kit";
-import { PageShell } from "@wf-addons/kit/ui";
+import { registerPages } from "@wf-addons/kit";
 import { ADDON_ID } from "./constants";
-
-// Placeholder pages; later tasks replace them.
-const placeholder = (heading: string) =>
-  function PlaceholderPage(_props: AddonPageProps) {
-    return <PageShell heading={heading}>{null}</PageShell>;
-  };
+import PayslipsPage from "./pages/payslips-page";
+import PensionPage from "./pages/pension-page";
+import SettingsPage from "./pages/settings-page";
+import TaxPage from "./pages/tax-page";
 
 const enable: AddonEnableFunction = (ctx) => {
   registerPages(ctx, ADDON_ID, [
-    { id: "payslips", component: placeholder("Payslips") },
-    { id: "payslips-tax", path: "tax", component: placeholder("Tax") },
-    { id: "payslips-pension", path: "pension", component: placeholder("Pension") },
-    { id: "payslips-settings", path: "settings", component: placeholder("Settings") },
+    { id: "payslips", component: PayslipsPage },
+    { id: "payslips-tax", path: "tax", component: TaxPage },
+    { id: "payslips-pension", path: "pension", component: PensionPage },
+    { id: "payslips-settings", path: "settings", component: SettingsPage },
   ]);
 };
 

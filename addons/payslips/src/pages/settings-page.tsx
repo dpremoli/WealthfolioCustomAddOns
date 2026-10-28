@@ -23,6 +23,7 @@ import type { AddonPageProps } from "@wf-addons/kit";
 import { PageShell } from "@wf-addons/kit/ui";
 import { useState } from "react";
 import { PayslipsNav } from "../components/nav";
+import { StoredPdfsCard } from "../components/stored-pdfs-card";
 import { QUERY_ROOT, useSalaryMatches } from "../hooks/use-payslip-data";
 import { gbp, isoDay } from "../lib/format";
 import { findPayrollAccount, recordPayroll, PAYROLL_ACCOUNT_NAME, type PayrollOutcome } from "../lib/payroll";
@@ -344,6 +345,8 @@ export default function SettingsPage({ ctx }: AddonPageProps) {
           )}
         </CardContent>
       </Card>
+
+      <StoredPdfsCard ctx={ctx} />
     </PageShell>
   );
 }

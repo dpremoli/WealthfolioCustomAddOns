@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { samplePayslipLines } from "../test-utils";
 import type { Link, Payslip, UssStatement } from "./model";
 import { parsePayslipLines } from "./payslip-parser";
+import { listPdfDates, loadPdf, savePdf } from "./pdf-store";
 import {
   addStatement,
   deletePayslip,
@@ -49,6 +50,17 @@ describe("payslips", () => {
     const all = await loadPayslips(h.ctx);
     expect(all).toHaveLength(1);
     expect(all[0]!.netPay).toBe(1);
+  });
+
+  it("deletes the stored PDF of a deleted payslip, and only that one", async () => {
+    const h = host();
+    await savePayslips(h.ctx, [slip("2026-04-30", 2026), slip("2026-05-31", 2026, 2)]);
+    await savePdf(h.ctx, "2026-04-30", new Uint8Array([1]));
+    await savePdf(h.ctx, "2026-05-31", new Uint8Array([2]));
+    await deletePayslip(h.ctx, "2026-04-30");
+    expect(await loadPdf(h.ctx, "2026-04-30")).toBeNull();
+    expect(await loadPdf(h.ctx, "2026-05-31")).toEqual(new Uint8Array([2]));
+    expect(await listPdfDates(h.ctx)).toEqual(["2026-05-31"]);
   });
 
   it("deletes a payslip, its link and an emptied year", async () => {

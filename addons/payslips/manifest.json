@@ -48,6 +48,11 @@
       "purpose": "Find the salary deposit matching each payslip's net pay, tag it on request, and (only if you opt in) record payroll in its own account and link the net-pay transfer to your bank deposit"
     },
     {
+      "category": "files",
+      "functions": ["openSaveDialog"],
+      "purpose": "Save a copy of a payslip PDF you choose to download"
+    },
+    {
       "category": "ui",
       "functions": ["router.add", "navigation.navigate"],
       "purpose": "Show the payslips, tax, pension and settings pages"

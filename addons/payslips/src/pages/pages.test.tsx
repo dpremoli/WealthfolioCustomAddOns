@@ -1,14 +1,15 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { AddonContext, AddonRouteLocation } from "@wealthfolio/addon-sdk";
 import { FakeWealthfolio, type StoredActivity } from "@wf-addons/kit/testing";
 import type { ComponentType } from "react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { samplePayslipLines, writePdf } from "../test-utils";
+import { lineContent, rawPdf, samplePayslipLines, writePdf } from "../test-utils";
 import { parsePayslipLines } from "../lib/payslip-parser";
 import type { Payslip } from "../lib/model";
 import { recordPayroll } from "../lib/payroll";
 import { loadCandidateRows, matchSalaries } from "../lib/salary-match";
+import { getKeepPdfs, listPdfDates, loadPdf, savePdf, setKeepPdfs } from "../lib/pdf-store";
 import { loadLinks, loadPayslips, loadStatements, savePayslips } from "../lib/store";
 import PayslipsPage from "./payslips-page";
 import PensionPage from "./pension-page";
@@ -26,6 +27,9 @@ beforeAll(() => {
     unobserve() {}
     disconnect() {}
   };
+  // jsdom has no blob URLs; the PDF viewer makes one for the inline <object>.
+  URL.createObjectURL = vi.fn(() => "blob:payslip-pdf");
+  URL.revokeObjectURL = vi.fn();
 });
 afterEach(() => vi.useRealTimers());
 
@@ -61,8 +65,11 @@ async function setup(opts: { payslips?: Payslip[]; deposits?: StoredActivity[] }
   // The fake host has no navigation (nor router).
   (host.ctx.api as unknown as Record<string, unknown>).navigation = { navigate };
   (host.ctx.api as unknown as Record<string, unknown>).query = { getClient: () => new QueryClient() };
+  // ... nor a files API.
+  const openSaveDialog = vi.fn().mockResolvedValue(null);
+  (host.ctx.api as unknown as Record<string, unknown>).files = { openSaveDialog };
   await savePayslips(host.ctx, opts.payslips ?? [payslip()]);
-  return { host, ctx: host.ctx, navigate };
+  return { host, ctx: host.ctx, navigate, openSaveDialog };
 }
 
 /** Fresh ArrayBuffer-backed bytes (what `File` accepts) of the synthetic payslip PDF. */
@@ -92,7 +99,19 @@ describe("payslips page", () => {
     expect(screen.getByText("OK")).toBeTruthy();
     expect(screen.getByText("Current Account · 2026-10-31")).toBeTruthy();
     expect(screen.getByText(/read on this device only and never uploaded/i)).toBeTruthy();
-    expect(screen.getByText(/Only figures, pay date, tax period and tax code are kept\./)).toBeTruthy();
+    expect(
+      screen.getByText(
+        "A copy of each PDF is kept in Wealthfolio so you can view and download it. It includes your name and NI number; turn this off in Settings.",
+      ),
+    ).toBeTruthy();
+  });
+
+  it("says only the figures are kept once the PDF copy is turned off", async () => {
+    const { ctx } = await setup();
+    await setKeepPdfs(ctx, false);
+    renderPage(PayslipsPage, ctx);
+    expect(await screen.findByText(/Only figures, pay date, tax period and tax code are kept\./)).toBeTruthy();
+    expect(screen.queryByText(/A copy of each PDF is kept/)).toBeNull();
   });
 
   it("navigates with the nav buttons", async () => {
@@ -174,6 +193,162 @@ describe("payslips page", () => {
     const pdf = new File([pdfBytes()], "dropped.pdf", { type: "application/pdf" });
     fireEvent.drop(zone, { dataTransfer: { files: [pdf] } });
     await waitFor(() => expect(screen.getByText("1 imported, 0 replaced")).toBeTruthy());
+  });
+});
+
+describe("payslips page: stored PDFs", () => {
+  const NET_PAY = /Net Pay/;
+
+  /** A payslip row whose PDF is stored (the bytes are the synthetic payslip PDF). */
+  async function withStoredPdf() {
+    const s = await setup();
+    const bytes = pdfBytes();
+    await savePdf(s.ctx, "2026-10-31", bytes);
+    return { ...s, bytes };
+  }
+
+  it("keeps the PDF of an imported file, replaces it on re-import, and offers View and Download", async () => {
+    const { ctx } = await setup({ payslips: [] });
+    renderPage(PayslipsPage, ctx);
+    const input = (await screen.findByTestId("payslip-files")) as HTMLInputElement;
+
+    fireEvent.change(input, { target: { files: [new File([pdfBytes()], "october.pdf", { type: "application/pdf" })] } });
+    await waitFor(() => expect(screen.getByText("1 imported, 0 replaced")).toBeTruthy());
+    expect(await loadPdf(ctx, "2026-10-31")).toEqual(pdfBytes());
+    expect(await listPdfDates(ctx)).toEqual(["2026-10-31"]);
+    const view = (await screen.findByLabelText("View payslip 2026-10-31")) as HTMLButtonElement;
+    expect(view.disabled).toBe(false);
+    expect(view.textContent).toContain("View");
+    const download = screen.getByLabelText("Download payslip 2026-10-31") as HTMLButtonElement;
+    expect(download.disabled).toBe(false);
+    expect(download.textContent).toContain("Download");
+
+    // The same pay date again (other figures, so other bytes) replaces the stored copy.
+    const other = new Uint8Array(writePdf([samplePayslipLines({ payments: ["Salary 3100.00", "USS(CRB) 16 SS 183.00-"] })]));
+    fireEvent.change(input, { target: { files: [new File([other], "october-v2.pdf", { type: "application/pdf" })] } });
+    await waitFor(() => expect(screen.getByText("0 imported, 1 replaced")).toBeTruthy());
+    expect(await loadPdf(ctx, "2026-10-31")).toEqual(other);
+    expect(await listPdfDates(ctx)).toEqual(["2026-10-31"]);
+  });
+
+  it("keeps nothing when keeping PDFs is off", async () => {
+    const { host, ctx } = await setup({ payslips: [] });
+    await setKeepPdfs(ctx, false);
+    renderPage(PayslipsPage, ctx);
+    const input = (await screen.findByTestId("payslip-files")) as HTMLInputElement;
+    fireEvent.change(input, { target: { files: [new File([pdfBytes()], "october.pdf", { type: "application/pdf" })] } });
+    await waitFor(() => expect(screen.getByText("1 imported, 0 replaced")).toBeTruthy());
+    expect(await listPdfDates(ctx)).toEqual([]);
+    expect([...host.storage.keys()].filter((k) => k.startsWith("pdf:") && k !== "pdf:keep")).toEqual([]);
+    expect((screen.getByLabelText("View payslip 2026-10-31") as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByLabelText("Download payslip 2026-10-31") as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("imports a PDF that is too large to keep, and says why the copy is missing next to the file", async () => {
+    const { ctx } = await setup({ payslips: [] });
+    renderPage(PayslipsPage, ctx);
+    const input = (await screen.findByTestId("payslip-files")) as HTMLInputElement;
+    // The payslip text plus ~170 KB of PDF comment in its content stream.
+    const big = new Uint8Array(rawPdf([`${lineContent(samplePayslipLines())}\n% ${"x".repeat(170_000)}\n`]));
+    fireEvent.change(input, { target: { files: [new File([big], "huge.pdf", { type: "application/pdf" })] } });
+    await waitFor(() => expect(screen.getByText("1 imported, 0 replaced")).toBeTruthy());
+    expect((await loadPayslips(ctx)).map((p) => p.payDate)).toEqual(["2026-10-31"]);
+    expect(await listPdfDates(ctx)).toEqual([]);
+    expect(screen.getByText("huge.pdf")).toBeTruthy();
+    expect(screen.getByText(/too large to keep \(over ~150 KB\)/)).toBeTruthy();
+    expect((screen.getByLabelText("View payslip 2026-10-31") as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("disables View and Download for a payslip with no stored PDF", async () => {
+    const { ctx } = await setup();
+    renderPage(PayslipsPage, ctx);
+    const view = (await screen.findByLabelText("View payslip 2026-10-31")) as HTMLButtonElement;
+    expect(view.disabled).toBe(true);
+    expect((screen.getByLabelText("Download payslip 2026-10-31") as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("shows the payslip text in a monospace block, then the original PDF tab", async () => {
+    const { ctx } = await withStoredPdf();
+    renderPage(PayslipsPage, ctx);
+    const view = await screen.findByLabelText("View payslip 2026-10-31");
+    await waitFor(() => expect((view as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(view);
+
+    const dialog = await screen.findByRole("dialog");
+    const text = await within(dialog).findByText(NET_PAY);
+    expect(text.tagName).toBe("PRE");
+    expect(text.className).toMatch(/font-mono/);
+    expect(text.textContent).toContain("Total Payments");
+    expect(text.textContent).toContain("ZZNAME TESTPERSON");
+    expect(within(dialog).getByRole("tab", { name: "Payslip" }).getAttribute("aria-selected")).toBe("true");
+
+    fireEvent.click(within(dialog).getByRole("tab", { name: "Original PDF" }));
+    await waitFor(() => expect(dialog.querySelector("object")).toBeTruthy());
+    const object = dialog.querySelector("object")!;
+    expect(object.getAttribute("type")).toBe("application/pdf");
+    expect(object.getAttribute("data")).toBe("blob:payslip-pdf");
+    expect(object.textContent).toContain("Wealthfolio can't show the PDF inline here — use Download.");
+    const blob = vi.mocked(URL.createObjectURL).mock.calls.at(-1)![0] as Blob;
+    expect(blob.type).toBe("application/pdf");
+    expect(blob.size).toBe(pdfBytes().length);
+  });
+
+  it("revokes the PDF's blob URL when the viewer closes", async () => {
+    const { ctx } = await withStoredPdf();
+    vi.mocked(URL.revokeObjectURL).mockClear();
+    renderPage(PayslipsPage, ctx);
+    const view = await screen.findByLabelText("View payslip 2026-10-31");
+    await waitFor(() => expect((view as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(view);
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(await within(dialog).findByRole("tab", { name: "Original PDF" }));
+    await waitFor(() => expect(dialog.querySelector("object")).toBeTruthy());
+    expect(URL.revokeObjectURL).not.toHaveBeenCalled();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Close" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:payslip-pdf");
+  });
+
+  it("downloads from the row with the stored bytes and the file name", async () => {
+    const { ctx, openSaveDialog, bytes } = await withStoredPdf();
+    renderPage(PayslipsPage, ctx);
+    const download = await screen.findByLabelText("Download payslip 2026-10-31");
+    await waitFor(() => expect((download as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(download);
+    await waitFor(() => expect(openSaveDialog).toHaveBeenCalledTimes(1));
+    expect(openSaveDialog).toHaveBeenCalledWith(bytes, "payslip-2026-10-31.pdf");
+  });
+
+  it("downloads from the viewer too", async () => {
+    const { ctx, openSaveDialog, bytes } = await withStoredPdf();
+    renderPage(PayslipsPage, ctx);
+    const view = await screen.findByLabelText("View payslip 2026-10-31");
+    await waitFor(() => expect((view as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(view);
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(await within(dialog).findByRole("button", { name: "Download" }));
+    await waitFor(() => expect(openSaveDialog).toHaveBeenCalledWith(bytes, "payslip-2026-10-31.pdf"));
+  });
+
+  it("shows a failed download inline", async () => {
+    const { ctx, openSaveDialog } = await withStoredPdf();
+    openSaveDialog.mockRejectedValue(new Error("Disk is full"));
+    renderPage(PayslipsPage, ctx);
+    const download = await screen.findByLabelText("Download payslip 2026-10-31");
+    await waitFor(() => expect((download as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(download);
+    expect(await screen.findByText("Disk is full")).toBeTruthy();
+  });
+
+  it("deleting a payslip removes its stored PDF", async () => {
+    const { ctx } = await withStoredPdf();
+    renderPage(PayslipsPage, ctx);
+    fireEvent.click(await screen.findByLabelText("Delete payslip 2026-10-31"));
+    fireEvent.click(screen.getByText("Confirm delete"));
+    await waitFor(() => expect(screen.getByText("No payslips yet. Import a PDF above.")).toBeTruthy());
+    expect(await loadPdf(ctx, "2026-10-31")).toBeNull();
+    expect(await listPdfDates(ctx)).toEqual([]);
   });
 });
 
@@ -394,5 +569,45 @@ describe("settings page", () => {
     await screen.findByText("Payroll recorded");
     const rows = host.rows(host.accounts.find((a) => a.name === "Payroll")!.id);
     expect(rows.map((r) => r.comment ?? "").some((c) => c.includes(":ded:student-loan]"))).toBe(true);
+  });
+});
+
+describe("settings page: stored PDFs", () => {
+  it("shows how many PDFs are kept and lets the user stop keeping them", async () => {
+    const { ctx } = await setup();
+    await savePdf(ctx, "2026-10-31", new Uint8Array([1]));
+    await savePdf(ctx, "2026-09-30", new Uint8Array([2]));
+    renderPage(SettingsPage, ctx);
+
+    expect(await screen.findByText("Stored PDFs")).toBeTruthy();
+    expect(await screen.findByText("2 PDFs stored")).toBeTruthy();
+    const keep = screen.getByRole("switch", { name: "Keep a copy of each payslip PDF" });
+    expect(keep.getAttribute("aria-checked")).toBe("true");
+
+    fireEvent.click(keep);
+    await waitFor(() => expect(screen.getByRole("switch", { name: "Keep a copy of each payslip PDF" }).getAttribute("aria-checked")).toBe("false"));
+    expect(await getKeepPdfs(ctx)).toBe(false);
+    expect(await listPdfDates(ctx)).toHaveLength(2); // turning it off removes nothing
+  });
+
+  it("removes all stored PDFs only after a second click", async () => {
+    const { ctx } = await setup();
+    await savePdf(ctx, "2026-10-31", new Uint8Array([1]));
+    renderPage(SettingsPage, ctx);
+    expect(await screen.findByText("1 PDF stored")).toBeTruthy();
+
+    fireEvent.click(screen.getByText("Remove all stored PDFs"));
+    expect(await listPdfDates(ctx)).toEqual(["2026-10-31"]);
+    fireEvent.click(screen.getByText("Cancel"));
+    expect(screen.queryByText("Confirm remove all")).toBeNull();
+    expect(await listPdfDates(ctx)).toEqual(["2026-10-31"]);
+
+    fireEvent.click(screen.getByText("Remove all stored PDFs"));
+    fireEvent.click(screen.getByText("Confirm remove all"));
+    await waitFor(() => expect(screen.getByText("No PDFs stored")).toBeTruthy());
+    expect(await listPdfDates(ctx)).toEqual([]);
+    expect(await loadPdf(ctx, "2026-10-31")).toBeNull();
+    expect(await loadPayslips(ctx)).toHaveLength(1); // the payslips stay
+    expect((screen.getByText("Remove all stored PDFs").closest("button") as HTMLButtonElement).disabled).toBe(true);
   });
 });

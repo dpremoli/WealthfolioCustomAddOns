@@ -1,0 +1,56 @@
+{
+  "id": "payslips-addon",
+  "name": "Payslips & Pension",
+  "version": "0.1.0",
+  "description": "Read SAP payslip PDFs entirely inside Wealthfolio, match net pay to your salary deposits, and track income tax, NI and USS pension contributions per tax year.",
+  "author": "dpremoli",
+  "license": "GPL-3.0-only",
+  "main": "dist/addon.js",
+  "sdkVersion": "3.11.0",
+  "minWealthfolioVersion": "3.11.0",
+  "enabled": true,
+  "keywords": ["payslip", "payroll", "tax", "pension", "uss"],
+  "contributes": {
+    "routes": [
+      { "id": "payslips" },
+      { "id": "payslips-tax", "path": "tax" },
+      { "id": "payslips-pension", "path": "pension" },
+      { "id": "payslips-settings", "path": "settings" }
+    ],
+    "links": {
+      "sidebar": [
+        {
+          "id": "payslips",
+          "route": "payslips",
+          "label": "Payslips",
+          "icon": "receipt",
+          "order": 170
+        }
+      ]
+    }
+  },
+  "hostDependencies": {
+    "@tanstack/react-query": "^5.90.0",
+    "@wealthfolio/addon-sdk": "^3.11.0",
+    "@wealthfolio/ui": "^3.11.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "permissions": [
+    {
+      "category": "accounts",
+      "functions": ["getAll", "create"],
+      "purpose": "List your accounts to find the bank account that received each salary, and create the optional Payroll account"
+    },
+    {
+      "category": "activities",
+      "functions": ["getAll", "import", "saveMany", "getTransferPair", "linkTransfer"],
+      "purpose": "Find the salary deposit matching each payslip's net pay, tag it on request, and (only if you opt in) record payroll in its own account and link the net-pay transfer to your bank deposit"
+    },
+    {
+      "category": "ui",
+      "functions": ["router.add", "navigation.navigate"],
+      "purpose": "Show the payslips, tax, pension and settings pages"
+    }
+  ]
+}

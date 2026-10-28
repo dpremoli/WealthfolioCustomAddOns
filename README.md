@@ -8,8 +8,9 @@ Personal [Wealthfolio](https://wealthfolio.app) add-ons, built against
 | [`addons/monzo`](addons/monzo) | Syncs Monzo current/Flex accounts into cash accounts; CSV backfill beyond the API's 90 days | Monzo API (OAuth) + CSV |
 | [`addons/revolut`](addons/revolut) | Imports Revolut statements into one cash account per currency, with opening balances | CSV (Revolut has no personal API) |
 | [`addons/trading212`](addons/trading212) | Syncs Trading 212 Invest/ISA trades, dividends, cash and card spending, or daily holdings snapshots | Trading 212 API |
+| [`addons/payslips`](addons/payslips) | Reads SAP payslip PDFs inside the sandbox; matches net pay to your salary deposits, tracks tax, NI and USS pension per tax year, optional Payroll account | Payslip PDFs you choose (read on-device, no network) |
 
-All three feed Wealthfolio's Spending module (cash and credit-card accounts), and
+The Monzo, Revolut and Trading 212 add-ons feed Wealthfolio's Spending module (cash and credit-card accounts), and
 none needs a server any more: Wealthfolio's network broker makes the API calls the
 old Python proxies used to relay.
 

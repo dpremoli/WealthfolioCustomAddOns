@@ -25,7 +25,9 @@
  * - A row in another currency with an `fxRate` settles in the account's currency at that rate, kept
  *   as sent (a GBX row's rate is not converted with its price); cash is held per currency.
  * - Holdings apply `SPLIT` rows (ratio in `amount`) to the lots held before the split day, and
- *   `saveMany` deletes activities (`deleteIds`) and patches them (`updates`).
+ *   `saveMany` deletes activities (`deleteIds`) and patches them (`updates`, type and comment included).
+ * - `linkTransfer` links two stored activities as a transfer pair; `getTransferPair` answers it for
+ *   either leg (null when unlinked).
  */
 import type { AddonContext, ActivityImport } from "@wealthfolio/addon-sdk";
 import { minorUnit } from "../money";
@@ -82,6 +84,8 @@ export class FakeWealthfolio {
   readonly accounts: FakeAccount[];
   readonly stored = new Map<string, StoredActivity[]>();
   readonly importCalls: ImportCall[] = [];
+  /** Transfer links made through `activities.linkTransfer`: [out id, in id]. */
+  readonly links: [string, string][] = [];
   /** The ids (as the add-on sent them) of the rows of each `checkImport` call. */
   readonly checkedIds: (string | undefined)[][] = [];
   /** Largest value written to storage so far. */
@@ -135,6 +139,19 @@ export class FakeWealthfolio {
           checkImport: async (rows: ActivityImport[]) => this.checkImport(rows),
           import: async (rows: ActivityImport[]) => this.importRows(rows),
           getAll: async (accountId?: string) => [...(this.stored.get(accountId ?? "") ?? [])],
+          getTransferPair: async (id: string) => {
+            const link = this.links.find((l) => l.includes(id));
+            if (!link) return null;
+            const [o, i] = link.map((x) => this.rows().find((r) => r.id === x));
+            return o && i ? { transferOut: o, transferIn: i } : null;
+          },
+          linkTransfer: async (outId: string, inId: string) => {
+            const [o, i] = [outId, inId].map((x) => this.rows().find((r) => r.id === x));
+            if (!o || !i) throw new Error("Activity not found");
+            if (this.links.some((l) => l.includes(outId) || l.includes(inId))) throw new Error("Already linked");
+            this.links.push([outId, inId]);
+            return [o, i];
+          },
           saveMany: async (req: { deleteIds?: string[]; updates?: Record<string, unknown>[] }) => {
             const gone = new Set(req.deleteIds ?? []);
             for (const [id, list] of this.stored) this.stored.set(id, list.filter((r) => !gone.has(r.id)));
@@ -152,6 +169,8 @@ export class FakeWealthfolio {
               if (u.fee !== undefined) row.fee = num(u.fee);
               if (u.quantity !== undefined) row.quantity = num(u.quantity);
               if (typeof u.currency === "string") row.currency = u.currency;
+              if (typeof u.activityType === "string") row.activityType = u.activityType;
+              if (u.comment !== undefined) row.comment = (u.comment as string | null) ?? null;
             }
             return { deleted: [...gone], errors };
           },

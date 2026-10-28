@@ -82,40 +82,65 @@ export interface MoveMatches<R> {
   ambiguous: R[];
 }
 
+export interface NearestMatches<K, C> {
+  pairs: { key: K; match: C }[];
+  /** Keys left unmatched because their best candidate was not unique. */
+  ambiguous: K[];
+}
+
 /**
- * Pairs each money-out row with the closest-dated money-in row. A leg whose best counterparts tie
- * on date is ambiguous and left unpaired; a counterpart wanted by several legs goes to the
- * nearest of them, or to none when they are equally near.
+ * Pairs each key with the candidate `fits` accepts at the smallest `distance`. A key whose best
+ * candidates tie is ambiguous and left unpaired; a candidate wanted by several keys goes to the
+ * nearest of them, or to none when they are equally near (all of them ambiguous then).
+ */
+export function matchNearest<K, C>(
+  keys: K[],
+  candidates: C[],
+  fits: (key: K, candidate: C) => boolean,
+  distance: (key: K, candidate: C) => number,
+): NearestMatches<K, C> {
+  const ambiguous: K[] = [];
+  const claimed = new Map<C, { key: K; gap: number }[]>();
+  for (const key of keys) {
+    const near = candidates
+      .filter((c) => fits(key, c))
+      .map((c) => ({ c, gap: distance(key, c) }))
+      .sort((x, y) => x.gap - y.gap);
+    if (near.length === 0) continue;
+    if (near.length > 1 && near[1].gap === near[0].gap) {
+      ambiguous.push(key);
+      continue;
+    }
+    claimed.set(near[0].c, [...(claimed.get(near[0].c) ?? []), { key, gap: near[0].gap }]);
+  }
+  const pairs: { key: K; match: C }[] = [];
+  for (const [match, claims] of claimed) {
+    claims.sort((x, y) => x.gap - y.gap);
+    if (claims.length > 1 && claims[1].gap === claims[0].gap) {
+      ambiguous.push(...claims.map((c) => c.key));
+      continue;
+    }
+    pairs.push({ key: claims[0].key, match });
+  }
+  return { pairs, ambiguous };
+}
+
+/**
+ * Pairs each money-out row with the closest-dated money-in row ({@link matchNearest} over
+ * {@link isMoveMatch}).
  */
 export function matchMoves<R extends MoveRow>(
   outs: R[],
   ins: R[],
   windowMs = MOVE_MATCH_WINDOW_MS,
 ): MoveMatches<R> {
-  const ambiguous: R[] = [];
-  const claimed = new Map<R, { out: R; gap: number }[]>();
-  for (const out of outs) {
-    const near = ins
-      .filter((i) => isMoveMatch(out, i, windowMs))
-      .map((i) => ({ i, gap: Math.abs(time(out) - time(i)) }))
-      .sort((x, y) => x.gap - y.gap);
-    if (near.length === 0) continue;
-    if (near.length > 1 && near[1].gap === near[0].gap) {
-      ambiguous.push(out);
-      continue;
-    }
-    claimed.set(near[0].i, [...(claimed.get(near[0].i) ?? []), { out, gap: near[0].gap }]);
-  }
-  const pairs: { out: R; in: R }[] = [];
-  for (const [inn, claims] of claimed) {
-    claims.sort((x, y) => x.gap - y.gap);
-    if (claims.length > 1 && claims[1].gap === claims[0].gap) {
-      ambiguous.push(...claims.map((c) => c.out));
-      continue;
-    }
-    pairs.push({ out: claims[0].out, in: inn });
-  }
-  return { pairs, ambiguous };
+  const { pairs, ambiguous } = matchNearest(
+    outs,
+    ins,
+    (o, i) => isMoveMatch(o, i, windowMs),
+    (o, i) => Math.abs(time(o) - time(i)),
+  );
+  return { pairs: pairs.map((p) => ({ out: p.key, in: p.match })), ambiguous };
 }
 
 export interface MoveLinkOutcome {

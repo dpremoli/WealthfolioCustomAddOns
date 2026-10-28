@@ -77,10 +77,12 @@ export {
   isTrading212Payee,
   linkMovesBetween,
   matchMoves,
+  matchNearest,
   moveLinkNote,
   type MoveLinkOutcome,
   type MoveMatches,
   type MoveRow,
+  type NearestMatches,
   T212_PROVIDER,
   trading212Refs,
 } from "./move-match";

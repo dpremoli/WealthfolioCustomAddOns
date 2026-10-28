@@ -5,9 +5,9 @@ import { taxYearOf } from "./tax-year";
 
 /**
  * Add-on storage. One value is capped at ~244 KB, so payslips and links are sharded by
- * tax year (`payslips/2026`, `links/2026`) and the statements list is capped.
+ * tax year (`payslips:2026`, `links:2026`; the host allows only letters, digits and `_ . : -` in a key) and the statements list is capped.
  */
-const INDEX_KEY = "payslips/index";
+const INDEX_KEY = "payslips:index";
 const STATEMENTS_KEY = "uss-statements";
 const SETTINGS_KEY = "settings";
 const MAX_STATEMENTS = 100;
@@ -15,8 +15,8 @@ const MAX_STATEMENTS = 100;
 const DEFAULT_SETTINGS: Settings = { windowDays: 4, payroll: { enabled: false } };
 
 const store = (ctx: AddonContext) => jsonStore(ctx.api.storage);
-const payslipKey = (taxYear: number) => `payslips/${taxYear}`;
-const linkKey = (taxYear: number) => `links/${taxYear}`;
+const payslipKey = (taxYear: number) => `payslips:${taxYear}`;
+const linkKey = (taxYear: number) => `links:${taxYear}`;
 const byPayDate = (a: Payslip, b: Payslip) => (a.payDate < b.payDate ? -1 : a.payDate > b.payDate ? 1 : 0);
 
 export async function taxYears(ctx: AddonContext): Promise<number[]> {

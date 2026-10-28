@@ -63,9 +63,9 @@ All under `addons/payslips/src/lib/` unless noted.
   `grossBeforeSacrifice` (= totalPayments + ussSacrifice), `incomeTax`, `employeeNi`,
   `studentLoan` (deductions matching `/student loan|\bSLC\b|\bPGL\b/i`), `otherDeductions`.
 - **`store.ts`** — storage layout (all JSON via kit `jsonStore`):
-  - `payslips/<taxYearStart>` → `Payslip[]` (one tax year: ≤ ~14 payslips, a few KB);
-  - `payslips/index` → `number[]` tax years present;
-  - `links/<taxYearStart>` → `Record<payDate, Link>` with
+  - `payslips:<taxYearStart>` → `Payslip[]` (one tax year: ≤ ~14 payslips, a few KB);
+  - `payslips:index` → `number[]` tax years present;
+  - `links:<taxYearStart>` → `Record<payDate, Link>` with
     `Link = { activityId, accountId, chosen: "auto" | "manual", tagged?: boolean }`;
   - `uss-statements` → `UssStatement[]`, capped at 100 entries;
   - `settings` → `{ accountIds?: string[]; windowDays: number; payroll: { enabled: boolean; accountId?: string } }`;

@@ -13,7 +13,8 @@
  * - A stored activity gets a new id of the host's own (the id sent is not kept).
  * - `storeNothing` makes `import` answer 200 and `success: true` while saving nothing and saying
  *   nothing about any row (the worst case: no reason anywhere).
- * - `storage.set` refuses a value above ~244 KB: "too large to sync across devices".
+ * - `storage.set` refuses a value above ~244 KB: "too large to sync across devices", and storage and
+ *   secrets refuse a key with anything but letters, digits and `_ . : -` ("Invalid storage key").
  * - **Duplicates** (`activities_service.rs`, `idempotency.rs`), keyed like the host's idempotency
  *   key (account, type, day, asset@MIC, quantity, price, amount, currency, comment): `checkImport`
  *   marks a row matching a stored activity `duplicateOfId` and a row matching an earlier row of the
@@ -27,12 +28,14 @@
  * - Holdings apply `SPLIT` rows (ratio in `amount`) to the lots held before the split day, and
  *   `saveMany` deletes activities (`deleteIds`) and patches them (`updates`, type and comment included).
  * - `linkTransfer` links two stored activities as a transfer pair; `getTransferPair` answers it for
- *   either leg (null when unlinked).
+ *   either leg (null when unlinked). Deleting an activity (`saveMany` `deleteIds`) drops its link.
  */
 import type { AddonContext, ActivityImport } from "@wealthfolio/addon-sdk";
 import { minorUnit } from "../money";
 
 export const STORAGE_CAP_BYTES = 244 * 1024;
+/** The storage and secret keys the host accepts. */
+export const STORAGE_KEY_RE = /^[A-Za-z0-9_.:-]+$/;
 
 export interface StoredActivity {
   id: string;
@@ -105,9 +108,16 @@ export class FakeWealthfolio {
   constructor(accounts: FakeAccount[], opts: { search?: (q: string) => unknown[] } = {}) {
     this.accounts = [...accounts];
     const search = opts.search ?? ((q: string) => [{ symbol: q.split("_")[0], exchangeMic: "XLON", currency: "GBP", score: 1, quoteType: "EQUITY" }]);
+    // Like the host, a key may only use letters, digits and `_ . : -`.
+    const checkKey = (k: string) => {
+      if (!STORAGE_KEY_RE.test(k)) {
+        throw new Error("Invalid storage key: only letters, digits, and the characters _ . : - are allowed");
+      }
+    };
     const kv = (m: Map<string, string>, capped: boolean) => ({
-      get: async (k: string) => m.get(k) ?? null,
+      get: async (k: string) => (checkKey(k), m.get(k) ?? null),
       set: async (k: string, v: string) => {
+        checkKey(k);
         const n = bytes(v);
         if (capped) {
           if (n > STORAGE_CAP_BYTES) {
@@ -117,7 +127,7 @@ export class FakeWealthfolio {
         }
         m.set(k, v);
       },
-      delete: async (k: string) => void m.delete(k),
+      delete: async (k: string) => (checkKey(k), void m.delete(k)),
     });
     this.ctx = {
       api: {
@@ -155,6 +165,8 @@ export class FakeWealthfolio {
           saveMany: async (req: { deleteIds?: string[]; updates?: Record<string, unknown>[] }) => {
             const gone = new Set(req.deleteIds ?? []);
             for (const [id, list] of this.stored) this.stored.set(id, list.filter((r) => !gone.has(r.id)));
+            // A link cannot outlive either of its rows.
+            for (let i = this.links.length - 1; i >= 0; i--) if (this.links[i]!.some((x) => gone.has(x))) this.links.splice(i, 1);
             // An update patches the fields it carries (the host's patch semantics); a missing id fails.
             const errors: { id?: string; action: string; message: string }[] = [];
             for (const u of req.updates ?? []) {

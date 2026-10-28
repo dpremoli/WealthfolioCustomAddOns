@@ -31,4 +31,22 @@ describe("FakeWealthfolio transfer links", () => {
     expect(pair?.transferIn.id).toBe(inn.id);
     expect(host.links).toEqual([[out.id, inn.id]]);
   });
+
+  it("drops the link of a deleted activity, so the other leg can be linked again", async () => {
+    const { host, out, inn } = await setup();
+    await host.ctx.api.activities.linkTransfer(out.id, inn.id);
+    await host.ctx.api.activities.saveMany({ deleteIds: [out.id] });
+    expect(host.links).toEqual([]);
+    expect(await host.ctx.api.activities.getTransferPair(inn.id)).toBeNull();
+  });
+});
+
+describe("FakeWealthfolio storage keys", () => {
+  it("refuses a key with characters the host does not allow, like the host", async () => {
+    const host = new FakeWealthfolio([]);
+    await expect(host.ctx.api.storage.set("payslips/2026", "[]")).rejects.toThrow(/Invalid storage key/);
+    await expect(host.ctx.api.storage.get("a b")).rejects.toThrow(/Invalid storage key/);
+    await host.ctx.api.storage.set("payslips:2026_x.y-z", "[]");
+    expect(await host.ctx.api.storage.get("payslips:2026_x.y-z")).toBe("[]");
+  });
 });

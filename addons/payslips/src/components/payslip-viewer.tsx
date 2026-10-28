@@ -17,7 +17,9 @@ import {
 import { useEffect, useState } from "react";
 import { QUERY_ROOT } from "../hooks/use-payslip-data";
 import { downloadPdf, loadPdf } from "../lib/pdf-store";
+import { renderPdfPages } from "../lib/pdf-render";
 import { extractPdfLines } from "../lib/pdf-text";
+import { PayslipPageView } from "./payslip-page-view";
 
 interface Loaded {
   bytes: Uint8Array;
@@ -38,7 +40,7 @@ async function loadViewed(ctx: AddonContext, payDate: string): Promise<Loaded> {
 
 const messageOf = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
-/** A dialog with the stored PDF of one payslip: its text (always works) and the original PDF (may not render in a sandboxed frame). */
+/** A dialog with the stored PDF of one payslip: the page drawn from its content (text as a fallback) and the original PDF (may not render in a sandboxed frame). */
 export function PayslipViewer({ ctx, payDate, onClose }: { ctx: AddonContext; payDate: string; onClose: () => void }) {
   const { data, error, isLoading } = useQuery({
     queryKey: [QUERY_ROOT, "pdf-view", payDate],
@@ -47,12 +49,25 @@ export function PayslipViewer({ ctx, payDate, onClose }: { ctx: AddonContext; pa
     // A missing PDF will still be missing a second later: say so at once.
     retry: false,
   });
+  // The drawn pages; when they cannot be drawn the Payslip tab shows the PDF's text instead.
+  const drawing = useQuery({
+    queryKey: [QUERY_ROOT, "pdf-render", payDate],
+    queryFn: () => renderPdfPages(data!.bytes),
+    enabled: !!data,
+    // The stored bytes of a pay date do not change while the dialog is open: draw them once.
+    staleTime: Infinity,
+    gcTime: 0,
+    retry: false,
+  });
+  // Pages that drew no text at all (it sits where the renderer does not look, say in a form)
+  // would show a blank sheet while the PDF does have text: show that instead.
+  const drawn = drawing.data && !(data?.lines?.length && drawing.data.every((page) => page.texts.length === 0)) ? drawing.data : null;
   const download = useMutation({ mutationFn: () => downloadPdf(ctx, payDate) });
   const failure = error ?? download.error;
 
   return (
     <Dialog open onOpenChange={(open: boolean) => !open && onClose()}>
-      <DialogContent className="max-w-3xl">
+      <DialogContent className="max-w-4xl">
         <DialogHeader>
           <DialogTitle>Payslip {payDate}</DialogTitle>
           <DialogDescription>The copy of the PDF kept in Wealthfolio.</DialogDescription>
@@ -79,7 +94,15 @@ export function PayslipViewer({ ctx, payDate, onClose }: { ctx: AddonContext; pa
               </Button>
             </div>
             <TabsContent value="payslip" className="mt-3">
-              {data.lines ? (
+              {drawn ? (
+                <div className="flex max-h-[70vh] flex-col gap-4 overflow-y-auto rounded bg-neutral-200/60 p-3 dark:bg-neutral-800/60">
+                  {drawn.map((page, i) => (
+                    <PayslipPageView key={i} drawing={page} />
+                  ))}
+                </div>
+              ) : drawing.isLoading ? (
+                <p className="text-muted-foreground text-sm">Drawing the payslip…</p>
+              ) : data.lines ? (
                 <pre className="bg-muted/40 max-h-[60vh] overflow-auto rounded border p-3 font-mono text-xs leading-tight whitespace-pre">
                   {data.lines.join("\n")}
                 </pre>

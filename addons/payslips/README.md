@@ -39,9 +39,14 @@ Part of the [Wealthfolio custom add-ons monorepo](../../README.md). Requires **W
    block storing; a mismatch shows as a warning on the row.
    **Expense refunds** (lines such as *Gen Trav & Sub* or *Telephone Costs*: in Total Payments but
    not in Gross Pay) are told apart from pay and shown separately.
-   **View** opens the payslip inside Wealthfolio (its text, laid out as on the PDF, and an
+   **View** opens the payslip inside Wealthfolio (drawn as the page itself — rules, logos and text
+   where the PDF puts them — falling back to its text, and an
    *Original PDF* tab, which Wealthfolio may not be able to display inside an add-on);
    **Download** saves the PDF through Wealthfolio's save dialog.
+   **Refresh** (page header) re-reads every payslip whose PDF is kept, with the current version of
+   the parser, and reloads the bank deposits for matching. Payslips imported by an older version
+   are corrected this way without uploading them again; ones with no kept PDF are listed so you can
+   import them again. It never deletes anything.
 2. **Salary matching.** For each payslip the add-on looks for a GBP deposit equal to the net pay,
    within a few days of the pay date (default 4, set in Settings), in the accounts you chose
    (default: your active GBP cash accounts). One close match is shown as *Matched*; several

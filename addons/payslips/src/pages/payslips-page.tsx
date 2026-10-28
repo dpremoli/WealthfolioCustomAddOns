@@ -29,6 +29,7 @@ import { employeeNi, grossBeforeSacrifice, incomeTax, ussSacrifice, type Payslip
 import { parsePayslipPdf } from "../lib/payslip-parser";
 import { deletePdf, downloadPdf, getKeepPdfs, savePdf } from "../lib/pdf-store";
 import { readBytes } from "../lib/read-file";
+import { refreshPayslips, type RefreshResult } from "../lib/refresh";
 import { tagDeposit, type SalaryMatch } from "../lib/salary-match";
 import { deletePayslip, saveLink, savePayslips } from "../lib/store";
 import { periodLabel } from "../lib/tax-year";
@@ -117,6 +118,11 @@ export default function PayslipsPage({ ctx }: AddonPageProps) {
     },
     onSuccess: refresh,
   });
+  // Re-reads the stored PDFs, then recomputes everything against the bank deposits as they are now.
+  const reread = useMutation({
+    mutationFn: () => refreshPayslips(ctx),
+    onSettled: refresh,
+  });
   const download = useMutation({ mutationFn: (payDate: string) => downloadPdf(ctx, payDate) });
   const remove = useMutation({
     mutationFn: (payDate: string) => deletePayslip(ctx, payDate),
@@ -144,16 +150,35 @@ export default function PayslipsPage({ ctx }: AddonPageProps) {
   };
 
   const result = upload.data;
-  const failure = upload.error ?? tag.error ?? choose.error ?? download.error ?? remove.error ?? loadError;
+  const failure = upload.error ?? tag.error ?? choose.error ?? download.error ?? remove.error ?? reread.error ?? loadError;
 
   return (
     <PageShell
       iconName="Receipt"
       heading="Payslips"
       description="Import payslip PDFs, match net pay to your salary deposits and keep the figures per tax year."
-      actions={<PayslipsNav ctx={ctx} current="payslips" />}
+      actions={
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={reread.isPending}
+            title="Re-read the stored PDFs and look for new bank deposits again"
+            onClick={() => reread.mutate()}
+          >
+            {reread.isPending ? (
+              <Icons.Spinner size={14} className="mr-1 animate-spin" />
+            ) : (
+              <Icons.Refresh size={14} className="mr-1" />
+            )}
+            {reread.isPending ? "Refreshing…" : "Refresh"}
+          </Button>
+          <PayslipsNav ctx={ctx} current="payslips" />
+        </div>
+      }
       className="max-w-6xl"
     >
+      {reread.data && <RefreshSummary result={reread.data} />}
       <Card
         onDragOver={(e: DragEvent) => {
           e.preventDefault();
@@ -381,6 +406,26 @@ export default function PayslipsPage({ ctx }: AddonPageProps) {
       </Card>
       {viewing && <PayslipViewer ctx={ctx} payDate={viewing} onClose={() => setViewing(null)} />}
     </PageShell>
+  );
+}
+
+function RefreshSummary({ result }: { result: RefreshResult }) {
+  const { reparsed, unchanged, failed, withoutPdf } = result;
+  const n = withoutPdf.length;
+  const noPdf = n > 0 ? ` ${n} ${n === 1 ? "has" : "have"} no stored PDF — import ${n === 1 ? "it" : "them"} again to update.` : "";
+  return (
+    <div className="space-y-1 text-sm" role="status">
+      <p>{`Re-read ${reparsed + unchanged} ${reparsed + unchanged === 1 ? "payslip" : "payslips"} (${unchanged} unchanged).${noPdf}`}</p>
+      {failed.length > 0 && (
+        <ul className="space-y-1 text-destructive">
+          {failed.map((f) => (
+            <li key={f.payDate}>
+              <span className="font-medium">{f.payDate}</span>: {f.reason}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 

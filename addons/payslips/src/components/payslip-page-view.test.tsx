@@ -20,8 +20,8 @@ describe("PayslipPageView", () => {
     const { container } = render(<PayslipPageView drawing={drawing()} />);
     const svg = container.querySelector("svg")!;
     expect(svg.getAttribute("viewBox")).toBe("0 0 595 842");
-    expect(svg.getAttribute("width")).toBe("100%");
-    expect(svg.getAttribute("height")).toBeNull();
+    expect(svg.style.width).toBe("100%");
+    expect(svg.style.height).toBe("auto");
   });
 
   it("flips y, sets the font and keeps spaces in text", () => {

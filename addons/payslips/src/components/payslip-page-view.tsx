@@ -39,9 +39,19 @@ function maskToDataUrl(image: DrawnImage): string | null {
 
 /**
  * One drawn PDF page as an SVG on white paper. It is a document, so the ink is black whatever
- * the app's theme; the SVG scales to the width of its container and keeps the page's proportions.
+ * the app's theme; the SVG keeps the page's proportions. Sizes are inline styles (the add-on ships
+ * no stylesheet, so only classes the host's CSS happens to contain would apply).
  */
-export function PayslipPageView({ drawing }: { drawing: PageDrawing }) {
+export function PayslipPageView({
+  drawing,
+  fit = "width",
+  headerHeight = "12rem",
+}: {
+  drawing: PageDrawing;
+  /** "width": as wide as the container; "page": as tall as the window less `headerHeight`, centred. */
+  fit?: "width" | "page";
+  headerHeight?: string;
+}) {
   const { width, height, texts, lines, rects, images } = drawing;
   const pictures = useMemo(
     () => images.flatMap((image) => {
@@ -52,13 +62,19 @@ export function PayslipPageView({ drawing }: { drawing: PageDrawing }) {
   );
 
   return (
-    <div className="mx-auto w-full max-w-[860px] rounded-sm border border-neutral-300 bg-white text-black shadow-md">
+    <div
+      className="rounded-sm border border-neutral-300 bg-white text-black shadow-md"
+      style={{ width: fit === "width" ? "100%" : "auto", maxWidth: "100%", margin: "0 auto", boxSizing: "border-box" }}
+    >
       <svg
         viewBox={`0 0 ${width} ${height}`}
-        width="100%"
         role="img"
         aria-label="Payslip page"
-        className="block"
+        style={
+          fit === "width"
+            ? { width: "100%", height: "auto", display: "block" }
+            : { width: "auto", height: `calc(100vh - ${headerHeight})`, maxWidth: "100%", display: "block", margin: "0 auto" }
+        }
         xmlns="http://www.w3.org/2000/svg"
       >
         <rect x={0} y={0} width={width} height={height} fill="#ffffff" />
